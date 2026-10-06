@@ -4,8 +4,13 @@
  * sample) run on a guest service thread, as Miles calls them from its own thread on Windows.
  * Handles are small guest blocks; volumes are 0..127 (Miles 6). */
 #include "w32.h"
+#include "host_audio.h"
+#ifdef __APPLE__
 #include <AudioToolbox/AudioToolbox.h>
-#include <os/lock.h>
+#else
+#include <sndfile.h>
+#endif
+
 #include <math.h>
 #include <unistd.h>
 
@@ -24,7 +29,7 @@ typedef struct Voice {
 } Voice;
 #define MAXV 512
 static Voice voices[MAXV];
-static os_unfair_lock mix_lock = OS_UNFAIR_LOCK_INIT;        /* voices + listener, shared with the render callback */
+static pthread_mutex_t mix_lock = PTHREAD_MUTEX_INITIALIZER;        /* voices + listener, shared with the render callback */
 static pthread_mutex_t api_lock = PTHREAD_MUTEX_INITIALIZER;
 static int master_vol = 127, started;
 static float lx, ly, lz, lfx = 0, lfy = 0, lfz = 1, lux = 0, luy = 1, luz = 0;
@@ -33,7 +38,7 @@ static uint32_t file_open, file_close, file_seek, file_read;
 /* Miles 6 defaults: DIG_RESAMPLING_TOLERANCE, DIG_MIXER_CHANNELS, DIG_DEFAULT_VOLUME, MDI_SERVICE_RATE, MDI_SEQUENCES,
  * MDI_DEFAULT_VOLUME, MDI_QUANT_ADVANCE, MDI_ALLOW_LOOP_CONTROL, MDI_DEFAULT_BEND_RANGE */
 static uint32_t prefs[64] = {131, 64, 127, 120, 8, 127, 1, 0, 2};
-static AudioComponentInstance out_unit;
+static DsAudio * out_unit;
 
 static uint32_t new_handle(int kind)
 {
@@ -55,15 +60,18 @@ static void pcm_release(Pcm *p) { if (p && __atomic_sub_fetch(&p->refs, 1, __ATO
 
 /* ---------------------------------------------------------------- decoding (AudioToolbox, from memory) */
 typedef struct Mem { const uint8_t *p; uint32_t n; } Mem;
+#ifdef __APPLE__
 static OSStatus mem_read(void *u, SInt64 pos, UInt32 req, void *buf, UInt32 *got)
 { Mem *m = u; if (pos >= m->n) { *got = 0; return 0; } UInt32 n = (UInt32)(m->n - pos) < req ? (UInt32)(m->n - pos) : req; memcpy(buf, m->p + pos, n); *got = n; return 0; }
 static SInt64 mem_size(void *u) { return ((Mem *)u)->n; }
+#endif
 static uint32_t data_size(const uint8_t *d, uint32_t limit)           /* size of a WAV image; MP3: limit */
 {
     if (!memcmp(d, "RIFF", 4)) { uint32_t n; memcpy(&n, d + 4, 4); return n + 8; }
     return limit;
 }
 typedef struct DecJob { Pcm *p; uint8_t *bytes; uint32_t n; } DecJob;
+#ifdef __APPLE__
 static void decode_into(Pcm *p, const uint8_t *bytes, uint32_t n, int incremental)
 {
     Mem m = {bytes, n}; AudioFileID af = 0; ExtAudioFileRef ef = 0;
@@ -81,12 +89,12 @@ static void decode_into(Pcm *p, const uint8_t *bytes, uint32_t n, int incrementa
     SInt64 total = 0; sz = sizeof total; ExtAudioFileGetProperty(ef, kExtAudioFileProperty_FileLengthFrames, &sz, &total);
     uint32_t cap = total > 0 ? (uint32_t)total + 4096 : 1u << 20;
     float *data = malloc((size_t)cap * (size_t)ch * 4);
-    os_unfair_lock_lock(&mix_lock); p->data = data; p->cap = cap; p->ch = ch; p->rate = src.mSampleRate; p->frames = 0; os_unfair_lock_unlock(&mix_lock);
+    pthread_mutex_lock(&mix_lock); p->data = data; p->cap = cap; p->ch = ch; p->rate = src.mSampleRate; p->frames = 0; pthread_mutex_unlock(&mix_lock);
     for (;;) {
         if (p->frames + 4096 > p->cap) {                        /* grow (the render callback reads under mix_lock) */
             uint32_t nc = p->cap * 2; float *nd = malloc((size_t)nc * (size_t)ch * 4);
             memcpy(nd, p->data, (size_t)p->frames * (size_t)ch * 4);
-            os_unfair_lock_lock(&mix_lock); float *od = p->data; p->data = nd; p->cap = nc; os_unfair_lock_unlock(&mix_lock); free(od);
+            pthread_mutex_lock(&mix_lock); float *od = p->data; p->data = nd; p->cap = nc; pthread_mutex_unlock(&mix_lock); free(od);
         }
         AudioBufferList bl; bl.mNumberBuffers = 1; bl.mBuffers[0].mNumberChannels = (UInt32)ch;
         UInt32 frames = 4096; bl.mBuffers[0].mDataByteSize = frames * 4u * (UInt32)ch; bl.mBuffers[0].mData = p->data + (size_t)p->frames * (size_t)ch;
@@ -97,6 +105,34 @@ static void decode_into(Pcm *p, const uint8_t *bytes, uint32_t n, int incrementa
     ExtAudioFileDispose(ef); AudioFileClose(af);
     __atomic_store_n(&p->done, 1, __ATOMIC_RELEASE);
 }
+#else
+typedef struct { const uint8_t *p; sf_count_t size, at; } SndMemory;
+static sf_count_t snd_size(void *u) { return ((SndMemory *)u)->size; }
+static sf_count_t snd_seek(sf_count_t off, int whence, void *u) {
+    SndMemory *m = u; sf_count_t at = (whence == SEEK_SET ? 0 : whence == SEEK_CUR ? m->at : m->size) + off;
+    if (at < 0 || at > m->size) return -1; return m->at = at;
+}
+static sf_count_t snd_read(void *out, sf_count_t n, void *u) {
+    SndMemory *m = u; if (n > m->size - m->at) n = m->size - m->at;
+    memcpy(out, m->p + m->at, (size_t)n); m->at += n; return n;
+}
+static sf_count_t snd_tell(void *u) { return ((SndMemory *)u)->at; }
+static void decode_into(Pcm *p, const uint8_t *bytes, uint32_t n, int incremental) {
+    (void)incremental; SndMemory m = {bytes, n, 0}; SF_INFO info = {0};
+    SF_VIRTUAL_IO io = {snd_size, snd_seek, snd_read, NULL, snd_tell};
+    SNDFILE *sf = sf_open_virtual(&io, SFM_READ, &info, &m);
+    if (!sf || info.channels < 1 || info.channels > 2 || info.frames <= 0 || info.frames > UINT32_MAX) {
+        if (sf) sf_close(sf); __atomic_store_n(&p->done, 1, __ATOMIC_RELEASE); return;
+    }
+    float *samples = malloc((size_t)info.frames * info.channels * sizeof(float));
+    if (!samples) { sf_close(sf); __atomic_store_n(&p->done, 1, __ATOMIC_RELEASE); return; }
+    sf_count_t frames = sf_readf_float(sf, samples, info.frames); sf_close(sf);
+    pthread_mutex_lock(&mix_lock); p->data = samples; p->cap = info.frames; p->ch = info.channels; p->rate = info.samplerate;
+    __atomic_store_n(&p->frames, (uint32_t)frames, __ATOMIC_RELEASE); pthread_mutex_unlock(&mix_lock);
+    __atomic_store_n(&p->done, 1, __ATOMIC_RELEASE);
+}
+#endif
+
 static void *decode_thread(void *a) { DecJob *j = a; decode_into(j->p, j->bytes, j->n, 1); free(j->bytes); pcm_release(j->p); free(j); return 0; }
 /* decoded sounds are cached (the game re-submits the same in-memory WAV for every play): key = address, size and a
  * hash of the data, so a reused buffer with new contents decodes again */
@@ -131,12 +167,12 @@ static Pcm *decode_now(uint32_t image, uint32_t limit)
 
 /* ---------------------------------------------------------------- mixing */
 static float gain_of(int vol) { float g = (vol < 0 ? 0 : vol > 127 ? 127 : vol) / 127.0f; return g * g; }   /* ~perceptual */
-static OSStatus render(void *u, AudioUnitRenderActionFlags *fl, const AudioTimeStamp *ts, UInt32 bus, UInt32 n, AudioBufferList *io)
+static void render(void *u, void *buffer, uint32_t n)
 {
-    (void)u; (void)fl; (void)ts; (void)bus;
-    float *out = io->mBuffers[0].mData; memset(out, 0, (size_t)n * 8);
+    (void)u;
+    float *out = buffer; memset(out, 0, (size_t)n * 8);
     static uint32_t ended[MAXV]; int nend = 0;
-    os_unfair_lock_lock(&mix_lock);
+    pthread_mutex_lock(&mix_lock);
     float master = gain_of(master_vol);
     for (int k = 0; k < MAXV; k++) {
         Voice *v = &voices[k]; Pcm *p = v->pcm;
@@ -151,7 +187,7 @@ static OSStatus render(void *u, AudioUnitRenderActionFlags *fl, const AudioTimeS
         }
         double step = (v->rate_hz > 0 ? v->rate_hz : p->rate) / OUT_RATE;
         uint32_t frames = __atomic_load_n(&p->frames, __ATOMIC_ACQUIRE); int done = __atomic_load_n(&p->done, __ATOMIC_ACQUIRE);
-        for (UInt32 i = 0; i < n; i++) {
+        for (uint32_t i = 0; i < n; i++) {
             if (v->pos >= frames) {
                 if (!done) break;                                 /* stream not decoded this far yet */
                 if (v->loops != 1) { if (v->loops > 1) v->loops--; v->pos = 0; if (!frames) break; }
@@ -165,31 +201,25 @@ static OSStatus render(void *u, AudioUnitRenderActionFlags *fl, const AudioTimeS
             v->pos += step;
         }
     }
-    os_unfair_lock_unlock(&mix_lock);
-    for (UInt32 i = 0; i < 2 * n; i++) out[i] = out[i] > 1 ? 1 : out[i] < -1 ? -1 : out[i];
+    pthread_mutex_unlock(&mix_lock);
+    for (uint32_t i = 0; i < 2 * n; i++) out[i] = out[i] > 1 ? 1 : out[i] < -1 ? -1 : out[i];
     {   /* W32_AUDIO_MUTE=1 (test runs): mix as usual, report the level once per second, output silence */
         static int mute = -1; if (mute < 0) mute = getenv("W32_AUDIO_MUTE") != 0;
         static double acc; static float peak; static int voices_on;
-        for (UInt32 i = 0; i < 2 * n; i++) if (fabsf(out[i]) > peak) peak = fabsf(out[i]);
+        for (uint32_t i = 0; i < 2 * n; i++) if (fabsf(out[i]) > peak) peak = fabsf(out[i]);
         acc += n / OUT_RATE;
         if (acc >= 1.0) { int on = 0; for (int k = 0; k < MAXV; k++) on += voices[k].used && voices[k].status == SMP_PLAYING; voices_on = on;
                           ALOG("output peak %.3f, %d voices playing\n", peak, voices_on); acc = 0; peak = 0; }
         if (mute) memset(out, 0, (size_t)n * 8);
     }
     if (nend) { extern void miles_queue_eos(const uint32_t *, int); miles_queue_eos(ended, nend); }
-    return 0;
+
 }
 static void start_output(void)
 {
     if (started) return; started = 1;
-    AudioComponentDescription d = {kAudioUnitType_Output, kAudioUnitSubType_DefaultOutput, kAudioUnitManufacturer_Apple, 0, 0};
-    AudioComponent comp = AudioComponentFindNext(0, &d);
-    if (!comp || AudioComponentInstanceNew(comp, &out_unit)) { fprintf(stderr, "audio: no output device\n"); return; }
-    AudioStreamBasicDescription f = {OUT_RATE, kAudioFormatLinearPCM, kAudioFormatFlagIsFloat | kAudioFormatFlagIsPacked, 8, 1, 8, 2, 32, 0};
-    AudioUnitSetProperty(out_unit, kAudioUnitProperty_StreamFormat, kAudioUnitScope_Input, 0, &f, sizeof f);
-    AURenderCallbackStruct cb = {render, 0};
-    AudioUnitSetProperty(out_unit, kAudioUnitProperty_SetRenderCallback, kAudioUnitScope_Input, 0, &cb, sizeof cb);
-    if (AudioUnitInitialize(out_unit) || AudioOutputUnitStart(out_unit)) fprintf(stderr, "audio: cannot start output\n");
+    out_unit = ds_audio_open(OUT_RATE, 2, 32, 1, render, NULL);
+    if (!out_unit) fprintf(stderr, "audio: cannot start output\n");
 }
 
 /* ---------------------------------------------------------------- callbacks on a guest service thread */
@@ -238,7 +268,7 @@ static void ensure_service(void) { if (!svc_started) { svc_started = 1; extern i
 #define UNLOCK pthread_mutex_unlock(&api_lock)
 static uint32_t str_in_guest(const char *s) { static uint32_t g[4]; static int k; uint32_t a = g[k & 3]; if (!a) a = g[k & 3] = heap_alloc(w32_process_heap, 8, 256); k++; snprintf((char *)GP(a), 256, "%s", s); return a; }
 IMPL(mss32, AIL_startup) { RET(1, 0); }
-IMPL(mss32, AIL_shutdown) { if (out_unit) AudioOutputUnitStop(out_unit); RET(0, 0); }
+IMPL(mss32, AIL_shutdown) { if (out_unit) ds_audio_stop(out_unit); RET(0, 0); }
 IMPL(mss32, AIL_set_redist_directory) { RET(str_in_guest(""), 1); }
 IMPL(mss32, AIL_last_error) { RET(str_in_guest(""), 0); }
 IMPL(mss32, AIL_set_preference) { uint32_t n = ARG(0) & 63, o = prefs[n]; prefs[n] = ARG(1); ALOG("set_preference %u = %d\n", ARG(0), (int)ARG(1)); RET(o, 2); }
@@ -257,20 +287,20 @@ IMPL(mss32, AIL_set_digital_master_volume) { master_vol = (int)ARG(1); RET(0, 2)
 IMPL(mss32, AIL_allocate_sample_handle) { LOCK; uint32_t h = new_handle(V_2D); UNLOCK; RET(h, 1); }
 static void voice_free(Voice *v)
 {
-    os_unfair_lock_lock(&mix_lock); Pcm *p = v->pcm; v->pcm = 0; v->used = 0; os_unfair_lock_unlock(&mix_lock);
+    pthread_mutex_lock(&mix_lock); Pcm *p = v->pcm; v->pcm = 0; v->used = 0; pthread_mutex_unlock(&mix_lock);
     pcm_release(p); heap_free(w32_process_heap, v->handle);
 }
 IMPL(mss32, AIL_release_sample_handle) { LOCK; Voice *v = V(ARG(0)); if (v) voice_free(v); UNLOCK; RET(0, 1); }
 IMPL(mss32, AIL_init_sample)
 {
     LOCK; Voice *v = V(ARG(0));
-    if (v) { os_unfair_lock_lock(&mix_lock); Pcm *p = v->pcm; v->pcm = 0; v->status = SMP_DONE; v->pos = 0; v->loops = 1; v->volume = 127; v->rate_hz = 0; os_unfair_lock_unlock(&mix_lock); pcm_release(p); }
+    if (v) { pthread_mutex_lock(&mix_lock); Pcm *p = v->pcm; v->pcm = 0; v->status = SMP_DONE; v->pos = 0; v->loops = 1; v->volume = 127; v->rate_hz = 0; pthread_mutex_unlock(&mix_lock); pcm_release(p); }
     UNLOCK; RET(0, 1);
 }
 static int set_file(Voice *v, uint32_t image, uint32_t limit)
 {
     Pcm *p = decode_now(image, limit);
-    os_unfair_lock_lock(&mix_lock); Pcm *o = v->pcm; v->pcm = p; v->pos = 0; v->status = SMP_DONE; v->rate_hz = 0; os_unfair_lock_unlock(&mix_lock);
+    pthread_mutex_lock(&mix_lock); Pcm *o = v->pcm; v->pcm = p; v->pos = 0; v->status = SMP_DONE; v->rate_hz = 0; pthread_mutex_unlock(&mix_lock);
     pcm_release(o);
     return p->frames > 0;
 }
@@ -279,8 +309,8 @@ IMPL(mss32, AIL_set_sample_file)
     LOCK; Voice *v = V(ARG(0)); int ok = v && ARG(1) ? set_file(v, ARG(1), ARG(2) && ARG(2) != 0xffffffffu ? ARG(2) : 0x1000000u) : 0; UNLOCK;
     RET(ok, 3);
 }
-static void set_status(Voice *v, int st) { os_unfair_lock_lock(&mix_lock); v->status = st; os_unfair_lock_unlock(&mix_lock); }
-IMPL(mss32, AIL_start_sample) { LOCK; Voice *v = V(ARG(0)); if (v) { os_unfair_lock_lock(&mix_lock); v->pos = 0; v->status = SMP_PLAYING; os_unfair_lock_unlock(&mix_lock); } UNLOCK; RET(0, 1); }
+static void set_status(Voice *v, int st) { pthread_mutex_lock(&mix_lock); v->status = st; pthread_mutex_unlock(&mix_lock); }
+IMPL(mss32, AIL_start_sample) { LOCK; Voice *v = V(ARG(0)); if (v) { pthread_mutex_lock(&mix_lock); v->pos = 0; v->status = SMP_PLAYING; pthread_mutex_unlock(&mix_lock); } UNLOCK; RET(0, 1); }
 IMPL(mss32, AIL_stop_sample) { LOCK; Voice *v = V(ARG(0)); if (v && v->status == SMP_PLAYING) set_status(v, SMP_STOPPED); UNLOCK; RET(0, 1); }
 IMPL(mss32, AIL_resume_sample) { LOCK; Voice *v = V(ARG(0)); if (v && v->status == SMP_STOPPED) set_status(v, SMP_PLAYING); UNLOCK; RET(0, 1); }
 IMPL(mss32, AIL_end_sample) { LOCK; Voice *v = V(ARG(0)); if (v) set_status(v, SMP_DONE); UNLOCK; RET(0, 1); }
@@ -318,7 +348,7 @@ IMPL(mss32, AIL_close_3D_listener) { RET(0, 1); }
 IMPL(mss32, AIL_allocate_3D_sample_handle) { LOCK; uint32_t h = new_handle(V_3D); UNLOCK; RET(h, 1); }
 IMPL(mss32, AIL_release_3D_sample_handle) { LOCK; Voice *v = V(ARG(0)); if (v) voice_free(v); UNLOCK; RET(0, 1); }
 IMPL(mss32, AIL_set_3D_sample_file) { LOCK; Voice *v = V(ARG(0)); int ok = v && ARG(1) ? set_file(v, ARG(1), 0x1000000u) : 0; UNLOCK; RET(ok, 2); }
-IMPL(mss32, AIL_start_3D_sample) { LOCK; Voice *v = V(ARG(0)); if (v) { os_unfair_lock_lock(&mix_lock); v->pos = 0; v->status = SMP_PLAYING; os_unfair_lock_unlock(&mix_lock); } UNLOCK; RET(0, 1); }
+IMPL(mss32, AIL_start_3D_sample) { LOCK; Voice *v = V(ARG(0)); if (v) { pthread_mutex_lock(&mix_lock); v->pos = 0; v->status = SMP_PLAYING; pthread_mutex_unlock(&mix_lock); } UNLOCK; RET(0, 1); }
 IMPL(mss32, AIL_stop_3D_sample) { LOCK; Voice *v = V(ARG(0)); if (v && v->status == SMP_PLAYING) set_status(v, SMP_STOPPED); UNLOCK; RET(0, 1); }
 IMPL(mss32, AIL_resume_3D_sample) { LOCK; Voice *v = V(ARG(0)); if (v && v->status == SMP_STOPPED) set_status(v, SMP_PLAYING); UNLOCK; RET(0, 1); }
 IMPL(mss32, AIL_end_3D_sample) { LOCK; Voice *v = V(ARG(0)); if (v) set_status(v, SMP_DONE); UNLOCK; RET(0, 1); }
@@ -342,18 +372,18 @@ static float f32(uint32_t u) { float f; memcpy(&f, &u, 4); return f; }
 IMPL(mss32, AIL_set_3D_position)
 {
     uint32_t o = ARG(0); float x = f32(ARG(1)), y = f32(ARG(2)), z = f32(ARG(3));
-    os_unfair_lock_lock(&mix_lock);
+    pthread_mutex_lock(&mix_lock);
     if (o == listener_h) { lx = x; ly = y; lz = z; }
     else { Voice *v = V(o); if (v) { v->x = x; v->y = y; v->z = z; } }
-    os_unfair_lock_unlock(&mix_lock);
+    pthread_mutex_unlock(&mix_lock);
     RET(0, 4);
 }
 IMPL(mss32, AIL_set_3D_orientation)
 {
     if (ARG(0) == listener_h) {
-        os_unfair_lock_lock(&mix_lock);
+        pthread_mutex_lock(&mix_lock);
         lfx = f32(ARG(1)); lfy = f32(ARG(2)); lfz = f32(ARG(3)); lux = f32(ARG(4)); luy = f32(ARG(5)); luz = f32(ARG(6));
-        os_unfair_lock_unlock(&mix_lock);
+        pthread_mutex_unlock(&mix_lock);
     }
     RET(0, 7);
 }
@@ -385,7 +415,7 @@ IMPL(mss32, AIL_open_stream)
     UNLOCK; RET(h, 3);
 }
 IMPL(mss32, AIL_close_stream) { LOCK; Voice *v = V(ARG(0)); if (v) voice_free(v); UNLOCK; RET(0, 1); }
-IMPL(mss32, AIL_start_stream) { LOCK; Voice *v = V(ARG(0)); if (v) { os_unfair_lock_lock(&mix_lock); v->pos = 0; v->status = SMP_PLAYING; os_unfair_lock_unlock(&mix_lock); } UNLOCK; RET(0, 1); }
+IMPL(mss32, AIL_start_stream) { LOCK; Voice *v = V(ARG(0)); if (v) { pthread_mutex_lock(&mix_lock); v->pos = 0; v->status = SMP_PLAYING; pthread_mutex_unlock(&mix_lock); } UNLOCK; RET(0, 1); }
 IMPL(mss32, AIL_pause_stream)
 {
     LOCK; Voice *v = V(ARG(0));

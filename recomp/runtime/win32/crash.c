@@ -1,3 +1,4 @@
+#include "platform.h"
 /* Crash and hang reports for the native build.
  *
  * Every thread that runs game or runtime code registers here (name, its last Windows calls, what it is blocked on).
@@ -16,12 +17,23 @@
 #include <fcntl.h>
 #include <time.h>
 #include <unistd.h>
+#ifdef __APPLE__
 #include <sys/sysctl.h>
+#endif
 #include <sys/utsname.h>
+#ifdef __APPLE__
 #include <mach/mach.h>
 #include <mach/mach_vm.h>
+#else
+#include <sys/uio.h>
+#include <sys/sysinfo.h>
+#endif
 #include <sys/stat.h>
+#ifdef __APPLE__
 #include <mach-o/dyld.h>
+#else
+#define SIGINFO SIGUSR2
+#endif
 
 typedef struct ThreadInfo {
     int used; pthread_t pt; char name[48]; Ctx **ctxp;
@@ -36,9 +48,10 @@ extern __thread Ctx *w32_cur_ctx;
 static pthread_key_t tkey;
 static char report_dir[1100], log_path[1100], build_id[64], last_report[1300];
 static int inited; static volatile int writing; static volatile uint64_t last_written;
-static volatile uint64_t hb[4], hb_count[4], t_start;      /* heartbeats: 0 frame, 1 message pump, 2 macOS UI, 3 shown on screen */
+static _Atomic uint64_t hb[4], hb_count[4];
+static uint64_t t_start;      /* heartbeats: 0 frame, 1 message pump, 2 host UI, 3 shown on screen */
 
-static uint64_t now_ns(void) { return clock_gettime_nsec_np(CLOCK_UPTIME_RAW); }   /* stops while the Mac sleeps */
+static uint64_t now_ns(void) { return ds_clock_ns(); }   /* stops while the Mac sleeps */
 static void on_thread_exit(void *p) { ThreadInfo *t = p; if (t) t->used = 0; }
 
 void w32_crash_thread(const char *name)
@@ -78,8 +91,13 @@ void w32_crash_heartbeat(int which)
 /* ---- safe reads of guest memory (it may be protected) ---- */
 static int safe_read(const void *src, void *dst, size_t n)
 {
+#ifdef __APPLE__
     mach_vm_size_t got = 0;
     return mach_vm_read_overwrite(mach_task_self(), (mach_vm_address_t)src, n, (mach_vm_address_t)dst, &got) == KERN_SUCCESS && got == n;
+#else
+    struct iovec local = {dst, n}, remote = {(void *)src, n};
+    return process_vm_readv(getpid(), &local, 1, &remote, 1, 0) == (ssize_t)n;
+#endif
 }
 static int g32(uint32_t a, uint32_t *v) { return G_MEM && safe_read(G_MEM + a, v, 4); }
 
@@ -171,7 +189,14 @@ static void write_calls(int fd, ThreadInfo *t)
     }
     dprintf(fd, "\n");
 }
-static void sysstr(const char *name, char *out, size_t cap) { size_t n = cap; if (sysctlbyname(name, out, &n, 0, 0)) snprintf(out, cap, "?"); }
+static void sysstr(const char *name, char *out, size_t cap) {
+#ifdef __APPLE__
+    size_t n = cap; if (sysctlbyname(name, out, &n, 0, 0)) snprintf(out, cap, "?");
+#else
+    struct utsname u; uname(&u);
+    snprintf(out, cap, "%s", strstr(name, "model") ? u.machine : strstr(name, "product") ? u.sysname : u.release);
+#endif
+}
 
 /* Writes a report and returns its path. kind: "crash", "hang". */
 const char *w32_crash_report(const char *kind, const char *reason, Ctx *c, uint32_t guest_pc)
@@ -195,10 +220,14 @@ const char *w32_crash_report(const char *kind, const char *reason, Ctx *c, uint3
 
     char os[64], osb[64], model[64]; uint64_t mem = 0; size_t ms = sizeof mem;
     sysstr("kern.osproductversion", os, sizeof os); sysstr("kern.osversion", osb, sizeof osb); sysstr("hw.model", model, sizeof model);
+#ifdef __APPLE__
     sysctlbyname("hw.memsize", &mem, &ms, 0, 0);
+#else
+    struct sysinfo info; if (!sysinfo(&info)) mem = (uint64_t)info.totalram * info.mem_unit; (void)ms;
+#endif
     extern int w32_screen_w, w32_screen_h; extern double w32_screen_scale; void dsr_mode_size(uint32_t *, uint32_t *);
     uint32_t mw = 0, mh = 0; dsr_mode_size(&mw, &mh);
-    dprintf(fd, "SYSTEM\n  build %s; macOS %s (%s); %s, %.0f GB; screen %dx%d @%.0fx; game display mode %ux%u\n",
+    dprintf(fd, "SYSTEM\n  build %s; host %s (%s); %s, %.0f GB; screen %dx%d @%.0fx; game display mode %ux%u\n",
             build_id, os, osb, model, mem / 1073741824.0, w32_screen_w, w32_screen_h, w32_screen_scale, mw, mh);
     dprintf(fd, "  settings:");
     extern char **environ; int any = 0;
@@ -233,9 +262,14 @@ const char *w32_crash_report(const char *kind, const char *reason, Ctx *c, uint3
     for (unsigned k = 0; k < rt_images_n; k++) dprintf(fd, "  %08x  %s\n", rt_images[k].base, *rt_images[k].name ? rt_images[k].name : "DungeonSiege.exe");
 
     /* for developers: host addresses, to map onto exact x86 instructions with tools/symbolize-report.sh (atos) */
+#ifdef __APPLE__
     const struct mach_header *mh0 = 0; intptr_t slide = 0;
     for (uint32_t i = 0; i < _dyld_image_count(); i++) if (strstr(_dyld_get_image_name(i), "DungeonSiegeNative")) { mh0 = _dyld_get_image_header(i); slide = _dyld_get_image_vmaddr_slide(i); break; }
     dprintf(fd, "\nHOST ADDRESSES (load address %p, slide %#lx)\n", (void *)mh0, (long)slide);
+#else
+    Dl_info executable = {0}; dladdr((void *)w32_crash_report, &executable);
+    dprintf(fd, "\nHOST ADDRESSES (ELF load address %p; subtract this base for addr2line)\n", executable.dli_fbase);
+#endif
     for (int k = 0; k < 256; k++) {
         ThreadInfo *t = &threads[k]; if (!t->used || !t->nbt) continue;
         dprintf(fd, "  %s:", t->name); for (int i = 0; i < t->nbt && i < 40; i++) dprintf(fd, " %p", t->bt[i]); dprintf(fd, "\n");
@@ -274,7 +308,7 @@ static void crash_signal(int sig, siginfo_t *si, void *uc)
         extern __thread const char *fault_what;
         char r[300];
         if (sig == SIGABRT) snprintf(r, sizeof r, "The program stopped itself (abort)%s%s.", fault_what ? ": " : "", fault_what ? fault_what : "");
-        else snprintf(r, sizeof r, "The macOS side of the program crashed: %s at address %p.", strsignal(sig), si ? si->si_addr : 0);
+        else snprintf(r, sizeof r, "The native host crashed: %s at address %p.", strsignal(sig), si ? si->si_addr : 0);
         w32_crash_report("crash", r, w32_cur_ctx, 0);
     }
     signal(sig, SIG_DFL); raise(sig);
@@ -295,12 +329,16 @@ static void *watchdog(void *arg)
     for (;;) {
         sleep(1);
         if (limit <= 0) continue;
-        uint64_t now = now_ns();
+        /* Snapshot beats before reading the clock. A concurrently updated
+         * beat newer than 'now' previously wrapped unsigned subtraction and
+         * launched a costly false hang report while frames were flowing. */
         int started = hb_count[0] > 0;
-        double frame_age = (now - hb[0]) / 1e9, pump_age = (now - hb[1]) / 1e9, ui_age = hb[2] ? (now - hb[2]) / 1e9 : 0;
+        uint64_t beat[4]; for(int k=0;k<4;k++) beat[k]=hb[k];
+        uint64_t now = now_ns();
+        double frame_age = (now - beat[0]) / 1e9, pump_age = (now - beat[1]) / 1e9, ui_age = beat[2] ? (now - beat[2]) / 1e9 : 0;
         int stuck = started && frame_age > limit && pump_age > limit;
         if (stuck && !hang_since) {
-            hang_since = hb[0] > hb[1] ? hb[0] : hb[1];            /* the last sign of life */
+            hang_since = beat[0] > beat[1] ? beat[0] : beat[1];            /* the last sign of life */
             char r[300]; snprintf(r, sizeof r, "The game stopped responding: no frame for %.0f s and no window messages handled for %.0f s.", frame_age, pump_age);
             const char *p = w32_crash_report("hang", r, 0, 0); snprintf(hang_path, sizeof hang_path, "%s", p ? p : "");
         } else if (!stuck && hang_since) {
@@ -312,7 +350,7 @@ static void *watchdog(void *arg)
             fprintf(stderr, "DungeonSiegeNative: the game responded again after %.0f s\n", secs);
             hang_since = 0;
         }
-        double shown_age = hb[3] ? (now - hb[3]) / 1e9 : 0;     /* the game draws, but nothing reaches the screen */
+        double shown_age = beat[3] ? (now - beat[3]) / 1e9 : 0;     /* the game draws, but nothing reaches the screen */
         static int shown_reported;
         if (started && frame_age < 2 && shown_age > limit && !shown_reported) {
             shown_reported = 1;
@@ -320,7 +358,7 @@ static void *watchdog(void *arg)
             w32_crash_report("hang", r, 0, 0);
         }
         if (shown_age < 2) shown_reported = 0;
-        if (ui_age > 10 && !ui_reported) { ui_reported = 1; w32_crash_report("hang", "The macOS window (UI thread) stopped responding for 10 s.", 0, 0); }
+        if (ui_age > 10 && !ui_reported) { ui_reported = 1; w32_crash_report("hang", "The host window (UI thread) stopped responding for 10 s.", 0, 0); }
         if (ui_age < 2) ui_reported = 0;
     }
     return 0;
@@ -329,8 +367,14 @@ static void *watchdog(void *arg)
 void w32_crash_init(const char *data_dir, const char *build)
 {
     snprintf(report_dir, sizeof report_dir, "%s/CrashReports", data_dir); mkdir(report_dir, 0755);
-    if (getenv("DS_LOG_FILE")) snprintf(log_path, sizeof log_path, "%s", getenv("DS_LOG_FILE"));   /* the launcher's (Nightly has its own) */
-    else snprintf(log_path, sizeof log_path, "%s/DungeonSiegeNative.log", data_dir);
+    if (getenv("DS_LOG_FILE")) snprintf(log_path, sizeof log_path, "%s", getenv("DS_LOG_FILE"));
+    else {
+#ifdef __linux__
+    snprintf(log_path, sizeof log_path, "%s/last-run.log", data_dir);
+#else
+    snprintf(log_path, sizeof log_path, "%s/DungeonSiegeNative.log", data_dir);
+#endif
+    }
     snprintf(build_id, sizeof build_id, "%s", build ? build : "?");
     pthread_key_create(&tkey, on_thread_exit);
     pthread_mutex_lock(&tlock); for (int k = 0; k < 256; k++) if (threads[k].used && threads[k].pt == pthread_self()) pthread_setspecific(tkey, &threads[k]); pthread_mutex_unlock(&tlock);

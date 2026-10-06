@@ -36,5 +36,19 @@ typedef struct {
     volatile uint32_t cursor_hide;     /* injector: Wine has hidden the pointer and the game is the active app. macOS only
                                           hides the pointer over surfaces of the process that hid it, and the game's pixels
                                           come from the renderer's layer, so the renderer mirrors this (see the renderer.m). */
+    volatile uint32_t consumer_waiting; /* Linux: wake the renderer on new commands */
 } DsrShmHeader;
+#ifdef __linux__
+#include <linux/futex.h>
+#include <sys/syscall.h>
+#include <unistd.h>
+#include <time.h>
+static inline void dsr_wake(volatile uint32_t *p) {
+    syscall(SYS_futex,p,FUTEX_WAKE_PRIVATE,1,0,0,0);
+}
+static inline void dsr_wait(volatile uint32_t *p,uint32_t expected,long ns) {
+    struct timespec timeout={ns/1000000000,ns%1000000000};
+    syscall(SYS_futex,p,FUTEX_WAIT_PRIVATE,expected,&timeout,0,0);
+}
+#endif
 #endif

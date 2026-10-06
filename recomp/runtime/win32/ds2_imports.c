@@ -3,6 +3,11 @@
  * online services) and signature checks (WinTrust) report "not available", as on a PC without them. */
 #include "w32.h"
 #include <sys/stat.h>
+#ifdef __linux__
+#define st_birthtimespec st_ctim
+#define st_atimespec st_atim
+#define st_mtimespec st_mtim
+#endif
 #include <sys/time.h>
 #include <time.h>
 

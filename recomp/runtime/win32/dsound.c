@@ -3,7 +3,7 @@
  * memory, mixed by the Core Audio render callback (any PCM rate/format, volume in 1/100 dB, pan). Play and write cursors
  * advance with the device, as Miles' fragment mixer expects. */
 #include "w32.h"
-#include <AudioToolbox/AudioToolbox.h>
+#include "host_audio.h"
 #include <math.h>
 #include <stdatomic.h>
 
@@ -17,7 +17,7 @@ typedef struct Buf {
 } Buf;
 static Buf bufs[64]; static pthread_mutex_t lock = PTHREAD_MUTEX_INITIALIZER;
 static uint32_t vt_ds, vt_buf, ds_obj; static int ds_refs;
-static AudioComponentInstance au; static _Atomic int primary_playing;
+static DsAudio * au; static _Atomic int primary_playing;
 static _Atomic uint32_t slice_max = 512;                  /* largest render the device asked for: the write cursor's lead */
 
 static Buf *B(uint32_t obj) { uint32_t k = rt_r32(G_MEM, obj + 4); return k < 64 && bufs[k].used && bufs[k].obj == obj ? &bufs[k] : 0; }
@@ -33,15 +33,15 @@ static inline float sample(Buf *b, uint32_t frame, int chn)
     return b->bits == 16 ? (int16_t)rt_r16(G_MEM, b->mem + at) / 32768.0f : ((int)G_MEM[b->mem + at] - 128) / 128.0f;
 }
 void w32_audio_out(const float *lr, uint32_t frames, int rate, int source);         /* winmm.c: mute, level log, dump */
-static OSStatus render(void *u, AudioUnitRenderActionFlags *fl, const AudioTimeStamp *ts, UInt32 bus, UInt32 frames, AudioBufferList *io)
+static void render(void *u, void *buffer, uint32_t frames)
 {
-    (void)u; (void)fl; (void)ts; (void)bus;
-    float *out = io->mBuffers[0].mData; memset(out, 0, frames * 8);
+    (void)u;
+    float *out = buffer; memset(out, 0, frames * 8);
     if (frames > slice_max) slice_max = frames;
     if (primary_playing) for (int k = 0; k < 64; k++) {
         Buf *b = &bufs[k]; if (!b->used || b->primary || !b->playing) continue;
         uint32_t nframes = b->size / b->align, pos = b->play / b->align; double step = (double)(b->freq ? b->freq : (uint32_t)b->rate) / OUT_RATE, fr = b->frac;
-        for (UInt32 i = 0; i < frames; i++) {
+        for (uint32_t i = 0; i < frames; i++) {
             uint32_t p0 = pos, p1 = pos + 1; float t = (float)fr;
             if (!b->looping && p1 >= nframes) p1 = p0;
             float l = sample(b, p0, 0) * (1 - t) + sample(b, p1, 0) * t, r = sample(b, p0, 1) * (1 - t) + sample(b, p1, 1) * t;
@@ -53,20 +53,13 @@ static OSStatus render(void *u, AudioUnitRenderActionFlags *fl, const AudioTimeS
     }
     w32_audio_out(out, frames, OUT_RATE, 1);
     if (getenv("W32_AUDIO_MUTE")) memset(out, 0, frames * 8);
-    return 0;
+
 }
 static int start_output(void)
 {
     if (au) return 0;
-    AudioComponentDescription d = {kAudioUnitType_Output, kAudioUnitSubType_DefaultOutput, kAudioUnitManufacturer_Apple, 0, 0};
-    AudioComponent comp = AudioComponentFindNext(0, &d);
-    if (!comp || AudioComponentInstanceNew(comp, &au)) return -1;
-    AudioStreamBasicDescription f = {OUT_RATE, kAudioFormatLinearPCM, kAudioFormatFlagIsFloat | kAudioFormatFlagIsPacked, 8, 1, 8, 2, 32, 0};
-    AudioUnitSetProperty(au, kAudioUnitProperty_StreamFormat, kAudioUnitScope_Input, 0, &f, sizeof f);
-    UInt32 maxf = 4096; AudioUnitSetProperty(au, kAudioUnitProperty_MaximumFramesPerSlice, kAudioUnitScope_Global, 0, &maxf, sizeof maxf);   /* Bluetooth/USB devices render in big slices */
-    AURenderCallbackStruct rc = {render, 0};
-    AudioUnitSetProperty(au, kAudioUnitProperty_SetRenderCallback, kAudioUnitScope_Input, 0, &rc, sizeof rc);
-    if (AudioUnitInitialize(au) || AudioOutputUnitStart(au)) { AudioComponentInstanceDispose(au); au = 0; return -1; }
+    au = ds_audio_open(OUT_RATE, 2, 32, 1, render, NULL);
+    if (!au) return -1;
     return 0;
 }
 static void set_format(Buf *b, uint32_t wfx)

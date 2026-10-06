@@ -29,18 +29,18 @@ static uint32_t color_add_scaled(uint32_t d, uint32_t src, uint32_t s)
  * [0xa8ec14], and 0x538690 adds the light's colour ([ebp+8]+4) times it to the vertex colour (edx+0xc, 24 bytes
  * apart): 0x538690 converts the factor with fistp of (float)(factor * [0xa8e71c]) and calls 0x5385f0. */
 static struct { int pending; uint32_t dst, n, ebx, esi, edi; uint32_t col[4096]; float last; int have_last; } chk;
-#include <mach/mach_time.h>
+#include "platform.h"
 static void light_dir_loop_(Ctx *c);
 static void light_dir_loop(Ctx *c)
 {
     static int prof = -1; if (prof < 0) prof = getenv("DS2_NATIVE_PROF") != 0;
     if (!prof) { light_dir_loop_(c); return; }
-    static uint64_t t_sum, calls, verts, last; uint64_t t0 = mach_absolute_time(); uint32_t n = c->ecx;
+    static uint64_t t_sum, calls, verts, last; uint64_t t0 = ds_clock_ns(); uint32_t n = c->ecx;
     light_dir_loop_(c);
-    uint64_t t1 = mach_absolute_time(); t_sum += t1 - t0; calls++; verts += n;
+    uint64_t t1 = ds_clock_ns(); t_sum += t1 - t0; calls++; verts += n;
     if (!last) last = t1;
-    if (t1 - last > 24000000ull * 5) {   /* every ~5 s (24 MHz timebase) */
-        fprintf(stderr, "native: light loop %llu calls, %llu vertices, %.2f ms in 5 s\n", calls, verts, t_sum / 24000.0);
+    if (t1 - last > 1000000000ull * 5) {   /* every ~5 s (nanosecond timebase) */
+        fprintf(stderr, "native: light loop %llu calls, %llu vertices, %.2f ms in 5 s\n", (unsigned long long)calls, (unsigned long long)verts, t_sum / 1000000.0);
         t_sum = calls = verts = 0; last = t1;
     }
 }

@@ -3,6 +3,7 @@
  * delivery, [MC-DPLHP] enumeration). The game's message handler runs on one dispatcher thread, in order, with no lock
  * held. W32_DPLOG=1 logs the API calls and session events. */
 #include "w32.h"
+#include "../platform.h"
 #include "dp8proto.h"
 #include <unistd.h>
 int w32_spawn_service(void (*fn)(Ctx *, void *), void *arg);
@@ -297,7 +298,7 @@ static void post_event(Ev *e)
 static Ev *new_event(Sess *s, uint32_t msg) { Ev *e = calloc(1, sizeof *e); e->s = s; e->msg = msg; return e; }
 /* DP8_STATS=1: every 5 s, how long received messages wait in the queue before the game's handler runs, and how long
  * the handler takes (the game's own processing) */
-static uint64_t now_us(void) { return clock_gettime_nsec_np(CLOCK_UPTIME_RAW) / 1000; }
+static uint64_t now_us(void) { return ds_clock_ns() / 1000; }
 static int stats_on(void) { static int on = -1; if (on < 0) on = getenv("DP8_STATS") != 0; return on; }
 static struct { uint64_t t0, n, wait, wait_max, handler, handler_max; } st;
 static void stats_report(void)

@@ -15,6 +15,16 @@
 #include <stdint.h>
 #include <string.h>
 #include <math.h>
+#include <fenv.h>
+
+/* Avoid an out-of-range double-to-int conversion: x86 and ARM handle that
+ * differently. +/-4096 already over/underflows every finite nonzero double. */
+static inline double rt_fscale(double value, double exponent) {
+    if (isnan(value) || isnan(exponent)) return value + exponent;
+    if (isinf(exponent) && ((exponent > 0 && value == 0) || (exponent < 0 && isinf(value)))) return NAN;
+    int n = exponent > 4096 ? 4096 : exponent < -4096 ? -4096 : (int)trunc(exponent);
+    return ldexp(value, n);
+}
 
 extern uint8_t *G_MEM;                         /* guest address 0 */
 
@@ -202,6 +212,13 @@ static inline void rt_fpcr_sync(uint32_t fcw)
         __asm__ volatile("" ::: "memory");
         __builtin_arm_wsr64("fpcr", (__builtin_arm_rsr64("fpcr") & ~(3ull << 22)) | arm[rc]);
         __asm__ volatile("" ::: "memory");
+        rt_host_rc = rc;
+    }
+#elif defined(__x86_64__)
+    uint32_t rc = (fcw >> 10) & 3;
+    if (__builtin_expect(rc != rt_host_rc, 0)) {
+        static const int mode[4] = {FE_TONEAREST, FE_DOWNWARD, FE_UPWARD, FE_TOWARDZERO};
+        fesetround(mode[rc]);
         rt_host_rc = rc;
     }
 #else

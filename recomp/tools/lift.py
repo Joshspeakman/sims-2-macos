@@ -602,7 +602,7 @@ class Lifter:
                    0xf5: 'rt_fprem(c, 1);', 0xf6: 'c->top = (c->top - 1) & 7;', 0xf7: 'c->top = (c->top + 1) & 7;', 0xf8: 'rt_fprem(c, 0);',
                    0xf9: 'ST(1) = rt_x87_2(2, ST(1), ST(0)); FPOP();', 0xfa: 'ST(0) = PC(sqrt(ST(0)));',
                    0xfb: '{ double t = ST(0); ST(0) = rt_x87_1(2, t); FPUSH(rt_x87_1(3, t)); c->fsw &= ~(uint32_t)FSW_C2; }',
-                   0xfc: 'ST(0) = rt_frnd(c, ST(0));', 0xfd: 'ST(0) = ldexp(ST(0), (int)trunc(ST(1)));',
+                   0xfc: 'ST(0) = rt_frnd(c, ST(0));', 0xfd: 'ST(0) = rt_fscale(ST(0), ST(1));',
                    0xfe: 'ST(0) = rt_x87_1(2, ST(0)); c->fsw &= ~(uint32_t)FSW_C2;', 0xff: 'ST(0) = rt_x87_1(3, ST(0)); c->fsw &= ~(uint32_t)FSW_C2;'}
             if modrm in one: return one[modrm]
         if op == 0xdd:

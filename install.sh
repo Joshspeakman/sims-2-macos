@@ -23,6 +23,9 @@
 # data folder (default ~/Games/DungeonSiege2Native). Needs the Xcode command line tools and python3 (the recompiler
 # installs capstone with pip into recomp/.venv).
 set -euo pipefail
+if [[ $(uname -s) == Linux ]]; then
+    exec python3 "$(dirname "$0")/recomp/tools/install_linux.py" "$@"
+fi
 HERE="$(cd "$(dirname "$0")" && pwd)"
 GAME=""; GOG_EXE=""; APPS="$HOME/Applications"; DATA="$HOME/Games/DungeonSiege2Native"
 NIGHTLY=""; AS_NIGHTLY=""; CDKEY=""; REGFILE=""; ARGS=()
@@ -121,7 +124,7 @@ echo "== recompiling $EXE (a few minutes)"
 A="$APPS/$APP_NAME.app"; echo "== installing $A"
 mkdir -p "$APPS"; rm -rf "$A"; mkdir -p "$A/Contents/MacOS" "$A/Contents/Resources"
 cp "$HERE/recomp/work/full/app/DungeonSiegeNative" "$HERE/recomp/work/full/app/shaders.metal" "$HERE/recomp/work/full/app/dsr_snapshot.bin" "$A/Contents/MacOS/"
-cp "$HERE/recomp/work/DungeonSiege2.exe" "$A/Contents/Resources/DungeonSiege2.exe"
+cp "$HERE/recomp/work/full/DungeonSiege2.exe" "$A/Contents/Resources/DungeonSiege2.exe"
 Q_GAME=$(printf '%q' "$GAME"); Q_DATA=$(printf '%q' "$DATA")      # shell-quoted: any folder name is only data
 # updates from the launcher: the branch this app follows (main, or nightly for Nightly), the commit it was built from and
 # the checkout it was installed from; its updater fetches the branch into a worktree there and rebuilds the app from it
