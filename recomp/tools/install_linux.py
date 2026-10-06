@@ -10,6 +10,7 @@ import subprocess
 import sys
 from check_edition import GOG_23
 from steam_data_view import make_view
+from prepare_linux_icon import prepare_icon
 
 ROOT=Path(__file__).resolve().parents[2]
 
@@ -45,6 +46,7 @@ def main():
         if src.is_file():
             temp=app/(src.name+'.tmp'); shutil.copy2(src,temp); temp.replace(app/src.name)
     shutil.copy2(out/'DungeonSiege2.exe',app/'DungeonSiege2.exe')
+    icon=prepare_icon(app/'DungeonSiege2.exe',app)
     shutil.copytree(ROOT/'recomp/host/linux_launcher',app/'launcher',dirs_exist_ok=True,ignore=shutil.ignore_patterns('__pycache__'))
     profiles={'GOG':str(game)}
     if args.steam_data:
@@ -69,7 +71,9 @@ def main():
     quoted='"'+str(wrapper).replace('\\','\\\\').replace('"','\\"').replace('%','%%')+'"'
     desktop.write_text('[Desktop Entry]\nType=Application\nName=Dungeon Siege II (Linux Preview)\n'
         'Comment=Experimental native Linux build\n'+f'Exec={quoted}\n'
-        'Icon=applications-games\nTerminal=false\nCategories=Game;RolePlaying;\nStartupWMClass=dungeon-siege-2-linux\n')
+        f'Icon={icon}\nTerminal=false\nCategories=Game;RolePlaying;\nStartupWMClass=dungeon-siege-2-linux\n')
+    if shutil.which('update-desktop-database'):
+        subprocess.run(['update-desktop-database',str(desktop.parent)],check=False)
     print(f'Installed {wrapper}\nApplication menu: Dungeon Siege II (Linux Preview)\nData and saves: {data}')
 
 if __name__=='__main__':

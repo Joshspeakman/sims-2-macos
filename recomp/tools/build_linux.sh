@@ -26,5 +26,6 @@ if [[ -f "$HERE/host/linux.c" ]]; then
     cp "$ROOT/src/renderer/linux/"*.glsl "$ROOT/src/dsr/dsr_snapshot.bin" "$OUT/app/"
     mkdir -p "$OUT/app/launcher"
     cp "$HERE/host/linux_launcher/"*.py "$OUT/app/launcher/"
+    python3 "$HERE/tools/prepare_linux_icon.py" "$OUT/DungeonSiege2.exe" "$OUT/app"
     echo "$OUT/app/DungeonSiege2Linux"
 fi

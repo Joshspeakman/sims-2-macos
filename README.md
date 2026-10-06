@@ -28,7 +28,7 @@ The experimental DS1 shadow/DLSS changes are not included.
 ## Build and play
 
 Dependencies: Clang, Python 3.11+, pip/venv, pkg-config, SDL2, FreeType, fontconfig, libsndfile, GLEW, libpng and zlib.
-The launcher also needs PySide6 and Pillow. Innoextract is needed only to extract a GOG offline installer.
+Pillow is needed to extract the app icon; the launcher also needs PySide6. Innoextract is needed only to extract a GOG offline installer.
 
 On CachyOS/Arch:
 
@@ -53,6 +53,8 @@ This builds locally, installs **Dungeon Siege II (Linux Preview)** in the applic
 `~/.local/bin/dungeon-siege-2-linux`. Saves and settings go under
 `~/.local/share/dungeon-siege-2-linux/drive_c/Users/player/Documents/My Games/Dungeon Siege 2/` by default;
 `--data-dir` selects a different location. Original game folders are only read.
+The application-menu, launcher and game-window icons come from your own executable at build/install time;
+the artwork is not distributed in this repository.
 
 To include your Steam base-game data as a second launcher choice:
 
