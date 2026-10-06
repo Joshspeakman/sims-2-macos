@@ -22,4 +22,5 @@ for test in frame_pacer display_modes; do
     clang -O1 -g -o "$OUT/$test" "recomp/tests/${test}_test.c" -lm
     "$OUT/$test"
 done
-python3 -m py_compile recomp/host/linux_launcher/*.py recomp/tools/check_edition.py
+python3 -m py_compile recomp/host/linux_launcher/*.py recomp/tools/check_edition.py \
+    recomp/tools/install_linux.py recomp/tools/prepare_linux_icon.py

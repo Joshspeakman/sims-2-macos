@@ -27,12 +27,14 @@ def main():
 
     from PIL import Image
     from PySide6.QtCore import Qt, QRectF, QUrl
-    from PySide6.QtGui import QColor, QFont, QImage, QPixmap, QPainter, QDesktopServices
+    from PySide6.QtGui import QColor, QFont, QIcon, QImage, QPixmap, QPainter, QDesktopServices
     from PySide6.QtWidgets import (QApplication, QWidget, QLabel, QComboBox, QPushButton,
                                   QInputDialog, QLineEdit, QMessageBox)
     app = QApplication(sys.argv[:1])
-    app.setApplicationName('Dungeon Siege II')
+    app.setApplicationName('dungeon-siege-2-linux')
+    app.setApplicationDisplayName('Dungeon Siege II')
     app.setDesktopFileName('dungeon-siege-2-linux')
+    app.setWindowIcon(QIcon(str(Path(args.binary).resolve().parent / 'dungeon-siege-2.ico')))
     screen = app.primaryScreen()
     geo = screen.geometry()
     width, height = round(geo.width()*screen.devicePixelRatio()), round(geo.height()*screen.devicePixelRatio())

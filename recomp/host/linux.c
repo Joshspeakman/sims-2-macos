@@ -1,5 +1,6 @@
 /* Native Linux host: SDL window/input, OpenGL DSR command consumer, shared recompiled game. */
 #include <SDL2/SDL.h>
+#include <png.h>
 #include <pthread.h>
 #include <stdatomic.h>
 #include <sys/mman.h>
@@ -37,6 +38,19 @@ static SDL_Window *window; static int test_mode; static uint32_t buttons;
 static double vcur_x,vcur_y;
 static volatile sig_atomic_t interrupted;
 static void stop_host(int signal) { (void)signal; interrupted=1; }
+static void set_window_icon(const char *bin) {
+ char path[4096]; snprintf(path,sizeof path,"%s/dungeon-siege-2.png",bin);
+ png_image icon={0}; icon.version=PNG_IMAGE_VERSION;
+ if(!png_image_begin_read_from_file(&icon,path)) { png_image_free(&icon); return; }
+ icon.format=PNG_FORMAT_RGBA;
+ if(!icon.width||!icon.height||icon.width>1024||icon.height>1024) { png_image_free(&icon); return; }
+ SDL_Surface *surface=SDL_CreateRGBSurfaceWithFormat(0,icon.width,icon.height,32,SDL_PIXELFORMAT_RGBA32);
+ if(surface) {
+  if(png_image_finish_read(&icon,NULL,surface->pixels,surface->pitch,NULL)) SDL_SetWindowIcon(window,surface);
+  SDL_FreeSurface(surface);
+ }
+ png_image_free(&icon);
+}
 static void post(uint32_t msg,uint32_t wp,uint32_t lp) { uint32_t w=game_hwnd; if(w) w32_post(w32_window_tid(w),w,msg,wp,lp); }
 static uint32_t mk(void) { return buttons | (w32_keys[16]&128?4:0) | (w32_keys[17]&128?8:0); }
 static uint32_t pos_lp(void) { int x,y; w32_get_cursor(&x,&y); return ((uint32_t)y<<16)|((uint32_t)x&65535); }
@@ -238,7 +252,9 @@ int main(int argc,char **argv) {
  signal(SIGINT,stop_host); signal(SIGTERM,stop_host);
  const char *title="Dungeon Siege II — Linux";
  SDL_SetHint(SDL_HINT_APP_NAME,title);
+ SDL_SetHint("SDL_APP_ID","dungeon-siege-2-linux");
  SDL_SetHint("SDL_VIDEO_X11_WMCLASS","dungeon-siege-2-linux");
+ SDL_SetHint("SDL_VIDEO_WAYLAND_WMCLASS","dungeon-siege-2-linux");
  if(SDL_Init(SDL_INIT_VIDEO|SDL_INIT_EVENTS)) { fprintf(stderr,"SDL: %s\n",SDL_GetError()); return 1; }
  SDL_DisplayMode dm; if(!SDL_GetDesktopDisplayMode(0,&dm)) { w32_screen_w=dm.w; w32_screen_h=dm.h; if(dm.refresh_rate>0) w32_screen_hz=dm.refresh_rate; }
  /* Linux automatic mode follows the display, without the legacy 120 fps ceiling. */
@@ -261,6 +277,7 @@ int main(int argc,char **argv) {
  if(test_mode) { ww=1024; wh=768; }
  window=SDL_CreateWindow(title,SDL_WINDOWPOS_CENTERED,SDL_WINDOWPOS_CENTERED,ww,wh,SDL_WINDOW_OPENGL|SDL_WINDOW_RESIZABLE|SDL_WINDOW_ALLOW_HIGHDPI|(test_mode?SDL_WINDOW_HIDDEN:SDL_WINDOW_SHOWN)|(fullscreen?SDL_WINDOW_FULLSCREEN_DESKTOP:0));
  if(!window) { fprintf(stderr,"window: %s\n",SDL_GetError()); return 1; }
+ set_window_icon(bin);
  SDL_GLContext gl=SDL_GL_CreateContext(window); if(!gl) { fprintf(stderr,"OpenGL: %s\n",SDL_GetError()); return 1; }
  SDL_GL_SetSwapInterval(test_mode?0:getenv("DSR_VSYNC")?atoi(getenv("DSR_VSYNC")):1); SDL_StartTextInput(); if(!test_mode) SDL_SetRelativeMouseMode(SDL_TRUE);
  w32_relative_cursor(0);  /* DS2 reads the absolute virtual cursor. */
