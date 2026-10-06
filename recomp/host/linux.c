@@ -20,6 +20,7 @@
 #endif
 extern int w32_prepare(const char *,const char *,const char *,const char *);
 extern uint32_t w32_run(char *,size_t);
+extern void w32_registry_install(const char *);
 extern void dsr_attach_consumer(DsrShmHeader *);
 extern void dsr_mode_size(uint32_t *,uint32_t *);
 extern void w32_post(uint32_t,uint32_t,uint32_t,uint32_t,uint32_t);
@@ -268,6 +269,9 @@ int main(int argc,char **argv) {
  snprintf(dsr_snapshot_path,sizeof dsr_snapshot_path,"%s/dsr_snapshot.bin",bin);
  snprintf(drive,sizeof drive,"%s/drive_c",data); snprintf(overlay,sizeof overlay,"%s/game",data); mkdirs(drive); mkdirs(overlay); ensure_resolution(drive);
  w32_crash_init(data,DS_BUILD); w32_crash_thread("Linux UI and renderer");
+ /* Match the Mac host: publish the launcher's saved CD-key hash before the
+  * game's multiplayer code looks up the retail installer's DoubleHash value. */
+ w32_registry_install(data);
  SDL_GL_SetAttribute(SDL_GL_CONTEXT_MAJOR_VERSION,3); SDL_GL_SetAttribute(SDL_GL_CONTEXT_MINOR_VERSION,3);
  SDL_GL_SetAttribute(SDL_GL_CONTEXT_PROFILE_MASK,SDL_GL_CONTEXT_PROFILE_CORE); SDL_GL_SetAttribute(SDL_GL_DOUBLEBUFFER,1);
  SDL_GL_SetAttribute(SDL_GL_RED_SIZE,8); SDL_GL_SetAttribute(SDL_GL_GREEN_SIZE,8); SDL_GL_SetAttribute(SDL_GL_BLUE_SIZE,8);

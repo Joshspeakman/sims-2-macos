@@ -30,6 +30,8 @@ the key check. A key for every buyer would have to come from the rights holder.
 
 - **On a Mac (this app):** in the launch window, click **Online** and enter the key. Or, from the repository:
   `./install.sh --cd-key`. A first install also offers it at the end.
+- **On native Linux:** click **Enter your CD key** in the launcher. The host imports the saved hash into the
+  game's registry at startup, just as the Mac host does. Restart the game after changing the key.
 - **For a Windows PC** (or Wine/Proton on Linux) **without the retail installer:** on any Mac with this repository,
   `./install.sh --cd-key --reg-file DS2-cdkey.reg` with that PC's own key, then on the PC double-click the `.reg`
   file to import it. (A PC also needs the OpenSpy client to reach the lobby.)
