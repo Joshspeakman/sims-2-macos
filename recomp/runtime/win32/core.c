@@ -1,10 +1,10 @@
 /* KERNEL32 core: version, modules, environment, TLS, heaps, virtual memory, critical sections, interlocked, time,
  * synchronisation objects, handles, process control. */
 #include "w32.h"
-#include <sys/sysctl.h>
+
 #include <unistd.h>
 #include <time.h>
-#include <mach/mach_time.h>
+#include "platform.h"
 #include <sys/stat.h>
 
 extern uint32_t w32_cmdline_a, w32_cmdline_w, w32_modname_a, w32_env_a, w32_env_w;
@@ -192,7 +192,7 @@ IMPL(kernel32, GetSystemInfo)
     /* The real core count, as Windows and Wine report it: the game picks its locks by it (0x43ec79: one CPU -> plain
      * inc/dec, which is only safe when threads never run at the same time; ours do). The harness keeps 1. */
     uint32_t ncpu = 1;
-    if (!w32_deterministic) { int n = 0; size_t sz = sizeof n; if (!sysctlbyname("hw.activecpu", &n, &sz, 0, 0) && n > 1) ncpu = n > 32 ? 32 : (uint32_t)n; }
+    if (!w32_deterministic) ncpu = ds_cpu_count();
     rt_w32(G_MEM, p + 16, ncpu >= 32 ? 0xffffffffu : (1u << ncpu) - 1); rt_w32(G_MEM, p + 20, ncpu); rt_w32(G_MEM, p + 24, 586); rt_w32(G_MEM, p + 28, 0x10000);
     rt_w16(G_MEM, p + 32, 6); rt_w16(G_MEM, p + 34, 0x0f01);
     RET(0, 1);
@@ -210,15 +210,22 @@ static CS cstab[NCS]; static pthread_mutex_t cs_lock = PTHREAD_MUTEX_INITIALIZER
 static CS *cs_find(uint32_t a, int create)
 {
     uint32_t k = (a * 2654435761u) % NCS;
+    CS *free_slot = 0;
     pthread_mutex_lock(&cs_lock);
     for (int n = 0; n < NCS; n++, k = (k + 1) % NCS) {
         if (cstab[k].addr == a) { pthread_mutex_unlock(&cs_lock); return &cstab[k]; }
         if (!cstab[k].addr || cstab[k].addr == 1) {
-            if (!create) break;
-            pthread_mutexattr_t at; pthread_mutexattr_init(&at); pthread_mutexattr_settype(&at, PTHREAD_MUTEX_RECURSIVE);
-            pthread_mutex_init(&cstab[k].m, &at); cstab[k].addr = a;
-            pthread_mutex_unlock(&cs_lock); return &cstab[k];
+            if (!free_slot) free_slot = &cstab[k];
+            /* A deleted entry is not the end of a probe chain. Reusing it
+             * before checking later entries can create two mutexes for one
+             * live guest critical section, defeating mutual exclusion. */
+            if (!cstab[k].addr) break;
         }
+    }
+    if (create && free_slot) {
+        pthread_mutexattr_t at; pthread_mutexattr_init(&at); pthread_mutexattr_settype(&at, PTHREAD_MUTEX_RECURSIVE);
+        pthread_mutex_init(&free_slot->m, &at); pthread_mutexattr_destroy(&at); free_slot->addr = a;
+        pthread_mutex_unlock(&cs_lock); return free_slot;
     }
     pthread_mutex_unlock(&cs_lock); return 0;
 }
@@ -230,7 +237,7 @@ IMPL(kernel32, InitializeCriticalSection)
 IMPL(kernel32, DeleteCriticalSection)
 {
     CS *s = cs_find(ARG(0), 0);
-    if (s) { pthread_mutex_destroy(&s->m); s->addr = 1; }
+    if (s) { pthread_mutex_lock(&cs_lock); pthread_mutex_destroy(&s->m); s->addr = 1; pthread_mutex_unlock(&cs_lock); }
     RET(0, 1);
 }
 IMPL(kernel32, EnterCriticalSection)
@@ -257,8 +264,7 @@ static uint64_t fake_us = 1000000;
 static uint64_t now_us(void)
 {
     if (w32_deterministic) return fake_us += 1000;
-    static mach_timebase_info_data_t tb; if (!tb.denom) mach_timebase_info(&tb);
-    return mach_absolute_time() * tb.numer / tb.denom / 1000;
+    return ds_clock_ns() / 1000;
 }
 static uint64_t filetime_now(void)          /* 100 ns units since 1601 */
 {

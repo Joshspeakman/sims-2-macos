@@ -1,3 +1,4 @@
+#include "../platform.h"
 /* DirectPlay 8 transport on UDP, written from Microsoft's published specifications:
  *   [MC-DPL8R]  DirectPlay 8 Protocol: Reliable           (connections, sequencing, acknowledgements, retries)
  *   [MC-DPLHP]  DirectPlay 8 Protocol: Host and Port Enumeration (EnumQuery / EnumResponse, first byte 0)
@@ -11,6 +12,7 @@
 #include <fcntl.h>
 #include <poll.h>
 #include <pthread.h>
+#include <stdatomic.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -32,7 +34,7 @@ enum {
      * in the handshake in all and from one address, and how long a closed connection is kept before it is freed */
     MAX_MESSAGE = 32 << 20, MAX_HALF_OPEN = 64, MAX_HALF_OPEN_PER_IP = 8, REAP_MS = 15000,
 };
-uint32_t dp8_tick(void) { return (uint32_t)(clock_gettime_nsec_np(CLOCK_UPTIME_RAW) / 1000000); }
+uint32_t dp8_tick(void) { return (uint32_t)(ds_clock_ns() / 1000000); }
 static void put32(uint8_t *p, uint32_t v) { memcpy(p, &v, 4); }
 static uint32_t get32(const uint8_t *p) { uint32_t v; memcpy(&v, p, 4); return v; }
 
@@ -113,12 +115,14 @@ static void trace(const char *dir, const struct sockaddr_in *a, const uint8_t *p
 /* DP8_LAG=<ms>[,<jitter ms>]: every datagram this side sends or receives waits that long (plus a random part up to the
  * jitter, so some arrive out of order), for testing internet-like delays on a LAN with only this side changed: the round
  * trip grows by twice that */
-static int lag_ms = -1, lag_jitter;
-void dp8_set_lag(int ms, int jitter) { lag_ms = ms > 0 ? ms : 0; lag_jitter = jitter > 0 ? jitter : 0; }   /* tests: change it during a game */
-static void lag_init(void) { if (lag_ms >= 0) return; const char *e = getenv("DP8_LAG"); lag_ms = e ? atoi(e) : 0; const char *j = e ? strchr(e, ',') : 0; lag_jitter = j ? atoi(j + 1) : 0; }
+static _Atomic int lag_ms, lag_jitter;
+static pthread_once_t lag_once = PTHREAD_ONCE_INIT;
+static void lag_env_init(void) { const char *e = getenv("DP8_LAG"); lag_ms = e ? atoi(e) : 0; const char *j = e ? strchr(e, ',') : 0; lag_jitter = j ? atoi(j + 1) : 0; }
+static void lag_init(void) { pthread_once(&lag_once, lag_env_init); }
+void dp8_set_lag(int ms, int jitter) { lag_init(); lag_ms = ms > 0 ? ms : 0; lag_jitter = jitter > 0 ? jitter : 0; }
+static uint32_t lag_due(void) { int ms = lag_ms, jitter = lag_jitter; return dp8_tick() + (uint32_t)(ms > 0 ? ms : 0) + (jitter > 0 ? arc4random_uniform((uint32_t)jitter + 1) : 0); }
 static void lag_flush(dp8_ep *ep)
 {
-    if (!ep->lagq) return;
     uint32_t now = dp8_tick();
     pthread_mutex_lock(&ep->lagm);
     for (Delayed **pp = &ep->lagq; *pp; ) {
@@ -132,13 +136,14 @@ static void raw_send(dp8_ep *ep, const struct sockaddr_in *to, const void *buf, 
 {
     trace("send", to, buf, len, 0);
     lag_init();
+    if (getenv("DP8_DROP") && arc4random_uniform(100) < (uint32_t)atoi(getenv("DP8_DROP"))) return;   /* also applies when delay is enabled */
     if (lag_ms > 0) {
-        Delayed *d = malloc(sizeof *d + len); d->next = 0; d->to = *to; d->len = len; memcpy(d->data, buf, len);
-        d->due = dp8_tick() + (uint32_t)lag_ms + (lag_jitter > 0 ? arc4random_uniform((uint32_t)lag_jitter + 1) : 0);
+        Delayed *d = malloc(sizeof *d + len); if (!d) return;
+        d->next = 0; d->to = *to; d->len = len; memcpy(d->data, buf, len);
+        d->due = lag_due();
         pthread_mutex_lock(&ep->lagm); Delayed **pp = &ep->lagq; while (*pp) pp = &(*pp)->next; *pp = d; pthread_mutex_unlock(&ep->lagm);
         return;
     }
-    if (getenv("DP8_DROP") && arc4random_uniform(100) < (uint32_t)atoi(getenv("DP8_DROP"))) return;   /* tests: simulated loss */
     sendto(ep->fd, buf, len, 0, (const struct sockaddr *)to, sizeof *to);
 }
 void dp8_send_raw(dp8_ep *ep, const struct sockaddr_in *to, const void *buf, size_t len) { raw_send(ep, to, buf, len); }
@@ -175,7 +180,7 @@ static void transmit(dp8_conn *c, uint8_t seq, int retry)
 /* move queued messages into the window as space allows; messages larger than a frame are split */
 static void pump(dp8_conn *c)
 {
-    while (c->q && c->state == ST_ESTABLISHED) {
+    while (c->q && (c->state == ST_ESTABLISHED || c->state == ST_CLOSING) && !c->end_sent) {
         Msg *m = c->q; size_t frames = m->len ? (m->len + MAX_FRAME - 1) / MAX_FRAME : 1;
         if (in_flight(c) + (int)frames > WINDOW - 1) break;
         for (size_t k = 0; k < frames; k++) {
@@ -216,6 +221,17 @@ static void conn_close(dp8_conn *c, int reason)
     conn_free_buffers(c);                       /* the struct stays until it is reaped (TIME_WAIT, the upper layer let go) */
 }
 /* acknowledgements from the remote side */
+static void ack_frame(dp8_conn *c, Frame *f)
+{
+    /* Sample the first acknowledgement only. A selective ACK already proves
+     * delivery; a later cumulative ACK may have waited seconds for a lost gap. */
+    if (!f->acked && !f->retries) {
+        uint32_t s = dp8_tick() - f->sent;
+        c->rtt = (c->rtt * 7 + s) / 8;
+        if (s > c->st_rtt_max) c->st_rtt_max = s;
+    }
+    f->acked = 1;
+}
 static void handle_acks(dp8_conn *c, uint8_t nrcv, uint64_t sack)
 {
     for (int i = 0; i < 256; i++) {
@@ -223,12 +239,12 @@ static void handle_acks(dp8_conn *c, uint8_t nrcv, uint64_t sack)
         uint8_t seq = (uint8_t)i, d = (uint8_t)(c->next_send - seq);                   /* how far behind next_send */
         if (d == 0 || d > WINDOW) continue;                                             /* not in flight */
         if ((uint8_t)(nrcv - seq) >= 1 && (uint8_t)(nrcv - seq) <= WINDOW && (uint8_t)(c->next_send - nrcv) < WINDOW + 1) {   /* seq < nrcv */
-            if (!f->retries) { uint32_t s = dp8_tick() - f->sent; c->rtt = (c->rtt * 7 + s) / 8; if (s > c->st_rtt_max) c->st_rtt_max = s; }
+            ack_frame(c, f);
             if (c->end_sent && seq == c->end_seq) c->end_seq_acked = 1;
             free(f->buf); f->buf = 0;
         } else {
             uint8_t k = (uint8_t)(seq - nrcv - 1);
-            if (k < 64 && (sack >> k) & 1) f->acked = 1;
+            if (k < 64 && (sack >> k) & 1) ack_frame(c, f);
         }
     }
 }
@@ -319,7 +335,10 @@ static void handle_sack(dp8_conn *c, const uint8_t *p, size_t len)
     c->last_recv = dp8_tick();
     handle_acks(c, p[5], sack);
     if (sack) for (int i = 0; i < 256; i++) if (c->win[i].buf && !c->win[i].acked) {   /* first unacknowledged frame: retry soon */
-        if ((uint8_t)(p[5] - (uint8_t)i) == 0) c->win[i].rto = 10;
+        /* Repeated gap reports may arrive while the first retry is still in
+         * flight. Do not reset its backed-off RTO to 10 ms on every report:
+         * that exhausts all retries inside one RTT on a jittery connection. */
+        if ((uint8_t)(p[5] - (uint8_t)i) == 0 && !c->win[i].retries) c->win[i].rto = 10;
     }
 }
 static dp8_conn *find_conn(dp8_ep *ep, const struct sockaddr_in *a)
@@ -388,10 +407,12 @@ static void on_packet(dp8_ep *ep, const struct sockaddr_in *from, const uint8_t 
     dp8_conn *c = find_conn(ep, from); int fresh = 0;
     if (!c && (p[0] & CMD_DATA)) {             /* a connection closed moments ago: keep acknowledging retries (TIME_WAIT) */
         for (dp8_conn *z = ep->conns; z; z = z->next)
-            if (z->state == ST_CLOSED && z->closed_reason == DP8_CLOSE_NORMAL && dp8_tick() - z->closed_at < 5000 &&
+            /* Retain the final ACK through the peer's entire retry window.
+             * A lost ACK plus exponential backoff can exceed five seconds. */
+            if (z->state == ST_CLOSED && z->closed_reason == DP8_CLOSE_NORMAL && dp8_tick() - z->closed_at < 60000 &&
                 z->addr.sin_addr.s_addr == from->sin_addr.s_addr && z->addr.sin_port == from->sin_port) {
                 dp8_dframe f; if (dp8_dec_dframe(p, len, &f)) {
-                    uint8_t b[20]; size_t n = dp8_enc_sack(b, 0, z->next_send, (uint8_t)(f.seq + 1) == z->next_recv || (uint8_t)(z->next_recv - f.seq) <= 64 ? z->next_recv : z->next_recv, dp8_tick(), 0);
+                    uint8_t b[20]; size_t n = dp8_enc_sack(b, 0, z->next_send, z->next_recv, dp8_tick(), 0);
                     raw_send(ep, from, b, n);
                 }
                 break;
@@ -408,9 +429,9 @@ static void on_packet(dp8_ep *ep, const struct sockaddr_in *from, const uint8_t 
 /* timers: handshake retries, retransmission, delayed ACKs, keep-alives, closing */
 static void tick(dp8_ep *ep)
 {
-    uint32_t now = dp8_tick();
     dp8_conn *report[64]; int nr = 0;
     pthread_mutex_lock(&ep->lock);
+    uint32_t now = dp8_tick();
     for (dp8_conn *c = ep->conns; c; c = c->next) {
         if (c->state == ST_CONNECTING || c->state == ST_ACCEPTING) {
             if ((int32_t)(now - c->cnext) >= 0) {
@@ -424,7 +445,7 @@ static void tick(dp8_ep *ep)
         } else if (c->state == ST_ESTABLISHED || c->state == ST_CLOSING) {
             for (int i = 0; i < 256; i++) {
                 Frame *f = &c->win[i]; if (!f->buf || f->acked) continue;
-                if (now - f->sent >= f->rto) {
+                if ((int32_t)(now - f->sent) >= (int32_t)f->rto) {
                     if (++f->retries > 10) { conn_close(c, DP8_CLOSE_LOST); break; }
                     f->rto = f->retries <= 3 ? f->rto + c->rtt + 100 : f->rto * 2; if (f->rto > 5000) f->rto = 5000;
                     transmit(c, (uint8_t)i, 1);
@@ -441,9 +462,12 @@ static void tick(dp8_ep *ep)
             }
             pump(c);
             if (c->ack_due && (int32_t)(now - c->ack_due) >= 0) send_sack(c);
-            if (now - c->last_send > 25000 && now - c->last_recv > 25000 && !c->q) send_keepalive(c, 0);
-            if (now - c->last_recv > 60000) conn_close(c, DP8_CLOSE_LOST);
-            if (c->state == ST_CLOSING && !c->q && !c->end_sent) { c->end_sent = 1; send_keepalive(c, CTL_END_STREAM); }
+            /* pump/transmit can stamp a send later than this tick's snapshot.
+             * Signed deltas handle that and the 32-bit millisecond wrap without
+             * treating a newly sent/received packet as a multi-day timeout. */
+            if ((int32_t)(now - c->last_send) > 25000 && (int32_t)(now - c->last_recv) > 25000 && !c->q) send_keepalive(c, 0);
+            if ((int32_t)(now - c->last_recv) > 60000) conn_close(c, DP8_CLOSE_LOST);
+            if ((c->state == ST_CLOSING || c->end_recv) && !c->q && !c->end_sent) { c->end_sent = 1; send_keepalive(c, CTL_END_STREAM); }
             if (c->end_sent && c->end_seq_acked && c->end_recv) conn_close(c, DP8_CLOSE_NORMAL);
         } else if (c->state == ST_HARD_CLOSING) {
             if ((int32_t)(now - c->hard_next) >= 0) {
@@ -464,7 +488,7 @@ static void tick(dp8_ep *ep)
     pthread_mutex_lock(&ep->lock);
     for (dp8_conn **pp = &ep->conns; *pp; ) {
         dp8_conn *c = *pp;
-        if (c->state == ST_CLOSED && c->reported && now - c->closed_at > REAP_MS) { *pp = c->next; conn_free_buffers(c); free(c); }
+        if (c->state == ST_CLOSED && c->reported && (int32_t)(now - c->closed_at) > (c->closed_reason == DP8_CLOSE_NORMAL ? 60000 : REAP_MS)) { *pp = c->next; conn_free_buffers(c); free(c); }
         else pp = &c->next;
     }
     pthread_mutex_unlock(&ep->lock);
@@ -474,7 +498,7 @@ static void *net_thread(void *arg)
     dp8_ep *ep = arg; uint8_t buf[2048];
     while (!ep->stop) {
         struct pollfd pf[3] = {{ep->fd, POLLIN, 0}, {ep->fd_enum, POLLIN, 0}, {ep->wake[0], POLLIN, 0}};
-        poll(pf, 3, ep->lagq || ep->rxq ? 1 : 10);
+        poll(pf, 3, lag_ms > 0 || ep->rxq ? 1 : 10);
         lag_flush(ep);
         for (int k = 0; k < 2; k++) if (pf[k].revents & POLLIN) for (;;) {
             struct sockaddr_in from; socklen_t fl = sizeof from;
@@ -482,8 +506,9 @@ static void *net_thread(void *arg)
             if (n <= 0) break;
             lag_init();
             if (lag_ms > 0) {                                   /* DP8_LAG: handled later (this thread only) */
-                Delayed *d = malloc(sizeof *d + (size_t)n); d->next = 0; d->to = from; d->len = (size_t)n; d->k = k; memcpy(d->data, buf, (size_t)n);
-                d->due = dp8_tick() + (uint32_t)lag_ms + (lag_jitter > 0 ? arc4random_uniform((uint32_t)lag_jitter + 1) : 0);
+                Delayed *d = malloc(sizeof *d + (size_t)n); if (!d) continue;
+                d->next = 0; d->to = from; d->len = (size_t)n; d->k = k; memcpy(d->data, buf, (size_t)n);
+                d->due = lag_due();
                 Delayed **pp = &ep->rxq; while (*pp) pp = &(*pp)->next; *pp = d;
                 continue;
             }
@@ -534,7 +559,7 @@ int dp8_send(dp8_conn *c, const void *data, size_t len, uint8_t user_flags)
 {
     dp8_ep *ep = c->ep; int ok;
     pthread_mutex_lock(&ep->lock);
-    ok = c->state == ST_ESTABLISHED;
+    ok = c->state == ST_ESTABLISHED && !c->end_sent && !c->end_recv;
     if (ok) { enqueue(c, data, len, user_flags & (CMD_USER_1 | CMD_USER_2)); pump(c); }
     pthread_mutex_unlock(&ep->lock);
     return ok ? 0 : -1;

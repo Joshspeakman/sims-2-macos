@@ -3,6 +3,11 @@
 #include <dirent.h>
 #include <sys/stat.h>
 #include <errno.h>
+#ifdef __linux__
+#define st_birthtimespec st_ctim
+#define st_atimespec st_atim
+#define st_mtimespec st_mtim
+#endif
 
 char w32_drive_c[1024];                /* host directory for C:\ (other than the game folder) */
 char w32_cwd[1024] = "C:\\GOG Games\\Dungeon Siege";

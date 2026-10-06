@@ -3,13 +3,14 @@
  * zeroed memory for new commits. */
 #include "w32.h"
 #include <sys/mman.h>
+#include "platform.h"
 
 typedef struct Region { uint32_t base, size, type, prot; uint8_t *commit; } Region;   /* commit: per 4 KB page */
 static Region *R; static int nR, capR;
 static pthread_mutex_t vm_lock = PTHREAD_MUTEX_INITIALIZER;
 
 extern int w32_protect_memory;
-#define HP 0x4000u                                   /* host page (arm64 macOS); guest pages are 4 KB */
+#define HP (ds_page_size())                                   /* host page (arm64 macOS); guest pages are 4 KB */
 static void zero_range(uint32_t a, uint32_t n)
 {
     if (!n) return;

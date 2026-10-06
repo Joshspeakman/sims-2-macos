@@ -7,9 +7,10 @@
  * with a vertex shader are skipped; with only a pixel shader they are drawn fixed-function).
  * D3D9_LOG=1: every method's first calls; any method not written yet says so once. */
 #include "d3d9_priv.h"
+#include "display_modes.h"
 
 static Dev9 *the_dev;
-extern int w32_screen_w, w32_screen_h;
+extern int w32_screen_w, w32_screen_h, w32_screen_hz;
 static void surf_destroy(Surf9 *s);
 
 /* ---- surfaces ---- */
@@ -656,7 +657,15 @@ void d9_state_restore(Dev9 *d, void *saved)
     for (uint32_t k = 0; k < 16; k++) { if (d->tex[k] != s->tex[k]) set_tex(d, k, s->tex[k]); if (s->tex[k]) tex_release(s->tex[k]); }
     d9_program_use(d, s->prog); free(s);
 }
-int d9_shaders_on(void) { static int on = -1; if (on < 0) { const char *e = getenv("DS2_SHADERS"); on = !(e && !strcmp(e, "0")); } return on; }
+int d9_shaders_on(void) {
+#ifdef __linux__
+    /* The initial OpenGL host implements the game's fixed-function path.
+     * Do not advertise effects until its shader compiler/consumer is ported. */
+    return 0;
+#else
+    static int on = -1; if (on < 0) { const char *e = getenv("DS2_SHADERS"); on = !(e && !strcmp(e, "0")); } return on;
+#endif
+}
 
 /* ---- the device ---- */
 #define DEV_ME ME(Dev9, O9_DEV)
@@ -1047,7 +1056,13 @@ static uint32_t gpu_vendor(void) { const char *e = getenv("DS2_GPU"); return e ?
 static uint32_t gpu_device(void) { const char *e = getenv("DS2_GPU"); const char *c2 = e ? strchr(e, ':') : 0; return c2 ? (uint32_t)strtoul(c2 + 1, 0, 16) : d9_shaders_on() ? 0x4a49 : 0x514c; }
 M(d9_GetAdapterIdentifier, 4)                          /* D3DADAPTER_IDENTIFIER9: the reported card decides the game's defaults (system_detail.gas) */
     uint32_t o = ARG(3); memset(GP(o), 0, 1100);
-    strcpy((char *)GP(o), "ati2dvag.dll"); strcpy((char *)GP(o + 512), "Apple Silicon (Metal)"); strcpy((char *)GP(o + 1024), "\\\\.\\DISPLAY1");
+    strcpy((char *)GP(o), "ati2dvag.dll"); strcpy((char *)GP(o + 512),
+#ifdef __linux__
+        "Native Linux (OpenGL)"
+#else
+        "Apple Silicon (Metal)"
+#endif
+    ); strcpy((char *)GP(o + 1024), "\\\\.\\DISPLAY1");
     rt_w32(G_MEM, o + 1056, 0x00020000u | 6614); rt_w32(G_MEM, o + 1060, 0x00060006u);   /* driver version 6.6.2.6614 */
     rt_w32(G_MEM, o + 1064, gpu_vendor()); rt_w32(G_MEM, o + 1068, gpu_device()); rt_w32(G_MEM, o + 1072, 0); rt_w32(G_MEM, o + 1076, 0);
     static const uint8_t guid[16] = {0x5c, 0x1e, 0x8d, 0xd7, 0x6a, 0x3b, 0x11, 0xcf, 0x86, 0x42, 0x54, 0x13, 0x8e, 0xc2, 0x3a, 0x0b};
@@ -1056,19 +1071,23 @@ M(d9_GetAdapterIdentifier, 4)                          /* D3DADAPTER_IDENTIFIER9
 END
 static int modes(uint32_t (*out)[2])                    /* the standard sizes that fit this screen, then the screen's own */
 {
+#ifdef __linux__
+    return ds_display_modes(out, (uint32_t)w32_screen_w, (uint32_t)w32_screen_h, getenv("DS_RESOLUTION"));
+#else
     static const uint32_t std[][2] = {{640, 480}, {800, 600}, {1024, 768}, {1152, 864}, {1280, 720}, {1280, 800}, {1280, 960}, {1280, 1024}, {1366, 768},
                                       {1440, 900}, {1600, 900}, {1600, 1200}, {1680, 1050}, {1920, 1080}, {1920, 1200}, {2560, 1440}, {2560, 1600}};
     int n = 0; uint32_t sw = (uint32_t)w32_screen_w, sh = (uint32_t)w32_screen_h;
     for (unsigned k = 0; k < sizeof std / sizeof *std; k++) if (std[k][0] <= sw && std[k][1] <= sh && !(std[k][0] == sw && std[k][1] == sh)) { out[n][0] = std[k][0]; out[n][1] = std[k][1]; n++; }
     out[n][0] = sw; out[n][1] = sh; n++;
     return n;
+#endif
 }
-M(d9_GetAdapterModeCount, 3) uint32_t m[32][2]; RET(ARG(2) == 22 || ARG(2) == 21 ? (uint32_t)modes(m) : 0, 3); END
+M(d9_GetAdapterModeCount, 3) uint32_t m[DS_DISPLAY_MODE_CAP][2]; RET(ARG(2) == 22 || ARG(2) == 21 ? (uint32_t)modes(m) : 0, 3); END
 M(d9_EnumAdapterModes, 5)                              /* (adapter, format, index, D3DDISPLAYMODE *) */
-    uint32_t m[32][2]; int n = modes(m); if (ARG(3) >= (uint32_t)n) RET(D3DERR_INVALIDCALL, 5);
-    uint32_t v[4] = {m[ARG(3)][0], m[ARG(3)][1], 60, ARG(2)}; memcpy(GP(ARG(4)), v, 16); RET(D3D_OK, 5);
+    uint32_t m[DS_DISPLAY_MODE_CAP][2]; int n = modes(m); if (ARG(3) >= (uint32_t)n) RET(D3DERR_INVALIDCALL, 5);
+    uint32_t v[4] = {m[ARG(3)][0], m[ARG(3)][1], (uint32_t)w32_screen_hz, ARG(2)}; memcpy(GP(ARG(4)), v, 16); RET(D3D_OK, 5);
 END
-M(d9_GetAdapterDisplayMode, 3) uint32_t v[4] = {(uint32_t)w32_screen_w, (uint32_t)w32_screen_h, 60, 22}; memcpy(GP(ARG(2)), v, 16); RET(D3D_OK, 3); END
+M(d9_GetAdapterDisplayMode, 3) uint32_t v[4] = {(uint32_t)w32_screen_w, (uint32_t)w32_screen_h, (uint32_t)w32_screen_hz, 22}; memcpy(GP(ARG(2)), v, 16); RET(D3D_OK, 3); END
 M(d9_CheckDeviceType, 6) RET(ARG(3) == 22 || ARG(3) == 21 ? D3D_OK : D3DERR_NOTAVAILABLE, 6); END
 M(d9_CheckDeviceFormat, 7)                             /* (adapter, type, adapter format, usage, resource type, format) */
     uint32_t usage = ARG(4), f = ARG(6);

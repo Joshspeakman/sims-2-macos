@@ -7,7 +7,7 @@
 #include "w32.h"
 #include "dsr_producer.h"
 #include <stdarg.h>
-#include <mach/mach_time.h>
+#include "platform.h"
 #include <unistd.h>
 #include "../../../src/dsr/dsr_proto.h"
 #include "../../../src/dsr/dsr_shm.h"
@@ -184,11 +184,15 @@ void cmd_end(void)
     uint32_t op = *(uint32_t *)cur;
     if (op < 32) st_ops[op]++;
     if (op == DSR_SURFACE_UPLOAD || op == DSR_UPLOAD_OVER) dsr_uploads++;
-    if (shm) { wpos += cur_size; __atomic_store_n(&shm->write_pos, wpos, __ATOMIC_RELEASE); }
+    if (shm) { wpos += cur_size; __atomic_store_n(&shm->write_pos, wpos, __ATOMIC_RELEASE);
+#ifdef __linux__
+        if (__atomic_load_n(&shm->consumer_waiting, __ATOMIC_SEQ_CST)) dsr_wake(&shm->write_pos);
+#endif
+    }
     else ring_pos += cur_size;
     pthread_mutex_unlock(&cmd_lock);
 }
-static uint64_t now_us(void) { static mach_timebase_info_data_t tb; if (!tb.denom) mach_timebase_info(&tb); return mach_absolute_time() * tb.numer / tb.denom / 1000; }
+static uint64_t now_us(void) { return ds_clock_ns() / 1000; }
 /* Frame cadence (DSR_FPSCAP, default auto: 120 or 60 from the game's own work per frame). */
 static double cap_period_ms = -1; static int cap_auto;
 static void cmd_cap_wait(void)
@@ -244,7 +248,17 @@ static void cmd_frame(void)
     frames++;
     __atomic_store_n(&shm->frames_submitted, frames, __ATOMIC_RELEASE); shm->producer_alive++;
     uint64_t t0 = now_us();
+#ifdef __linux__
+    /* The host owns pacing. Start the next input/simulation update only once
+     * this frame is presented, instead of letting two old frames queue up. */
+    for (;;) {
+        uint32_t done=__atomic_load_n(&shm->frames_done,__ATOMIC_ACQUIRE);
+        if(done==frames || now_us()-t0>=250000) break;
+        dsr_wait(&shm->frames_done,done,1000000);
+    }
+#else
     while (frames - __atomic_load_n(&shm->frames_done, __ATOMIC_ACQUIRE) > 2 && now_us() - t0 < 250000) usleep(50);
+#endif
 }
 static uint32_t rb_cookie; static pthread_mutex_t rb_lock = PTHREAD_MUTEX_INITIALIZER;
 int cmd_readback(uint32_t id, const int32_t *r, uint8_t *dst, uint32_t pitch, uint32_t bpp)
@@ -455,7 +469,9 @@ static void crash_test(Ctx *c)
 void dsr_present(Ctx *c, uint32_t id)           /* a finished frame: pacing, then the present record (also for d3d9.c) */
 {
     { void w32_crash_heartbeat(int); w32_crash_heartbeat(0); crash_test(c); }
+    #ifndef __linux__
     cmd_cap_wait();
+    #endif
     uint64_t q = w32_deterministic ? 0 : now_us();
     uint32_t *p = cmd_begin(DSR_PRESENT, 16); p[0] = id; p[1] = (uint32_t)q; p[2] = (uint32_t)(q >> 32); p[3] = 1000000; cmd_end();
     cmd_frame();
