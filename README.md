@@ -12,8 +12,8 @@ No game executable, archive, generated game code, save, product key or proprieta
 ## Current Linux status
 
 - Native x86-64 build on CachyOS, tested with an RTX 3080 Ti.
-- Main menu, character creation, opening movies and the opening campaign area render with the game's fixed-function graphics path. Saving a new campaign creates the expected party and radar files.
-- SDL input/audio host, Linux crash reports, archive loading, timers and exception handling.
+- Main menu, character creation, opening movies and the opening campaign area render with the game's fixed-function graphics path. Campaign saving and loading have been exercised, including loading a GOG-data save with Steam base-game assets at 3440×1440.
+- SDL input/audio host, Linux crash reports, archive loading, timers and exception handling. A recorded stereo audio output check contains non-silent PCM at 44.1 kHz.
 - Mac-style launcher reads the logo and background from your own `Objects.ds2res`.
 - Display-resolution default, custom resolutions including ultrawide, display-synchronized/custom/unlimited FPS,
   fullscreen/windowed mode, and the Mac version's view-distance controls.
@@ -90,7 +90,7 @@ These checks require no game files. CI runs the same platform, transport and gra
 For game-driven tests, use `DS_TEST=1`, `DS_EXIT_AFTER=<seconds>`, `DS_SCRIPT` and `DS_CMDFILE` as described in
 [the recompiler notes](recomp/README.md). Test data folders must be separate from personal saves.
 
-Outstanding: playable-campaign validation across locations, save/load and audio validation, shader effects,
+Outstanding: broader campaign/save/audio validation, shader effects,
 Steam executable profiles, Broken World, and actual Linux ↔ Mac ↔ Windows hosting/joining tests.
 
 The [original Mac README](README.macos.md), [recompiler design](recomp/README.md), and upstream history are retained.

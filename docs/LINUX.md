@@ -45,3 +45,11 @@ in an actual world. The Mac effects compiler emits Metal; a GLSL backend and pro
 needed before enabling `DS2_SHADERS` on Linux. Keep that capability disabled until effects are implemented.
 
 Original shadow rendering remains in place; DS1's Linux-only experimental shadow/DLSS features are not transferred.
+
+## Initial game-driven checks (2026-10-06)
+
+On CachyOS with an NVIDIA RTX 3080 Ti: the GOG-derived x86-64 build reached menus, created a test hero, played the
+opening Bink movies, loaded the first campaign area at 1024×768 and saved the test party/radar. A separate run with
+Steam base-game data read that save and entered the world at 3440×1440 with a 144 FPS limit. SDL's output tap produced
+44.1 kHz stereo PCM with a nonzero waveform. This is a startup/campaign smoke test, not a full playthrough or audio
+fidelity comparison. Test saves and media remain local in ignored directories.
