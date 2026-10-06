@@ -22,22 +22,31 @@ def resolution_choice(value, note='Custom render size; aspect ratio preserved'):
     return value, f'{w} × {h}', note
 
 def resolution_choices(width, height, saved=None):
+    ultrawide = {(2560,1080), (3440,1440), (3840,1600), (5120,1440), (5120,2160)}
     sizes = [(7680,4320),(7680,2160),(5120,2880),(5120,2160),(5120,1440),
              (3840,2160),(3840,1600),(3840,1080),(3440,1440),(2560,1600),(2560,1440),(2560,1080),
              (1920,1200),(1920,1080),(1680,1050),(1600,900),(1440,900),(1366,768),
              (1280,800),(1280,720),(1024,768),(800,600)]
-    values = list(dict.fromkeys(f'{w}x{h}' for w, h in [(width, height)] + sizes if w <= width and h <= height))
+    # These are render sizes, so ultrawide presets remain selectable even when
+    # the launcher is currently on a smaller display. Presentation keeps aspect.
+    values = list(dict.fromkeys(f'{w}x{h}' for w, h in [(width, height)] + sizes
+                               if (w <= width and h <= height) or (w, h) in ultrawide))
     if saved not in values:
         try: parse_resolution(saved)
         except ValueError: pass
         else: values.append(saved)
-    choices = [resolution_choice(v, 'This display (recommended)' if i == 0 else 'Aspect ratio preserved; borders if needed')
-               for i, v in enumerate(values)]
+    choices = []
+    for i, value in enumerate(values):
+        w, h = parse_resolution(value)
+        note = ('This display (recommended)' if i == 0 else
+                'Rendered at this size, scaled to fit your display' if w > width or h > height else
+                'Aspect ratio preserved; borders if needed')
+        choices.append(resolution_choice(value, note))
     return choices + [('custom', 'Custom…', 'Enter a render resolution, including ultrawide sizes')]
 
 def frame_rate_choices(refresh, saved=None):
     refresh = round(refresh) if math.isfinite(refresh) and refresh > 0 else 60
-    rates = {30, 60, 90, 120, 144, 165, 180, 200, 240, 280, 300, 360, 480, 540, 600, 720, 1000, refresh}
+    rates = {30, 60, 90, 120, 144, 165, 180, 200, 240, 244, 280, 300, 360, 480, 540, 600, 720, 1000, refresh}
     if isinstance(saved, str) and saved.isdecimal() and 1 <= int(saved) <= 10000:
         rates.add(int(saved))
     return [('auto', f'Display ({refresh} Hz)', 'Follows display refresh with VSync; no 120 FPS ceiling')] + [

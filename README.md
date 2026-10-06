@@ -78,6 +78,12 @@ F11 toggles fullscreen; F12 releases/captures the mouse. For online play, the la
 and stores only the same hash as the Mac port, in a file readable only by your account. See the upstream
 [multiplayer notes](docs/MULTIPLAYER.md); the online service and cross-platform gameplay still need Linux validation.
 
+In the launcher, **Frame Rate → 244 FPS** sets a 244 FPS limit, and **Unlimited** removes the frame cap.
+Both turn off VSync so display refresh does not impose another limit. **Resolution** includes 2560×1080,
+3440×1440, 3840×1600, 5120×1440 and 5120×2160, plus custom sizes. The 3D world renders at the selected
+resolution; original 4:3 menus keep their proportions. A render size wider than your current monitor is scaled
+to fit with borders. The display's own resolution remains the default.
+
 ## Verification and next steps
 
 ```sh
