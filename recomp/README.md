@@ -37,8 +37,13 @@ Shader effects (`runtime/win32/hlsl.c`, `d3dx9_fx.c`; the game's Options → Vid
 `FX_DUMP=n` (every parameter at the first n passes of each effect), `D3D9_TEXLOG=n` (texture binding during effect
 passes), `HLSL_MAGENTA=1` (effect pixels drawn magenta), `DSR_FXPATCH="old=>new||old=>new"` (text replaced in every
 effect program's Metal before compiling), `DSR_FXTEXLOG=n` (fog, alpha and textures at effect draws), `DSR_RTLOG=n`
-(render target changes and clears), `DSR_SHOWSURF=<surface id>` (that surface drawn in the screen's corner).
-`tests/hlsl_check.m` compiles every pass of `.fx` files with Metal (`HLSL_DUMP=<technique>` prints its source).
+(render target changes and clears), `DSR_SHOWSURF=<surface id>` (that surface drawn in the screen's corner),
+`DSR_GLOWLOG=1` (draws into and out of effect render targets, which are shown in the screen's corner),
+`D3D9_FXSTATELOG=1` (states the game changes between an effect's Begin and End that the effect doesn't own).
+`D3D9_STATELOG=1` (each render and stage state value the game uses, once). `tests/hlsl_check.m` compiles every pass of
+`.fx` files with Metal (`HLSL_DUMP=<technique>` prints its source); `tests/fx_render_test.m <folder with the .fx files>`
+renders the game's pixel shaders with known inputs and checks their results (glow taps and weights, shadow blur, heat
+shimmer, Dot3, ice, specular, water, sampler slots, XRGB alpha).
 
 Native hot loops (`runtime/win32/native.c`, entered through `tools/lift.py` HOOKS and OVERRIDES): the vertex lighting
 of directional lights and the terrain's 3x3 vertex transform, bit-identical to the original. `DS2_NATIVE=0` runs the

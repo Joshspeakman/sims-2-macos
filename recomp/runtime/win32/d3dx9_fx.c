@@ -541,6 +541,38 @@ static void apply_pass(Fx *f, int k)
     if (pr) { d9_program_consts(f->dev, f->regs, f->nregs); d9_program_use(f->dev, f->prog[k]); }
     else d9_program_use(f->dev, 0);
 }
+/* the states a technique's passes set (what apply_pass changes), for Begin to save and End to restore */
+static void mask_sampler(D9Mask *m, uint32_t stage, const HState *list, int n)
+{
+    if (stage >= 16) return;
+    for (int i = 0; i < n; i++) {
+        if (!strcasecmp(list[i].name, "Texture")) { m->tex[stage] = 1; continue; }
+        int ss = sname(SSN, list[i].name); if (ss >= 0 && ss < 14) m->ss[stage][ss] = 1;
+    }
+}
+static void tech_mask(Fx *f, int t, D9Mask *m)
+{
+    memset(m, 0, sizeof *m); m->prog = 1;
+    for (int p = 0; p < f->fx->t[t].npass; p++) {
+        int k = f->pbase[t] + p; HPass *ps = &f->fx->t[t].pass[p]; int n;
+        for (int i = 0; i < ps->nst; i++) {
+            HState *st = &ps->st[i]; uint32_t ix = (uint32_t)st->index;
+            if (!strcasecmp(st->name, "VertexShader") || !strcasecmp(st->name, "PixelShader")) continue;
+            if (!strcasecmp(st->name, "Texture")) { if (ix < 16) m->tex[ix] = 1; continue; }
+            if (!strcasecmp(st->name, "Sampler")) {
+                if (st->nsub) mask_sampler(m, ix, st->sub, st->nsub);
+                else for (int z = 0; z < f->fx->nv; z++) if (!strcmp(f->fx->v[z].name, st->ref)) mask_sampler(m, ix, f->fx->v[z].ss, f->fx->v[z].nss);
+                continue;
+            }
+            if ((n = sname(RSN, st->name)) >= 0) { if (n < 256) m->rs[n] = 1; continue; }
+            if ((n = sname(TSSN, st->name)) >= 0) { if (ix < 8 && n < 33) m->tss[ix][n] = 1; continue; }
+            if ((n = sname(SSN, st->name)) >= 0) { if (ix < 16 && n < 14) m->ss[ix][n] = 1; continue; }
+        }
+        build_pass(f, k);
+        HProgram *pr = f->hp[k];
+        if (pr && !pr->ps_ffp) for (int sl = 0; sl < pr->nsamp; sl++) { int g = pr->sslot[sl]; if (g >= 0) mask_sampler(m, (uint32_t)sl, f->fx->v[g].ss, f->fx->v[g].nss); }
+    }
+}
 M(fx_Begin, 3) FX_ME
     if (me->tech < 0) RET(D3DERR_INVALIDCALL, 3);
     if (ARG(1)) rt_w32(G_MEM, ARG(1), (uint32_t)me->fx->t[me->tech].npass);
@@ -548,7 +580,7 @@ M(fx_Begin, 3) FX_ME
     if (logon()) { static char seen[256][64]; static int ns; const char *tn_ = me->fx->t[me->tech].name; int dup = 0;
         for (int i = 0; i < ns; i++) if (!strcmp(seen[i], tn_)) dup = 1;
         if (!dup && ns < 256) { snprintf(seen[ns++], 64, "%s", tn_); fprintf(stderr, "d3dx9: Begin %s (flags %x)\n", tn_, ARG(2)); } }
-    if (!(me->flags & 1)) me->saved = d9_state_save(me->dev);           /* unless D3DXFX_DONOTSAVESTATE */
+    if (!(me->flags & 1)) { D9Mask m; tech_mask(me, me->tech, &m); me->saved = d9_state_save(me->dev, &m); }   /* unless D3DXFX_DONOTSAVESTATE */
     RET(D3D_OK, 3);
 END
 M(fx_BeginPass, 2) FX_ME

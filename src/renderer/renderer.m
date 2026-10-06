@@ -8,7 +8,7 @@
 
 int dsr_verbose; long dsr_stat[8]; double dsr_gpu_ms[100000]; int dsr_frame;
 #define MAXSURF 65536
-typedef struct { id<MTLTexture> tex, view2d; uint32_t w, h, kind, fmt, level, root, slice; int used; } Surf;   /* cube faces: tex the cube, view2d the face as 2D */
+typedef struct { id<MTLTexture> tex, view2d; uint32_t w, h, kind, fmt, level, root, slice; int used, fxrt; } Surf;   /* fxrt: an effect pass drew into it (DSR_GLOWLOG) */   /* cube faces: tex the cube, view2d the face as 2D */
 static inline id<MTLTexture> tex2d(const void *sp) { const Surf *s = sp; return s->view2d ? s->view2d : s->tex; }
 typedef struct {   // must match shaders.metal Uniforms
     float wvp[16], wv[16], tex0[16];
@@ -181,7 +181,7 @@ static void surface_create(DSRRenderer *r, const uint32_t *p, uint32_t size)
     uint32_t id = p[0], w = p[1], h = p[2], kind = p[3], fmt = p[4], parent = p[5], level = p[6];
     uint32_t face = size >= 40 ? p[8] : 0, cube = size >= 40 && (p[9] & 1);
     if (id >= MAXSURF) return;
-    Surf *s = &r->s[id]; s->tex = s->view2d = nil; s->used = 1; s->w = w; s->h = h; s->kind = kind; s->fmt = fmt; s->level = level; s->root = id; s->slice = face;
+    Surf *s = &r->s[id]; s->tex = s->view2d = nil; s->used = 1; s->fxrt = 0; s->w = w; s->h = h; s->kind = kind; s->fmt = fmt; s->level = level; s->root = id; s->slice = face;
     if (parent && surf(r, parent)) {                       // a mip level (or another cube face): shares the root's texture
         Surf *root = surf(r, parent); s->tex = root->tex; s->root = parent;
         if (cube && level == 0)                            // a cube face: its own 2D view
@@ -265,9 +265,15 @@ static MTLCompareFunction cmpf(uint32_t f)
     switch (f) { case 1: return MTLCompareFunctionNever; case 2: return MTLCompareFunctionLess; case 3: return MTLCompareFunctionEqual; case 4: return MTLCompareFunctionLessEqual;
     case 5: return MTLCompareFunctionGreater; case 6: return MTLCompareFunctionNotEqual; case 7: return MTLCompareFunctionGreaterEqual; default: return MTLCompareFunctionAlways; }
 }
+/* a target without alpha (XRGB, the back buffer too): D3D reads its destination alpha as 1 */
+static uint32_t target_bf(DSRRenderer *r, uint32_t b)
+{
+    Surf *t = surf(r, r->rt); if (!t || t->fmt != 2) return b;
+    return b == 7 ? 2 : b == 8 ? 1 : b;                     /* DESTALPHA -> ONE, INVDESTALPHA -> ZERO */
+}
 static id<MTLRenderPipelineState> pipeline_for(DSRRenderer *r, uint32_t fvf, int has_depth)
 {
-    uint32_t blend = r->rs[27] ? 1 : 0, sb = blend ? r->rs[19] : 2, db = blend ? r->rs[20] : 1;
+    uint32_t blend = r->rs[27] ? 1 : 0, sb = blend ? target_bf(r, r->rs[19]) : 2, db = blend ? target_bf(r, r->rs[20]) : 1;
     uint32_t atest = r->rs[15] ? 1 : 0;                                                       // D3DRS_ALPHATESTENABLE
     uint32_t cw = r->rs[168] & 15;                                                            // D3DRS_COLORWRITEENABLE (R1 G2 B4 A8)
     uint64_t key = ((uint64_t)fvf << 32) | (uint64_t)cw << 20 | (blend << 16) | (sb << 8) | (db << 4) | atest << 2 | (uint64_t)has_depth << 1 | 1;   // never 0
@@ -366,6 +372,12 @@ static void draw(DSRRenderer *r, const uint32_t *p, uint32_t size)
     }
     if (!nv || 16 + (uint64_t)nv * stride + (uint64_t)ni * 2 > size) { dsr_stat[1]++; return; }   /* 64-bit: no wrap */
     if (prim == 6 && (ni ? ni : nv) < 3) return;                                 /* a fan of fewer than 3: nothing (as D3D) */
+    { static int na = -1, nb = -1; if (na < 0) { na = nb = getenv("DSR_GLOWLOG") ? 400 : 0; } Surf *t_ = surf(r, r->rt), *x0_ = surf(r, r->tex[0]);
+      int into = t_ && t_->fxrt, add = r->rs[27] && r->rs[19] == 2 && r->rs[20] == 2 && x0_ && x0_->fxrt;
+      if ((into && na > 0) || (add && nb > 0)) { if (into) na--; else nb--; float fs, fe; memcpy(&fs, &r->rs[36], 4); memcpy(&fe, &r->rs[37], 4);
+        fprintf(stderr, "glow %s rt %u (%ux%u) fvf %x nv %u: fog %u %u/%u | blend %u %u/%u cw %x z %u/%u | tf %08x st0 %u/%u,%u a%u/%u,%u st1 %u/%u | tex0 %u\n",
+                into ? "draw into" : "add from", r->rt, t_ ? t_->w : 0, t_ ? t_->h : 0, fvf, nv, r->rs[28], r->rs[35], r->rs[140], r->rs[27], r->rs[19], r->rs[20], r->rs[168],
+                r->rs[7], r->rs[14], r->rs[60], r->tss[0][1], r->tss[0][2], r->tss[0][3], r->tss[0][4], r->tss[0][5], r->tss[0][6], r->tss[1][1], r->tss[1][4], r->tex[0]); } }
     Surf *rt = surf(r, r->rt), *ds = surf(r, r->ds); if (!rt) { dsr_stat[2]++; return; }
     id<MTLRenderPipelineState> pso = pipeline_for(r, fvf, ds != NULL); if (!pso) { dsr_stat[3]++; return; }
     id<MTLRenderCommandEncoder> e = enc_for(r, r->rt, r->ds); if (!e) { dsr_stat[4]++; return; }
@@ -438,7 +450,7 @@ static void prog_create(DSRRenderer *r, const uint32_t *p, uint32_t size)
 }
 static id<MTLRenderPipelineState> prog_pipeline(DSRRenderer *r, uint32_t mask, int has_depth)
 {
-    uint32_t blend = r->rs[27] ? 1 : 0, sb = blend ? r->rs[19] : 2, db = blend ? r->rs[20] : 1, cw = r->rs[168] & 15;
+    uint32_t blend = r->rs[27] ? 1 : 0, sb = blend ? target_bf(r, r->rs[19]) : 2, db = blend ? target_bf(r, r->rs[20]) : 1, cw = r->rs[168] & 15;
     uint64_t key = (uint64_t)r->cur_prog << 48 | (uint64_t)mask << 32 | cw << 20 | blend << 16 | sb << 8 | db << 4 | (uint64_t)has_depth << 1 | 1;
     uint32_t h = (uint32_t)((key * 0x9e3779b97f4a7c15ull) >> 55);
     while (r->ppso_k[h] && r->ppso_k[h] != key) h = (h + 1) & 511;
@@ -507,6 +519,11 @@ static void draw_prog(DSRRenderer *r, const uint32_t *p, uint32_t size)
         if (kind == 1 && t && t->tex.textureType == MTLTextureTypeCube) x = t->tex;
         [e setFragmentTexture:x atIndex:(NSUInteger)k]; [e setFragmentSamplerState:sampler_for(r, k) atIndex:(NSUInteger)k];
     }
+    if (rt->w == 256 && rt->h == 256) rt->fxrt = 1;
+    { static int n = -1; if (n < 0) n = getenv("DSR_GLOWLOG") ? 600 : 0;
+      if (n > 0 && rt->w == 256) { n--; Surf *t0 = surf(r, r->tex[0]);
+        fprintf(stderr, "glow prog %u rt %u (%ux%u) vp %.0fx%.0f mask %04x nv %u pre %u | blend %u %u/%u | tex0 %u %ux%u%s\n", r->cur_prog, r->rt, rt->w, rt->h, r->vp[2], r->vp[3],
+                mask, nv, pretrans, r->rs[27], r->rs[19], r->rs[20], r->tex[0], t0 ? t0->w : 0, t0 ? t0->h : 0, t0 ? "" : " (none: white)"); } }
     static int tlog = -1; if (tlog < 0) tlog = getenv("DSR_FXTEXLOG") ? atoi(getenv("DSR_FXTEXLOG")) : 0;
     { static int n = -1; if (n < 0) n = getenv("DSR_RTLOG") ? atoi(getenv("DSR_RTLOG")) : 0; static uint32_t lastp; static int lastf;
       if (n > 0 && r->rs[28] && (r->cur_prog != lastp || dsr_frame != lastf)) { n--; lastp = r->cur_prog; lastf = dsr_frame; fprintf(stderr, "dsr: frame %d: program %u draws into %u after %ld draws\n", dsr_frame, r->cur_prog, r->rt, dsr_stat[0]); } }
@@ -662,6 +679,9 @@ int dsr_renderer_exec(DSRRenderer *r, uint32_t op, const uint8_t *pl, uint32_t s
     case DSR_BLT: { int32_t dr[4], sr[4]; memcpy(dr, p + 1, 16); memcpy(sr, p + 6, 16);
                     if (p[5]) quad(r, p[0], dr, p[5], sr, 0, 0); else if (!(p[10] & 0x20000)) quad(r, p[0], dr, 0, dr, 1, p[11]); } break;
     case DSR_PRESENT: r->presented = p[0]; dsr_frame++;   // caller presents/commits
+        { static int glow = -1; if (glow < 0) glow = getenv("DSR_GLOWLOG") != 0;   // development: effect targets in the corner
+          if (glow) { int x = 0; for (uint32_t id = 1; id < MAXSURF && x < 5 * 260; id++) if (r->s[id].used && r->s[id].fxrt) {
+              int32_t d[4] = {x, 0, x + 256, 256}, sr[4] = {0, 0, 256, 256}; uint32_t ort = r->rt; quad(r, p[0], d, id, sr, 0, 0); r->rt = ort; x += 260; } } }
         { static int show = -1; if (show < 0) show = getenv("DSR_SHOWSURF") ? atoi(getenv("DSR_SHOWSURF")) : 0;   // development: a surface in the corner
           Surf *t = surf(r, (uint32_t)show); if (show > 0 && t) { int32_t d[4] = {0, 0, (int32_t)t->w, (int32_t)t->h}, sr[4] = {0, 0, (int32_t)t->w, (int32_t)t->h};
             uint32_t ort = r->rt; quad(r, p[0], d, (uint32_t)show, sr, 0, 0); r->rt = ort; } }
