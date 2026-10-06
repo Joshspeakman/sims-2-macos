@@ -92,6 +92,8 @@ uint32_t d9_texture_at(Dev9 *d, uint32_t stage);                       /* the in
 uint32_t d9_program_create(const char *msl, size_t len, uint32_t kinds);
 void d9_program_use(Dev9 *d, uint32_t prog);
 void d9_program_consts(Dev9 *d, const float *regs, int nregs);
-void *d9_state_save(Dev9 *d);                                          /* render/stage/sampler states, textures, program */
+/* which device states an effect's technique sets (as D3DX's Begin saves and End restores only those) */
+typedef struct D9Mask { uint8_t rs[256], tss[8][33], ss[16][14], tex[16], prog; } D9Mask;
+void *d9_state_save(Dev9 *d, const D9Mask *m);                         /* those states and textures, the program */
 void d9_state_restore(Dev9 *d, void *saved);                           /* and frees it */
 int d9_shaders_on(void);

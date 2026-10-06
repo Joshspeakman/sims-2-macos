@@ -729,11 +729,13 @@ static void intrinsic(Gen *g, B *b, HExpr *e)
         if (gi >= 0 && g->samp_kind) g->samp_kind[gi] = (uint8_t)sk;
         B s = {0}; sampler_args(g, &s, a[0]);
         char *comma = s.s ? strchr(s.s, ',') : NULL; if (comma) *comma = 0;
+        if (gi >= 0) bp(b, "hlsl_x1(g.xr_%s, ", g->fx->v[gi].name);   /* an XRGB texture's alpha reads as 1 (D3D) */
         bp(b, "%s.sample(%s, ", s.s ? s.s : "?", comma ? comma + 2 : "?");
         if (!strcmp(n, "tex2Dproj")) { B c = {0}; exc(g, &c, a[1], vec(4)); bp(b, "(%s).xy / (%s).w)", c.s, c.s); free(c.s); }
         else if (!strcmp(n, "tex2Dlod")) { B c = {0}; exc(g, &c, a[1], vec(4)); bp(b, "(%s).xy, level((%s).w))", c.s, c.s); free(c.s); }
         else if (!strcmp(n, "tex2Dbias")) { B c = {0}; exc(g, &c, a[1], vec(4)); bp(b, "(%s).xy, bias((%s).w))", c.s, c.s); free(c.s); }
         else { exc(g, b, a[1], vec(sk == HS_2D ? 2 : 3)); bp(b, ")"); }
+        if (gi >= 0) bp(b, ")");
         free(s.s); return;
     }
     static const struct { const char *h, *m; } same[] = {{"lerp", "mix"}, {"frac", "fract"}, {"saturate", "saturate"}, {"normalize", "normalize"},
@@ -969,6 +971,7 @@ static const char PRELUDE[] =
 "             float4 a12 [[attribute(12)]]; float4 a13 [[attribute(13)]]; float4 a14 [[attribute(14)]]; float4 a15 [[attribute(15)]]; };\n"
 "struct V2F { float4 pos [[position]]; float4 c0; float4 c1; float4 t0; float4 t1; float4 t2; float4 t3; float4 t4; float4 t5; float4 t6; float4 t7; float fog; };\n"
 "static V2F v2f_default() { V2F o; o.pos = float4(0); o.c0 = float4(1); o.c1 = float4(0); o.t0 = o.t1 = o.t2 = o.t3 = o.t4 = o.t5 = o.t6 = o.t7 = float4(0); o.fog = 1; return o; }\n"
+"static float4 hlsl_x1(bool xrgb, float4 c) { if (xrgb) c.a = 1; return c; }   // a texture without alpha: alpha reads as 1\n"
 "static void hlsl_clip(float x) { if (x < 0) discard_fragment(); }\n"
 "static void hlsl_clip(float2 x) { if (any(x < 0)) discard_fragment(); }\n"
 "static void hlsl_clip(float3 x) { if (any(x < 0)) discard_fragment(); }\n"
@@ -1147,6 +1150,7 @@ static void gen_ps(Gen *g, B *b, HState *s)
     bp(b, "fragment float4 fs_fx(V2F in [[stage_in]], constant FxU &u [[buffer(1)]], constant float4 *R [[buffer(2)]]");
     for (int k = 0; k < g->pr->nsamp; k++) { int v = g->pr->sslot[k]; if (v < 0) continue; bp(b, ",\n    %s t_%s [[texture(%d)]], sampler s_%s [[sampler(%d)]]", texty(sampler_texture_kind(g, v)), g->fx->v[v].name, k, g->fx->v[v].name, k); }
     bp(b, ")\n{\n    G g = load_g(R);\n");
+    for (int k = 0; k < g->pr->nsamp; k++) { int v = g->pr->sslot[k]; if (v >= 0) bp(b, "    g.xr_%s = u.tex[%d].y != 0;\n", g->fx->v[v].name, k); }
     g->in_ps = 1; entry_args(g, b, f, s, "ps"); g->in_ps = 0;
     bp(b, "    %s r = f_%s(", tn(g, f->ret, tb), f->name); for (int i = 0; i < f->np; i++) bp(b, "%sa%d", i ? ", " : "", i);
     bp(b, "%sg", f->np ? ", " : "");
@@ -1206,8 +1210,10 @@ HProgram *hlsl_compile_pass(HFx *fx, int tech, int pass)
     }
     for (int i = 0; i < nv; i++) if (g.gused[i] && fx->v[i].is_static) emit_const(&g, &b, &fx->v[i]);
     bp(&b, "struct G { int unused_;");
+    for (int i = 0; i < nv; i++) if (fx->v[i].t.base == HB_SAMPLER) bp(&b, " bool xr_%s;", fx->v[i].name);
     for (int i = 0; i < nv; i++) if (g.gused[i] && is_param(&fx->v[i])) { HType et = fx->v[i].t; et.arr = 0; bp(&b, " %s %s", tn(&g, et, tb), fx->v[i].name); if (fx->v[i].t.arr) bp(&b, "[%d]", fx->v[i].t.arr); bp(&b, ";"); }
     bp(&b, " };\nstatic G load_g(constant float4 *R)\n{\n    G g; g.unused_ = 0;\n");
+    for (int i = 0; i < nv; i++) if (fx->v[i].t.base == HB_SAMPLER) bp(&b, "    g.xr_%s = false;\n", fx->v[i].name);
     for (int i = 0; i < nv; i++) if (g.gused[i] && is_param(&fx->v[i])) {
         HType et = fx->v[i].t; et.arr = 0; int per = hlsl_type_regs(fx, et);
         if (et.base == HB_STRUCT) { gerr(&g, "struct parameter %s", fx->v[i].name); continue; }
