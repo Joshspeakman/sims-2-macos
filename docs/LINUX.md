@@ -59,3 +59,58 @@ Internet lobby login was also checked with a saved retail key: the native Linux 
 call, so the launcher saved the key hash but the game could not find its `DoubleHash` registry value. With the
 startup call restored, Internet login reached OpenSpy and the party-selection screen. This verifies the key/login
 path; joining another machine and cross-platform gameplay still need a paired test.
+
+## Test Lab
+
+Choose your game files in the launcher, then **TEST LAB → Start test game**. The first launch copies your current
+single-player saves into `<data>/test-lab/drive_c/`; load one through the game's Single Player menu. Alternatively,
+create a new character there. **Prepare hero / unlock skills** makes the screen hero invincible, raises the four
+combat skills to 100, attributes to 500, unlocks the installed passive skills and restores life/mana. The lab's
+mutations require a loaded single-player world. Normal Play does not enable the scripting bridge.
+
+- **Locations:** search the installed map's starting groups and travel with the party. This includes locations
+  in later acts. Wait for streaming to finish and press Escape in the game to skip any story movie. The status
+  line shows the hero's current region. Destination scripts can trigger quests/cinematics; reapply invincibility
+  if a scene resets it. This is travel within the loaded map, not a Broken World loader or a quest-completion tool.
+- **Gear:** give or give-and-equip a concrete item. The details show its equipment slot and source. Inventory space
+  and equipment rules still apply; verify the appearance in-game. Base/developer definitions are hidden by default.
+- **Enemies / other objects:** spawn 1–16 nearby. The last spawn becomes the cast target. Invincible spawns permit
+  repeated attacks; Friendly spawn allows friendly-target tests. Enemies run their own AI, including their attacks.
+- **Spells / power templates:** cast with automatic, self, last-target or ground targeting. Mana is refilled before
+  each request. **Trigger effect** calls the game's magic implementation directly, without the caster animation;
+  **Animated cast job** instead queues the normal movement/animation job, which can be interrupted or fail after
+  submission. Use **Wound hero** before healing tests. **Target party member…** selects an existing companion;
+  **Kill test target** then permits resurrection tests. Existing party targets are never included in cleanup.
+- **Active powers:** selects, recharges and queues the real power action. Read its required stances in the details
+  and equip an appropriate weapon. Some powers enhance the next attack. Their spell templates are also listed
+  separately for direct effect tests, which do not exercise the full power animation/stance path.
+- **Cast filtered spells in sequence:** runs the visible concrete spell templates at the selected interval and
+  stops on a rejected request. Stop cancels future requests, not effects already running. Different target types,
+  inventory limits, summon/buff limits and boss-specific scripts need manual setup. This is not a claim that every
+  template can be cast by a human hero in an arbitrary scene.
+- **Clean up test objects:** removes objects/items created through the panel, including equipped test gear.
+  It does not undo quests, buffs, spell-created summons or all indirect effects; reload a fresh save copy for a
+  clean scene. Tracking is bounded to 512 direct spawns per run/cleanup. **Refresh save copies** is available while
+  the test game is stopped and backs up previous test saves under `test-lab/save-backups/`.
+
+The base archives currently expose 88 travel points, 450 spell/power templates and 37 active powers. The lists are
+read from the selected local archives, including template inheritance, rather than bundled game content. Counts
+include abstract and developer entries; some unused retail definitions cannot be instantiated. Effect and shader
+tabs are a searchable reference inventory. They are not arbitrary effect launchers or shader-execution telemetry.
+
+Each request and response is written to `test-lab/lab/history.jsonl`. A successful response only means the command
+ran or a job was queued. Inspect the result in-game, then mark the last test as visually correct or a problem, with
+notes. **Export report** includes the local catalog, history and manual reviews. A separate `frames-*.csv` measures
+each test session's frame timing (the host writes it on exit); `game.log` contains the latest run's engine output.
+Reports/catalogs contain descriptions read from your game files and should remain local. No original game files,
+personal saves, normal launcher settings or stored multiplayer keys are modified by these controls.
+
+The native bridge registers small FuBi functions before engine startup and executes Skrit requests from the main
+game thread's message pump. It is opt-in (`DS_TEST_LAB=1`) and uses the supported GOG 2.3 export layout. There is no
+network control listener. Command delivery is atomic, only one request is pending, and an unanswered mutation is
+reported as unconfirmed instead of automatically retried.
+
+Local checks exercised equipment changes, enemy spawning, invincibility, travel to Kalrathia, fire/ice/lightning/
+death casts, summoning, healing, power activation and cleanup. Black patches were visible around some effects in
+the current fixed-function renderer. These are recorded as visual failures, not coverage passes: the Linux
+programmable-effects backend remains outstanding. Synthetic archive, parser and mailbox tests run in Linux CI.

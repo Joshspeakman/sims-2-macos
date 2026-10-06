@@ -27,6 +27,7 @@ int w32_prepare(const char *exe, const char *game_dir, const char *drive_c, cons
 /* Runs the game's entry point on the calling thread (give it a large stack). Returns the exit code. */
 uint32_t w32_run(char *msg, size_t cap)
 {
+    { void w32_lab_thread(void); w32_lab_thread(); }
     jmp_buf ej, fj; w32_exit_jmp = &ej; fault_jmp = &fj;
     extern __thread Ctx *w32_cur_ctx; w32_cur_ctx = &game_ctx;
     if (setjmp(ej)) { snprintf(msg, cap, "exit %u", w32_exit_code); return w32_exit_code; }

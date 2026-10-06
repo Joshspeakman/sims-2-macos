@@ -24,3 +24,4 @@ for test in frame_pacer display_modes; do
 done
 python3 -m py_compile recomp/host/linux_launcher/*.py recomp/tools/check_edition.py \
     recomp/tools/install_linux.py recomp/tools/prepare_linux_icon.py
+python3 recomp/tests/test_lab_test.py
