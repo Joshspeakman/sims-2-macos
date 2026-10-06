@@ -365,7 +365,8 @@ static int peek(Ctx *c, uint32_t out, uint32_t hwnd, uint32_t lo, uint32_t hi, i
     return 0;
 }
 void w32_crash_heartbeat(int which); void w32_crash_wait_begin(int, uint32_t, uint32_t); void w32_crash_wait_end(void);
-IMPL(user32, PeekMessageA) { w32_crash_heartbeat(1); RET(peek(c, ARG(0), ARG(1), ARG(2), ARG(3), ARG(4) & 1), 5); }
+void w32_lab_poll(Ctx *c);
+IMPL(user32, PeekMessageA) { w32_crash_heartbeat(1); w32_lab_poll(c); RET(peek(c, ARG(0), ARG(1), ARG(2), ARG(3), ARG(4) & 1), 5); }
 IMPL(user32, GetMessageA)
 {
     uint32_t out = ARG(0);

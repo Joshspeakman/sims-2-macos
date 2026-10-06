@@ -15,6 +15,8 @@ No game executable, archive, generated game code, save, product key or proprieta
 - Main menu, character creation, opening movies and the opening campaign area render with the game's fixed-function graphics path. Campaign saving and loading have been exercised, including loading a GOG-data save with Steam base-game assets at 3440×1440.
 - SDL input/audio host, Linux crash reports, archive loading, timers and exception handling. A recorded stereo audio output check contains non-silent PCM at 44.1 kHz.
 - Mac-style launcher reads the logo and background from your own `Objects.ds2res`.
+- **Test Lab** in the launcher: searchable travel points, gear, enemies, spells and powers; isolated save copies,
+  invincibility, spell sequences and a visual-test log. See [test controls](docs/LINUX.md#test-lab).
 - Display-resolution default, custom resolutions including ultrawide, display-synchronized/custom/unlimited FPS,
   fullscreen/windowed mode, and the Mac version's view-distance controls.
 - DirectPlay and Winsock retained. Loopback packet tests pass with and without 20% simulated loss. **A real

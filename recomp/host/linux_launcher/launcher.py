@@ -87,10 +87,12 @@ def main():
             hint.setAlignment(Qt.AlignmentFlag.AlignCenter)
             hint = self.label('F12 releases the mouse · F11 toggles fullscreen',54,595,672,20)
             hint.setAlignment(Qt.AlignmentFlag.AlignCenter); hint.setFont(QFont('DejaVu Serif',9))
-            repo = QPushButton('PROJECT',self); self.place(repo,54,642,190,50)
+            repo = QPushButton('PROJECT',self); self.place(repo,54,642,140,50)
             repo.clicked.connect(lambda: QDesktopServices.openUrl(QUrl('https://github.com/Joshspeakman/dungeon-siege-2-linux')))
-            quit = QPushButton('QUIT',self); self.place(quit,282,642,190,50); quit.clicked.connect(self.close)
-            play = QPushButton('PLAY',self); self.place(play,510,642,216,50); play.clicked.connect(self.start)
+            lab = QPushButton('TEST LAB',self); self.place(lab,208,642,160,50); lab.clicked.connect(self.open_lab)
+            self.lab = None
+            quit = QPushButton('QUIT',self); self.place(quit,382,642,140,50); quit.clicked.connect(self.close)
+            play = QPushButton('PLAY',self); self.place(play,536,642,190,50); play.clicked.connect(self.start)
             play.setDefault(True)
             self.move(screen.availableGeometry().center()-self.rect().center())
         def place(self,widget,x,y,w,h): widget.setGeometry(*(round(v*self.scale) for v in (x,y,w,h)))
@@ -129,7 +131,20 @@ def main():
                 try: save_cdkey(args.data,key)
                 except (OSError,ValueError) as e: QMessageBox.warning(self,'CD key',str(e)); return
                 QMessageBox.information(self,'CD key','The key hash has been saved.')
+        def open_lab(self):
+            if self.lab and self.lab.isVisible():
+                self.lab.raise_(); self.lab.activateWindow(); return
+            try:
+                from test_lab import TestLab
+                selected = self.controls.get('gameProfile')
+                game = profiles.get(selected.currentData(), args.game) if selected else args.game
+                settings = {key:widget.currentData() for key,widget in self.controls.items()}
+                self.lab = TestLab(args.binary, args.exe, game, args.data, self, settings=settings)
+                self.lab.show()
+            except (OSError, RuntimeError) as e:
+                QMessageBox.warning(self,'Test Lab',str(e))
         def start(self):
+            if self.lab and self.lab.isVisible(): self.lab.close()
             selections={key:widget.currentData() for key,widget in self.controls.items()}
             try:
                 self.launch_env=environment(selections); save_settings(args.data,selections)

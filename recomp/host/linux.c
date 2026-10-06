@@ -251,7 +251,8 @@ int main(int argc,char **argv) {
  if(!exe||!game||!data) { fprintf(stderr,"--exe, --game and --data are required\n"); return 1; }
  test_mode=getenv("DS_TEST")&&atoi(getenv("DS_TEST"));
  signal(SIGINT,stop_host); signal(SIGTERM,stop_host);
- const char *title="Dungeon Siege II — Linux";
+ const char *title=getenv("DS_TEST_LAB") && !strcmp(getenv("DS_TEST_LAB"),"1")
+     ? "Dungeon Siege II — Test Lab" : "Dungeon Siege II — Linux";
  SDL_SetHint(SDL_HINT_APP_NAME,title);
  SDL_SetHint("SDL_APP_ID","dungeon-siege-2-linux");
  SDL_SetHint("SDL_VIDEO_X11_WMCLASS","dungeon-siege-2-linux");
@@ -294,6 +295,7 @@ int main(int argc,char **argv) {
  dsr_gl_readback(renderer,(uint8_t *)h+DSR_READBACK_OFFSET,DSR_READBACK_SIZE,&h->readback_done); dsr_attach_consumer(h);
  w32_host_window_created=window_created; w32_host_window_changed=window_changed;
  if(w32_prepare(exe,game,drive,overlay)) return 1;
+ { void w32_lab_init(const char *); w32_lab_init(data); }
  if(test_mode) parse_script();
  __atomic_store_n(&h->host_ready,1,__ATOMIC_RELEASE);
  pthread_attr_t attr; pthread_attr_init(&attr); pthread_attr_setstacksize(&attr,256u<<20); pthread_t thread;
