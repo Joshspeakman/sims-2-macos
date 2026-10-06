@@ -53,3 +53,9 @@ opening Bink movies, loaded the first campaign area at 1024×768 and saved the t
 Steam base-game data read that save and entered the world at 3440×1440 with a 144 FPS limit. SDL's output tap produced
 44.1 kHz stereo PCM with a nonzero waveform. This is a startup/campaign smoke test, not a full playthrough or audio
 fidelity comparison. Test saves and media remain local in ignored directories.
+
+Internet lobby login was also checked with a saved retail key: the native Linux host now calls
+`w32_registry_install(data)` before starting the game, matching the Mac host. The initial Linux port omitted that
+call, so the launcher saved the key hash but the game could not find its `DoubleHash` registry value. With the
+startup call restored, Internet login reached OpenSpy and the party-selection screen. This verifies the key/login
+path; joining another machine and cross-platform gameplay still need a paired test.
