@@ -31,9 +31,11 @@ shaders declare 18 bones and index 26+, see `third_party/mojoshader/README.md`).
 `tests/saves/fnvtest1.fos` is a save made just after character creation; the `load-*` scenarios start from it.
 
 Still to do:
-1. Performance: programmable draws copy every vertex as float4 through the command ring. Caching vertex/index
-   buffers on the GPU is the big win.
-2. The Mac side: MojoShader's Metal profile in place of GLSL; `renderer.m` needs DSR_GLSL_CREATE's MSL equivalent.
+1. Performance: done for Linux. Vertex and index buffers are kept on the GPU (DSR_VBUF_DATA, only the ranges the game
+   locked are sent again) and shader draws name buffers and D3D element types (DSR_DRAW_PROG_VB): Goodsprings went
+   from 30 to ~100 fps, the interior tour from a median of ~30 to 123. `W32_PROFILE` + `tools/profile.py` is a
+   sampling profiler for the next round. User-pointer draws still take the float4 path.
+2. The Mac side (also needs the three buffer records in `renderer.m`; until then the D3D9 layer uses them on Linux only): MojoShader's Metal profile in place of GLSL; `renderer.m` needs DSR_GLSL_CREATE's MSL equivalent.
 3. The 127 unresolved jump tables, `_except_handler4`, C++ exceptions if the game throws.
 
 The installer note below refers to the macOS repository's `game-installer` release (this repository has none).
