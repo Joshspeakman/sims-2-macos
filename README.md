@@ -5,8 +5,10 @@ starting from upstream `3e3e47c`. The player's own x86 executable and Miles/Bink
 into native code. The Linux host uses SDL2, OpenGL, FreeType/fontconfig and native sockets; it does not use Wine or Proton.
 
 **This is an early development build, not feature parity with the Mac release.** The first supported executable is
-GOG 2.3 (installer 37617). Steam base-game **data files** can be used with that build, but recompiling the Steam
-executable itself and running Broken World are not implemented yet. The GOG executable remains required.
+GOG 2.3 (installer 37617). Steam base-game **data files** can be used with that build; the GOG executable remains
+required for the base-game profiles. A separate [Broken World preview](docs/BROKEN_WORLD.md) is available on
+the `broken-world` branch. Its opening area, saving and ultrawide reloading have been exercised;
+effects rendering and broader campaign/multiplayer validation remain unfinished.
 No game executable, archive, generated game code, save, product key or proprietary DLL is distributed here.
 
 ## Current Linux status
@@ -101,6 +103,6 @@ For game-driven tests, use `DS_TEST=1`, `DS_EXIT_AFTER=<seconds>`, `DS_SCRIPT` a
 [the recompiler notes](recomp/README.md). Test data folders must be separate from personal saves.
 
 Outstanding: broader campaign/save/audio validation, shader effects,
-Steam executable profiles, Broken World, and actual Linux ↔ Mac ↔ Windows hosting/joining tests.
+additional executable profiles, broader Broken World campaign validation, and actual Linux ↔ Mac ↔ Windows hosting/joining tests.
 
 The [original Mac README](README.macos.md), [recompiler design](recomp/README.md), and upstream history are retained.

@@ -14,14 +14,16 @@ from PySide6.QtWidgets import (QWidget, QVBoxLayout, QHBoxLayout, QLabel, QPushB
 
 from lab_commands import Bridge
 from lab_content import build_catalog
-from lab_session import SAVE_RELATIVE, copy_saves, launch_environment
+from lab_session import copy_saves, launch_environment
+from profiles import save_relative
 from settings import read_settings
 
 
 class TestLab(QWidget):
-    def __init__(self, binary, exe, game, data, parent=None, settings=None):
+    def __init__(self, binary, exe, game, data, parent=None, settings=None, edition='gog'):
         super().__init__(parent, Qt.WindowType.Window)
-        self.setWindowTitle('Dungeon Siege II — Test Lab')
+        title = 'Dungeon Siege II: Broken World' if edition == 'broken-world' else 'Dungeon Siege II'
+        self.setWindowTitle(title + ' — Test Lab')
         self.resize(1040, 800)
         self.setStyleSheet('QWidget { background: #241d19; color: #eee4d3; } '
                           'QLineEdit, QTextEdit, QListWidget, QComboBox, QSpinBox { background: #151311; border: 1px solid #715d44; padding: 5px; } '
@@ -31,7 +33,9 @@ class TestLab(QWidget):
         self.binary, self.exe, self.game = map(str, (binary, exe, game))
         self.normal_data = Path(data)
         self.settings = dict(settings if settings is not None else read_settings(data))
-        self.data = self.normal_data / 'test-lab'
+        self.edition = edition
+        self.save_relative = save_relative(edition)
+        self.data = self.normal_data / ('test-lab-broken-world' if edition == 'broken-world' else 'test-lab')
         self.data.mkdir(parents=True, exist_ok=True, mode=0o700)
         self.lock = (self.data / 'panel.lock').open('w')
         try:
@@ -137,7 +141,7 @@ class TestLab(QWidget):
     def start_game(self):
         if self.running(): return
         try:
-            if not (self.data / SAVE_RELATIVE).exists(): copy_saves(self.normal_data, self.data)
+            if not (self.data / self.save_relative).exists(): copy_saves(self.normal_data, self.data, self.edition)
             for name in ('request', 'response'):
                 (self.bridge.directory / name).unlink(missing_ok=True)
             self.bridge.pending = None
@@ -156,7 +160,7 @@ class TestLab(QWidget):
     def refresh_saves(self):
         if self.running(): return
         try:
-            copy_saves(self.normal_data, self.data)
+            copy_saves(self.normal_data, self.data, self.edition)
             self.log.append('Fresh single-player copies created. Previous test saves moved to save-backups.')
         except OSError as e:
             QMessageBox.warning(self, 'Copy saves', str(e))

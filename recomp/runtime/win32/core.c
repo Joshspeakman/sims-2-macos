@@ -37,6 +37,13 @@ int h_close(uint32_t h)
 
 /* ---- version / modules ---- */
 IMPL(kernel32, GetVersion) { RET(0x0a280105u, 0); }          /* Windows XP, build 2600 */
+IMPL(kernel32, IsProcessorFeaturePresent)
+{
+    /* Match rt_cpuid's guest CPU: CMPXCHG8B and RDTSC, without MMX/SSE.
+     * Reporting the host CPU's SIMD support would select unlifted guest code.
+     * Feature IDs: https://learn.microsoft.com/windows/win32/api/processthreadsapi/nf-processthreadsapi-isprocessorfeaturepresent */
+    RET(ARG(0) == 2 || ARG(0) == 8, 1);
+}
 IMPL(kernel32, GetVersionExA)
 {
     uint32_t p = ARG(0), sz = rt_r32(G_MEM, p);
@@ -47,7 +54,7 @@ IMPL(kernel32, GetVersionExA)
     RET(1, 1);
 }
 static const char *known_dlls[] = {"kernel32", "user32", "gdi32", "advapi32", "ddraw", "dsound", "dinput", "dinput8",
-    "winmm", "ole32", "oleaut32", "version", "wsock32", "ws2_32", "mss32", "binkw32", "ntdll", "shell32", "comctl32", "imm32", "shfolder", "dbghelp", 0};
+    "winmm", "ole32", "oleaut32", "version", "wsock32", "ws2_32", "mss32", "binkw32", "ntdll", "shell32", "comctl32", "imm32", "shfolder", "dbghelp", "d3d9", 0};
 #define MODULE_BASE 0x70000000u
 static int dll_index(const char *name)
 {
@@ -258,6 +265,13 @@ IMPL(kernel32, LeaveCriticalSection)
 IMPL(kernel32, InterlockedIncrement) { RET(__atomic_add_fetch((uint32_t *)GP(ARG(0)), 1u, __ATOMIC_SEQ_CST), 1); }
 IMPL(kernel32, InterlockedDecrement) { RET(__atomic_sub_fetch((uint32_t *)GP(ARG(0)), 1u, __ATOMIC_SEQ_CST), 1); }
 IMPL(kernel32, InterlockedExchange) { RET(__atomic_exchange_n((uint32_t *)GP(ARG(0)), ARG(1), __ATOMIC_SEQ_CST), 2); }
+IMPL(kernel32, InterlockedCompareExchange)
+{
+    uint32_t previous = ARG(2);
+    __atomic_compare_exchange_n((uint32_t *)GP(ARG(0)), &previous, ARG(1), 0,
+                                __ATOMIC_SEQ_CST, __ATOMIC_SEQ_CST);
+    RET(previous, 3);
+}
 
 /* ---- time: real, or a deterministic clock for the harness (1 ms per query) ---- */
 static uint64_t fake_us = 1000000;

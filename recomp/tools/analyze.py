@@ -5,12 +5,16 @@ import struct, sys, os, json, collections, capstone
 from capstone import x86 as X
 sys.path.insert(0, os.path.dirname(__file__)); from pe import PE, code_range
 pe = PE(sys.argv[1]); TLO, THI, code = code_range(pe)
+relocated = pe.section('.rld')
+code_sections = [s for s in pe.sections if s[5] & 0x20000000]
+def is_code(va):
+    return TLO <= va < THI and (not relocated or any(s[1] <= va < s[1] + s[2] for s in code_sections))
 md = capstone.Cs(capstone.CS_ARCH_X86, capstone.CS_MODE_32); md.detail = True
 cache = {}
 def ins_at(va):
     if va in cache: return cache[va]
     r = None
-    if TLO <= va < THI:
+    if is_code(va) and not (relocated and va >= 0x1136000 and code[va - TLO:va - TLO + 32] == bytes(32)):
         for i in md.disasm(code[va - TLO:va - TLO + 16], va, 1): r = i
     cache[va] = r; return r
 BAD = {'in', 'out', 'insb', 'insd', 'outsb', 'outsd', 'iretd', 'hlt', 'cli', 'sti', 'int1', 'into', 'aaa', 'aas', 'aam',
@@ -18,7 +22,7 @@ BAD = {'in', 'out', 'insb', 'insd', 'outsb', 'outsd', 'iretd', 'hlt', 'cli', 'st
 def plausible(va, n=12):          # a clean decode of the first n instructions with no privileged/obsolete ops
     for _ in range(n):
         i = ins_at(va)
-        if i is None or i.mnemonic in BAD: return False
+        if i is None or i.mnemonic in BAD or (relocated and i.mnemonic == 'int3'): return False
         if i.mnemonic in ('ret', 'jmp'): return True
         va += i.size
     return True
@@ -74,15 +78,18 @@ def lift_func(f):
                     v = (o.imm if o.type == X86_OP_IMM else o.mem.disp if o.type == X86_OP_MEM and not o.mem.base and not o.mem.index else 0) & 0xffffffff
                     if o.type == X86_OP_IMM and TLO <= v < THI and v not in funcs and v not in cands and plausible(v): cands[v] = 'imm'
             if mn == 'call':
+                if relocated and nxt not in funcs and nxt not in ptrsrc:
+                    ptrsrc[nxt] = 'continuation'; work.append(nxt)
                 if op0.type == X86_OP_IMM:
                     tgt = op0.imm & 0xffffffff
                     if tgt not in funcs and tgt not in ptrsrc: ptrsrc[tgt] = 'call'; work.append(tgt)
+                if relocated: break  # continuation is queued separately above
             elif mn == 'jmp':
                 if op0.type == X86_OP_IMM: stack.append(op0.imm & 0xffffffff)
                 else:
                     jt = jumptable(i, prev)
                     if jt and jt[1]:
-                        jumptables.append({'at': va, 'table': jt[0], 'targets': jt[1]}); stack.extend(t for t in jt[1] if TLO <= t < THI)
+                        jumptables.append({'at': va, 'table': jt[0], 'targets': jt[1]}); stack.extend(t for t in jt[1] if t is not None and TLO <= t < THI)
                     elif jt: jt_unresolved.append(va)
                 break
             elif mn[0] == 'j' or mn.startswith('loop') or mn == 'jecxz':
@@ -94,20 +101,27 @@ while work:
     f = work.pop()
     if f in funcs or not (TLO <= f < THI): continue
     funcs[f] = lift_func(f)
+validated_functions = set(); starts = set(); candidate_coverage = bytearray(THI - TLO)
 def validate_candidates():
-    starts = set(); cov = set()
-    for ins in funcs.values():
-        for va, i in ins.items(): starts.add(va); cov.update(range(va, va + i.size))
+    # Discovery runs in waves. Only newly discovered functions can extend the
+    # coverage map; rebuilding millions of instruction bytes each wave makes
+    # BW's relocated control flow needlessly expensive.
+    for f in funcs.keys() - validated_functions:
+        for va, i in funcs[f].items():
+            starts.add(va)
+            candidate_coverage[va - TLO:va - TLO + i.size] = b'\x01' * i.size
+        validated_functions.add(f)
     added = 0
     for v, src in sorted(cands.items()):
         if v in funcs: continue
         if v in starts: ok = True                                      # an instruction boundary of known code
-        elif v in cov: ok = False                                      # inside an instruction: not a code pointer
+        elif candidate_coverage[v - TLO]: ok = bool(relocated)         # BW deliberately overlaps instruction streams
         else: ok = True                                                # undiscovered code: keep (junk is harmless)
         if ok: ptrsrc[v] = src; work.append(v); added += 1
     return added
 while True:
     n = validate_candidates()
+    if relocated: print('discovery: %d functions, %d new candidates' % (len(funcs), n), flush=True)
     while work:
         f = work.pop()
         if f in funcs or not (TLO <= f < THI): continue
@@ -116,6 +130,11 @@ while True:
 # gaps between known code, after int3/nop padding: function starts no pointer or call reaches (callbacks found only at
 # run time, catch handlers, code after tables); repeated until nothing new turns up. Coverage is kept in a byte map.
 cov = bytearray(THI - TLO)
+if pe.section('.rld'):
+    # Relocated code is discovered from resolved dispatch targets and control
+    # flow. A padding sweep there would interpret the wrapper's data as code.
+    text_end = pe.section('.text')[1] + pe.section('.text')[2] - TLO
+    cov[text_end:] = b'\x01' * (len(cov) - text_end)
 def mark(ins):
     for va, i in ins.items(): cov[va - TLO:va - TLO + i.size] = b'\x01' * i.size
 for ins in funcs.values(): mark(ins)
@@ -150,7 +169,7 @@ for f, ins in funcs.items():
         if i.mnemonic == 'call' and i.operands[0].type == X86_OP_MEM and i.operands[0].mem.base == 0:
             imp = pe.imports.get(i.operands[0].mem.disp & 0xffffffff, '')
             if imp.endswith('!RaiseException'): raise_calls.append((f, va))
-print('functions %d  coverage %.1f%% of .text  instructions %d  distinct mnemonics %d' % (len(funcs), 100.0 * len(covered) / (THI - TLO), sum(len(v) for v in funcs.values()), len(mix)))
+print('functions %d  coverage %.1f%% of code span  instructions %d  distinct mnemonics %d' % (len(funcs), 100.0 * len(covered) / (THI - TLO), sum(len(v) for v in funcs.values()), len(mix)))
 print('seed sources:', dict(collections.Counter(ptrsrc[f] for f in funcs if f in ptrsrc)))
 print('decode failures: %d at %s' % (len(set(decode_fail)), sorted(set(decode_fail))[:10]))
 print('jump tables resolved %d, unresolved %d %s' % (len(jumptables), len(jt_unresolved), [hex(x) for x in jt_unresolved[:10]]))

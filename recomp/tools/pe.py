@@ -44,7 +44,16 @@ def code_range(pe):
     (Mss32.dll keeps its hand-written mixers in a second one, MSSMIXER), with the gaps between them zero-filled."""
     t = pe.section('.text')
     is_dll = struct.unpack_from('<H', pe.data, struct.unpack_from('<I', pe.data, 0x3c)[0] + 22)[0] & 0x2000
-    if not is_dll: return t[1], t[1] + t[2], pe.bytes_at(t[1], t[2])
+    if not is_dll and not pe.section('.rld'): return t[1], t[1] + t[2], pe.bytes_at(t[1], t[2])
+    if not is_dll:
+        # BW retains relocated engine code and some virtualized functions. Lift
+        # their original x86 handlers too; the native app never needs Unicorn.
+        ex = [s for s in pe.sections if s[5] & 0x20000000]
+        lo, hi = min(s[1] for s in ex), max(s[1] + s[2] for s in ex)
+        buf = bytearray(b'\xcc' * (hi - lo))
+        for s in ex:
+            b = pe.bytes_at(s[1], min(s[2], s[4])); buf[s[1] - lo:s[1] - lo + len(b)] = b
+        return lo, hi, bytes(buf)
     ex = [s for s in pe.sections if s[5] & 0x20000000]
     lo, hi = min(s[1] for s in ex), max(s[1] + s[2] for s in ex)
     buf = bytearray(hi - lo)

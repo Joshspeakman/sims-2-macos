@@ -11,6 +11,7 @@
  * Each report names the reason, the x86 location, every thread's stack (recompiled functions are f_<x86 address>),
  * locks and waits, recent Windows calls, the Mac, the settings and the end of the log. */
 #include "w32.h"
+#include "edition.h"
 #include <execinfo.h>
 #include <signal.h>
 #include <dlfcn.h>
@@ -115,7 +116,7 @@ extern const struct rt_image rt_images[]; extern const unsigned rt_images_n;
 static const char *image_of(uint32_t a)
 {
     for (unsigned k = 0; k < rt_images_n; k++) {
-        uint32_t b = rt_images[k].base, sz = k ? 0x01000000u : 0x01000000u - b;
+        uint32_t b = rt_images[k].base, sz = k ? 0x01000000u : DS2_IMAGE_END - b;
         if (a - b < sz) return *rt_images[k].name ? rt_images[k].name : "DungeonSiege.exe";
     }
     return 0;
