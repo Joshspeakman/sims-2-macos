@@ -335,7 +335,7 @@ int main(int argc,char **argv) {
  DSRRenderer *renderer=dsr_gl_create(bin); if(!renderer) return 1;
  DsrShmHeader *h=mmap(NULL,DSR_SHM_SIZE,PROT_READ|PROT_WRITE,MAP_PRIVATE|MAP_ANONYMOUS,-1,0); if(h==MAP_FAILED) { perror("command ring"); return 1; }
  h->magic=DSR_SHM_MAGIC; h->version=1; uint8_t *ring=(uint8_t *)h+DSR_HEADER_SIZE;
- dsr_gl_readback(renderer,(uint8_t *)h+DSR_READBACK_OFFSET,DSR_READBACK_SIZE,&h->readback_done); dsr_attach_consumer(h);
+ dsr_gl_readback(renderer,(uint8_t *)h+DSR_READBACK_OFFSET,DSR_READBACK_SIZE,&h->readback_done); dsr_gl_queries(renderer,(volatile uint32_t *)((uint8_t *)h+DSR_QUERY_OFFSET)); dsr_attach_consumer(h);
  w32_host_window_created=window_created; w32_host_window_changed=window_changed;
  if(w32_prepare(exe,game,drive,overlay)) return 1;
  { void w32_lab_init(const char *); w32_lab_init(data); }
@@ -386,7 +386,7 @@ int main(int argc,char **argv) {
   if(read==write) {
    __atomic_store_n(&h->consumer_waiting,1,__ATOMIC_SEQ_CST);
    uint32_t expected=__atomic_load_n(&h->write_pos,__ATOMIC_ACQUIRE);
-   if(read==expected) dsr_wait(&h->write_pos,expected,500000);
+   if(read==expected) { dsr_gl_poll_queries(renderer); dsr_wait(&h->write_pos,expected,500000); }
    __atomic_store_n(&h->consumer_waiting,0,__ATOMIC_SEQ_CST);
   }
  }
