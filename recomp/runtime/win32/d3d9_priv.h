@@ -50,7 +50,7 @@ struct Tex9 {
     uint32_t w, h, d, levels, fmt, usage, pool, lod;
     Surf9 *lv[6][16];                                   /* [face][level] (volume textures: slice 0 only, for now) */
 };
-typedef struct Buf9 { uint32_t g; int ref; Dev9 *dev; int index; uint32_t len, usage, fmt, pool, mem; } Buf9;
+typedef struct Buf9 { uint32_t g; int ref; Dev9 *dev; int index; uint32_t len, usage, fmt, pool, mem; uint32_t gid, dlo, dhi, llo, lhi; } Buf9;   /* gid: the renderer's copy (0 none); [dlo, dhi): written since it was sent; [llo, lhi): locked now */
 typedef struct DElem { uint8_t stream, type, usage, uidx; uint16_t off, dst, size; } DElem;
 typedef struct Decl9 { uint32_t g; int ref; Dev9 *dev; DElem e[32]; int n; uint32_t raw, nraw, fvf; int ok; } Decl9;
 typedef struct Shader9 { uint32_t g; int ref; Dev9 *dev; int ps; uint32_t mem, len; } Shader9;

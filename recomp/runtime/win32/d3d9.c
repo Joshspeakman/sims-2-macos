@@ -216,7 +216,52 @@ OK_M(vt_AddDirtyBox, 2)
 
 /* ---- vertex and index buffers: guest memory the game locks; read at draw time ---- */
 #define BUF_ME Buf9 *me = obj(ARG(0), O9_VB); if (!me) me = obj(ARG(0), O9_IB); if (!me) { fprintf(stderr, "d3d9: bad buffer %08x in %s\n", ARG(0), __func__); RET(D3DERR_INVALIDCALL, nargs_); }
-static uint32_t buf_release(Buf9 *b) { uint32_t r = (uint32_t)--b->ref; if (!r) { gfree_(b->mem, b->len); obj_drop(b->g); free(b); } return r; }
+/* The Linux renderer keeps a copy of each buffer (DSR_VBUF_DATA) and shader draws name buffers and element types
+ * (DSR_DRAW_PROG_VB) instead of copying every vertex as float4: what a Lock covered is sent again before the next draw
+ * that reads the buffer. D3D9_GPU_VB=0 turns it off. */
+#ifdef __linux__
+static int gpu_vb(void) { static int on = -1; if (on < 0) { const char *e = getenv("D3D9_GPU_VB"); on = !(e && *e == '0'); } return on; }
+#else
+static int gpu_vb(void) { return 0; }
+#endif
+static pthread_mutex_t vb_lock = PTHREAD_MUTEX_INITIALIZER;    /* buffers are filled on the game's loader threads too */
+static uint32_t vbid_free[DSR_VBUFS], vbid_nfree, vbid_next = 1;
+static uint32_t vbid_alloc(void)
+{
+    pthread_mutex_lock(&vb_lock); uint32_t id = vbid_nfree ? vbid_free[--vbid_nfree] : vbid_next < DSR_VBUFS ? vbid_next++ : 0;
+    pthread_mutex_unlock(&vb_lock); return id;
+}
+static void range_add(uint32_t *lo, uint32_t *hi, uint32_t a, uint32_t b) { if (*lo >= *hi) { *lo = a; *hi = b; } else { if (a < *lo) *lo = a; if (b > *hi) *hi = b; } }
+static void buf_locked(Buf9 *b, uint32_t off, uint32_t n)       /* Lock: the range the game may write */
+{
+    if (off > b->len) return; if (!n || n > b->len - off) n = b->len - off;
+    pthread_mutex_lock(&vb_lock); range_add(&b->llo, &b->lhi, off, off + n); pthread_mutex_unlock(&vb_lock);
+}
+static void buf_unlocked(Buf9 *b)                                /* Unlock: what was locked is written, to be sent */
+{
+    pthread_mutex_lock(&vb_lock); if (b->llo < b->lhi) range_add(&b->dlo, &b->dhi, b->llo, b->lhi); b->llo = b->lhi = 0; pthread_mutex_unlock(&vb_lock);
+}
+static void buf_sync_locked(Buf9 *b)                  /* send what was written since the last draw (4 MB per command) */
+{
+    while (b->dlo < b->dhi) {
+        uint32_t n = b->dhi - b->dlo; if (n > (4u << 20)) n = 4u << 20;
+        uint32_t *p = cmd_begin(DSR_VBUF_DATA, 16 + ((n + 3) & ~3u));
+        p[0] = b->gid; p[1] = b->len; p[2] = b->dlo; p[3] = n; memcpy(p + 4, G_MEM + b->mem + b->dlo, n); cmd_end();
+        b->dlo += n;
+    }
+    b->dlo = b->dhi = 0;
+}
+static void buf_sync(Buf9 *b) { pthread_mutex_lock(&vb_lock); buf_sync_locked(b); pthread_mutex_unlock(&vb_lock); }
+static uint32_t buf_release(Buf9 *b)
+{
+    uint32_t r = (uint32_t)--b->ref;
+    if (!r) {
+        if (b->gid) { uint32_t *p = cmd_begin(DSR_VBUF_FREE, 4); p[0] = b->gid; cmd_end();
+            pthread_mutex_lock(&vb_lock); if (vbid_nfree < DSR_VBUFS) vbid_free[vbid_nfree++] = b->gid; pthread_mutex_unlock(&vb_lock); }
+        gfree_(b->mem, b->len); obj_drop(b->g); free(b);
+    }
+    return r;
+}
 M(bf_QueryInterface, 3) BUF_ME rt_w32(G_MEM, ARG(2), ARG(0)); me->ref++; RET(D3D_OK, 3); END
 M(bf_AddRef, 1) BUF_ME RET((uint32_t)++me->ref, 1); END
 M(bf_Release, 1) BUF_ME RET(buf_release(me), 1); END
@@ -230,9 +275,10 @@ OK_M(bf_PreLoad, 1)
 M(bf_GetType, 1) BUF_ME RET(me->index ? RT_INDEXBUFFER : RT_VERTEXBUFFER, 1); END
 M(bf_Lock, 5) BUF_ME                                   /* (offset, size, void **data, flags) */
     uint32_t off = ARG(1); if (off > me->len) RET(D3DERR_INVALIDCALL, 5);
+    if (me->gid) buf_locked(me, off, ARG(2));
     rt_w32(G_MEM, ARG(3), me->mem + off); RET(D3D_OK, 5);
 END
-OK_M(bf_Unlock, 1)
+M(bf_Unlock, 1) BUF_ME if (me->gid) buf_unlocked(me); RET(D3D_OK, 1); END
 M(bf_GetDesc, 2) BUF_ME                                /* D3DVERTEXBUFFER_DESC / D3DINDEXBUFFER_DESC */
     uint32_t v[6];
     if (me->index) { v[0] = me->fmt; v[1] = RT_INDEXBUFFER; v[2] = me->usage; v[3] = me->pool; v[4] = me->len; memcpy(GP(ARG(1)), v, 20); }
@@ -673,6 +719,33 @@ static void prog_draw_indexed(Dev9 *d, uint32_t prim, int32_t base, uint32_t min
     }
     prog_draw(d, prim, (uint32_t)(base + (int32_t)minidx), nv, ix, ni, up, up_stride); free(ix);
 }
+/* a shader draw from kept buffers; 0 if it can't be (no buffer copy, a type GL can't read as D3D does, a range past a
+ * buffer, a zero stride): the caller then takes the float4 path */
+static int prog_draw_vb(Dev9 *d, uint32_t prim, int32_t base, uint32_t lo, uint32_t nv, uint32_t ni, uint32_t start_index)
+{
+    if (!gpu_vb() || !nv) return 0;
+    PElem el[32]; int pretrans, n = prog_layout(d, el, &pretrans); if (!n) return 0;
+    Buf9 *ib = 0; if (ni) { ib = d->ib; if (!ib || !ib->gid) return 0; }
+    if ((int64_t)base + lo < 0) return 0;
+    for (int k = 0; k < n; k++) {
+        Buf9 *b = d->vb[el[k].stream]; uint32_t stride = d->vb_stride[el[k].stream];
+        if (!b || !b->gid || !stride || el[k].type == 13 || el[k].type == 14) return 0;
+        uint64_t last = (uint64_t)d->vb_off[el[k].stream] + ((uint64_t)base + lo + nv - 1) * stride + (uint64_t)el[k].off + (uint64_t)elem_size(el[k].type);
+        if (last > b->len) return 0;
+    }
+    for (int k = 0; k < n; k++) { Buf9 *b = d->vb[el[k].stream]; if (b->dlo < b->dhi) buf_sync(b); }
+    if (ib && ib->dlo < ib->dhi) buf_sync(ib);
+    uint32_t *p = cmd_begin(DSR_DRAW_PROG_VB, 36 + 20 * (uint32_t)n);
+    p[0] = prim; p[1] = nv; p[2] = ni; p[3] = (uint32_t)pretrans | (ib && ib->fmt == 102 ? 2 : 0); p[4] = ib ? ib->gid : 0;
+    p[5] = ib ? start_index * (ib->fmt == 102 ? 4 : 2) : 0; p[6] = (uint32_t)base; p[7] = ni ? 0 : (uint32_t)base; p[8] = (uint32_t)n;
+    for (int k = 0; k < n; k++) {
+        uint32_t *e = p + 9 + 5 * k, s = el[k].stream;
+        e[0] = (uint32_t)el[k].slot; e[1] = d->vb[s]->gid; e[2] = d->vb_off[s] + (uint32_t)el[k].off; e[3] = d->vb_stride[s]; e[4] = (uint32_t)el[k].type;
+    }
+    cmd_end();
+    if (d->rt) d->rt->gpu_newer = 1;
+    return 1;
+}
 static uint32_t next_prog_id = 1;
 uint32_t d9_program_create(const char *msl, size_t len, uint32_t kinds)
 {
@@ -803,6 +876,7 @@ static uint32_t create_buf(Dev9 *d, int index, uint32_t len, uint32_t usage, uin
 {
     if (!len || len > (256u << 20)) return D3DERR_INVALIDCALL;
     Buf9 *b = calloc(1, sizeof *b); b->ref = 1; b->dev = d; b->index = index; b->len = len; b->usage = usage; b->fmt = fmt; b->pool = pool; b->mem = gmem(len);
+    if (gpu_vb()) { b->gid = vbid_alloc(); b->dlo = 0; b->dhi = len; }
     b->g = make_iface(index ? O9_IB : O9_VB, b); rt_w32(G_MEM, out, b->g); return D3D_OK;
 }
 M(dv_CreateVertexBuffer, 7) DEV_ME RET(create_buf(me, 0, ARG(1), ARG(2), ARG(3), ARG(4), ARG(5)), 7); END
@@ -929,7 +1003,7 @@ static int shader_bind(Dev9 *d)
     d9_program_use(d, id); d9_shader_consts(d, id); return 1;
 }
 M(dv_DrawPrimitive, 4) DEV_ME                          /* (type, start vertex, primitives) */
-    if (me->vs) { if (shader_bind(me)) prog_draw(me, ARG(1), ARG(2), prim_verts(ARG(1), ARG(3)), 0, 0, 0, 0); RET(D3D_OK, 4); }
+    if (me->vs) { if (shader_bind(me) && !prog_draw_vb(me, ARG(1), (int32_t)ARG(2), 0, prim_verts(ARG(1), ARG(3)), 0, 0)) prog_draw(me, ARG(1), ARG(2), prim_verts(ARG(1), ARG(3)), 0, 0, 0, 0); RET(D3D_OK, 4); }
     if (me->prog) { prog_draw(me, ARG(1), ARG(2), prim_verts(ARG(1), ARG(3)), 0, 0, 0, 0); RET(D3D_OK, 4); }
     if (!can_draw(me)) RET(D3D_OK, 4);
     uint32_t nv = prim_verts(ARG(1), ARG(3)), fvf; const uint8_t *v = gather(me, ARG(2), nv, &fvf, 0, 0);
@@ -940,6 +1014,7 @@ M(dv_DrawIndexedPrimitive, 7) DEV_ME                   /* (type, base vertex, mi
     if ((!me->prog && !can_draw(me)) || !me->ib) RET(D3D_OK, 7);
     uint32_t ni = prim_verts(ARG(1), ARG(6)), is = me->ib->fmt == 102 ? 4 : 2;
     if ((uint64_t)(ARG(5) + ni) * is > me->ib->len) { static int w; if (!w++) fprintf(stderr, "d3d9: indices past the index buffer (skipped)\n"); RET(D3D_OK, 7); }
+    if (me->vs && prog_draw_vb(me, ARG(1), (int32_t)ARG(2), ARG(3), ARG(4), ni, ARG(5))) RET(D3D_OK, 7);
     (me->prog ? prog_draw_indexed : draw_indexed)(me, ARG(1), (int32_t)ARG(2), ARG(3), ARG(4), G_MEM + me->ib->mem + ARG(5) * is, is == 4, ni, 0, 0); RET(D3D_OK, 7);
 END
 M(dv_DrawPrimitiveUP, 5) DEV_ME                        /* (type, primitives, data, stride) */

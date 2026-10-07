@@ -36,5 +36,12 @@ enum {
     DSR_QUERY,             /* u32 slot, u32 begin (1) / end (0), u32 serial: an occlusion query around the draws between; the
                               renderer publishes the samples passed in the header (dsr_shm.h DSR_QUERY_OFFSET) */
     DSR_SCISSOR,           /* i32 left, top, right, bottom: the scissor rectangle (D3DRS_SCISSORTESTENABLE turns it on) */
+    DSR_VBUF_DATA,         /* u32 id (< DSR_VBUFS), u32 buffer size, u32 offset, u32 n, bytes[n] (padded to 4): a vertex or
+                              index buffer's bytes kept by the renderer (created, or recreated at a new size, on first data) */
+    DSR_VBUF_FREE,         /* u32 id */
+    DSR_DRAW_PROG_VB,      /* u32 prim, nverts, nindices, flags (1 pretransformed, 2 32-bit indices), u32 index buffer id,
+                              u32 index byte offset, i32 base vertex, u32 first vertex (no indices), u32 nelem,
+                              {u32 slot, buffer id, byte offset, stride, D3DDECLTYPE}[nelem]: as DSR_DRAW_PROG, from kept buffers */
 };
+#define DSR_VBUFS 65536
 #endif

@@ -409,12 +409,31 @@ static void shader_consts(DSRRenderer *r,const uint32_t *p,uint32_t size) {
  if(getenv("DSR_ATLOG") && flog(r)) fprintf(stderr,"atlog %08x loc %d: %g %g %g %g\n",g->hash,g->at,((float *)w)[0],((float *)w)[1],((float *)w)[2],((float *)w)[3]);
  if(g->flip>=0) glUniform1f(g->flip,-1.0f);        /* render targets are stored top row first: y is inverted */
 }
-static void draw_prog(DSRRenderer *r,const uint32_t *p,uint32_t size) {
- uint32_t prim=p[0],mask=p[1],nv=p[2],ni=p[3],ns=(uint32_t)__builtin_popcount(mask);
+/* vertex and index buffers kept on the GPU (DSR_VBUF_DATA), by the D3D9 layer's buffer id */
+static GLuint vbuf[DSR_VBUFS]; static uint32_t vbuf_size[DSR_VBUFS];
+static void vbuf_data(const uint32_t *p,uint32_t size) {
+ uint32_t id=p[0],total=p[1],off=p[2],n=p[3]; if(id>=DSR_VBUFS || 16ull+n>size || (uint64_t)off+n>total) return;
+ if(!vbuf[id]) glGenBuffers(1,&vbuf[id]);
+ glBindBuffer(GL_COPY_WRITE_BUFFER,vbuf[id]);
+ if(vbuf_size[id]!=total) { glBufferData(GL_COPY_WRITE_BUFFER,total,NULL,GL_DYNAMIC_DRAW); vbuf_size[id]=total; }
+ if(n) glBufferSubData(GL_COPY_WRITE_BUFFER,off,n,p+4);
+}
+static void vbuf_free(const uint32_t *p) { uint32_t id=p[0]; if(id<DSR_VBUFS && vbuf[id]) { glDeleteBuffers(1,&vbuf[id]); vbuf[id]=0; vbuf_size[id]=0; } }
+static int vb_attrib(uint32_t sl,uint32_t type,uint32_t stride,uint32_t off) {   /* a D3DDECLTYPE as GL reads it (missing components 0, 0, 0, 1 in both) */
+ static const struct { GLint n; GLenum t; GLboolean norm; } f[]={
+  {1,GL_FLOAT,0},{2,GL_FLOAT,0},{3,GL_FLOAT,0},{4,GL_FLOAT,0},{GL_BGRA,GL_UNSIGNED_BYTE,1},{4,GL_UNSIGNED_BYTE,0},
+  {2,GL_SHORT,0},{4,GL_SHORT,0},{4,GL_UNSIGNED_BYTE,1},{2,GL_SHORT,1},{4,GL_SHORT,1},{2,GL_UNSIGNED_SHORT,1},{4,GL_UNSIGNED_SHORT,1},
+  {0,0,0},{0,0,0},{2,GL_HALF_FLOAT,0},{4,GL_HALF_FLOAT,0}};
+ if(type>16 || !f[type].n) return 0;
+ glVertexAttribPointer(sl,f[type].n,f[type].t,f[type].norm,(GLsizei)stride,(void *)(uintptr_t)off); return 1;
+}
+/* DSR_DRAW_PROG (vb 0: float4 vertices in the command) or DSR_DRAW_PROG_VB (vb 1: elements of kept buffers) */
+static void draw_prog_x(DSRRenderer *r,const uint32_t *p,uint32_t size,int vb) {
+ uint32_t prim=p[0],mask=vb?0:p[1],nv=vb?p[1]:p[2],ni=vb?p[2]:p[3],flags=vb?p[3]:p[4],ns=(uint32_t)__builtin_popcount(mask);
  GProg *g=gprog(r,r->cur); dsr_stat[0]++;
- if(!g || !g->prog || !nv || 20ull+16ull*nv*ns+2ull*ni>size) { dsr_stat[1]++; return; }
+ if(!g || !g->prog || !nv || (vb ? 36ull+20ull*p[8]>size : 20ull+16ull*nv*ns+2ull*ni>size)) { dsr_stat[1]++; return; }
  Surf *rt=surf(r,r->rt), *ds=surf(r,r->ds); if(!rt || !target(r,r->rt,r->ds)) { dsr_stat[2]++; return; }
- if(flog(r)) log_draw(r,p[4]&1?"sh-pretransformed":"sh",g->hash,prim,ni?ni:nv);
+ if(flog(r)) log_draw(r,flags&1?"sh-pretransformed":"sh",g->hash,prim,ni?ni:nv);
  { static int ql=-1; if(ql<0) ql=getenv("DSR_QUERYLOG")!=0; if(ql && r->qactive) fprintf(stderr,"inquery %d prog %08x n %u\n",r->qactive,g->hash,ni?ni:nv); }
  { static const char *skip; static int init; if(!init) { init=1; skip=getenv("DSR_SKIP_PROG"); }   /* DSR_SKIP_PROG=hash,hash: those programs' draws left out */
    if(skip) { char h[16]; snprintf(h,sizeof h,"%08x",g->hash); if(strstr(skip,h)) return; } }
@@ -437,10 +456,20 @@ static void draw_prog(DSRRenderer *r,const uint32_t *p,uint32_t size) {
  if(g->pixfix>=0) glUniform4f(g->pixfix,1.0f/vpw,-1.0f/vph,0,0);   /* D3D9 pixel centres (d3d9_shader.c wrap_vs) */
  { static const char *red; static int init; if(!init) { init=1; red=getenv("DSR_RED_PROG"); }   /* DSR_RED_PROG=hash: those draws' surviving pixels painted red */
    if(red) { char h[16]; snprintf(h,sizeof h,"%08x",g->hash); if(strstr(red,h)) { glEnable(GL_BLEND); glBlendEquation(GL_FUNC_ADD); glBlendFunc(GL_CONSTANT_COLOR,GL_ZERO); glBlendColor(1,0,0,1); } } }
- glBindBuffer(GL_ARRAY_BUFFER,r->pvbo); glBufferData(GL_ARRAY_BUFFER,(GLsizeiptr)nv*ns*16,p+5,GL_STREAM_DRAW);
- for(uint32_t sl=0,c=0;sl<16;sl++) {
-  if(mask>>sl&1) { glEnableVertexAttribArray(sl); glVertexAttribPointer(sl,4,GL_FLOAT,GL_FALSE,ns*16,(void *)(uintptr_t)(c*16)); c++; }
-  else { glDisableVertexAttribArray(sl); glVertexAttrib4f(sl,0,0,0,1); }
+ if(vb) {
+  uint32_t used=0; const uint32_t *e=p+9;
+  for(uint32_t k=0;k<p[8];k++,e+=5) {
+   if(e[0]>=16 || e[1]>=DSR_VBUFS || !vbuf[e[1]]) continue;
+   glBindBuffer(GL_ARRAY_BUFFER,vbuf[e[1]]);
+   if(vb_attrib(e[0],e[4],e[3],e[2])) { glEnableVertexAttribArray(e[0]); used|=1u<<e[0]; }
+  }
+  for(uint32_t sl=0;sl<16;sl++) if(!(used>>sl&1)) { glDisableVertexAttribArray(sl); glVertexAttrib4f(sl,0,0,0,1); }
+ } else {
+  glBindBuffer(GL_ARRAY_BUFFER,r->pvbo); glBufferData(GL_ARRAY_BUFFER,(GLsizeiptr)nv*ns*16,p+5,GL_STREAM_DRAW);
+  for(uint32_t sl=0,c=0;sl<16;sl++) {
+   if(mask>>sl&1) { glEnableVertexAttribArray(sl); glVertexAttribPointer(sl,4,GL_FLOAT,GL_FALSE,ns*16,(void *)(uintptr_t)(c*16)); c++; }
+   else { glDisableVertexAttribArray(sl); glVertexAttrib4f(sl,0,0,0,1); }
+  }
  }
  for(int k=0;k<g->nsamp && k<16;k++) {
   if(!g->samptype[k]) continue;
@@ -461,7 +490,12 @@ static void draw_prog(DSRRenderer *r,const uint32_t *p,uint32_t size) {
    char h[16]; snprintf(h,sizeof h,"%08x",g->hash);
    if(nd && strstr(nd,h)) { glActiveTexture(GL_TEXTURE0); return; }
    if(nz && strstr(nz,h)) glDepthMask(GL_FALSE); }
- if(ni) { glBindBuffer(GL_ELEMENT_ARRAY_BUFFER,r->pebo); glBufferData(GL_ELEMENT_ARRAY_BUFFER,ni*2,(const uint8_t *)(p+5)+(size_t)nv*ns*16,GL_STREAM_DRAW); glDrawElements(type,ni,GL_UNSIGNED_SHORT,0); }
+ if(vb) {
+  if(ni) { if(p[4]<DSR_VBUFS && vbuf[p[4]]) { glBindBuffer(GL_ELEMENT_ARRAY_BUFFER,vbuf[p[4]]);
+    glDrawElementsBaseVertex(type,(GLsizei)ni,flags&2?GL_UNSIGNED_INT:GL_UNSIGNED_SHORT,(void *)(uintptr_t)p[5],(GLint)p[6]); } }
+  else glDrawArrays(type,(GLint)p[7],(GLsizei)nv);
+ }
+ else if(ni) { glBindBuffer(GL_ELEMENT_ARRAY_BUFFER,r->pebo); glBufferData(GL_ELEMENT_ARRAY_BUFFER,ni*2,(const uint8_t *)(p+5)+(size_t)nv*ns*16,GL_STREAM_DRAW); glDrawElements(type,ni,GL_UNSIGNED_SHORT,0); }
  else glDrawArrays(type,0,nv);
  glActiveTexture(GL_TEXTURE0);
  { static uint32_t want; static int init, left=40; if(!init) { init=1; const char *e=getenv("DSR_PEEK_PROG"); want=e?(uint32_t)strtoul(e,0,16):0; }
@@ -469,6 +503,7 @@ static void draw_prog(DSRRenderer *r,const uint32_t *p,uint32_t size) {
      fprintf(stderr,"after %u: rt %u %ux%u vp %g %g %g %g texel0 %g %g %g %g err %#x | s0 addr %u %u border %#x filter %u %u %u | s1 addr %u %u\n",g->id,r->rt,rt->w,rt->h,r->vp[0],r->vp[1],r->vp[2],r->vp[3],v[0],v[1],v[2],v[3],glGetError(),
              r->tss[0][13],r->tss[0][14],r->tss[0][15],r->tss[0][16],r->tss[0][17],r->tss[0][18],r->tss[1][13],r->tss[1][14]); } }
 }
+static void draw_prog(DSRRenderer *r,const uint32_t *p,uint32_t size) { draw_prog_x(r,p,size,0); }
 int dsr_gl_exec(DSRRenderer *r,uint32_t op,const uint8_t *data,uint32_t size) {
  /* Explicit checks avoid assuming enum numbering for protocol extensions. */
  uint32_t need=0;
@@ -479,7 +514,7 @@ int dsr_gl_exec(DSRRenderer *r,uint32_t op,const uint8_t *data,uint32_t size) {
  case DSR_CLEAR: need=20; break; case DSR_DRAW: need=16; break;
  case DSR_SURFACE_CREATE: need=28; break; case DSR_SURFACE_DESTROY: case DSR_PRESENT: need=4; break;
  case DSR_BLT: need=48; break; case DSR_GLSL_CREATE: need=16; break; case DSR_PROG_USE: need=4; break;
- case DSR_SHADER_CONST: need=24; break; case DSR_DRAW_PROG: need=20; break; case DSR_QUERY: need=12; break; case DSR_SCISSOR: need=16; break; default: break;
+ case DSR_SHADER_CONST: need=24; break; case DSR_DRAW_PROG: need=20; break; case DSR_QUERY: need=12; break; case DSR_SCISSOR: need=16; break; case DSR_VBUF_DATA: need=16; break; case DSR_VBUF_FREE: need=4; break; case DSR_DRAW_PROG_VB: need=36; break; default: break;
  }
  if(size<need) return 0;
  const uint32_t *p=(const uint32_t *)data;
@@ -502,6 +537,9 @@ int dsr_gl_exec(DSRRenderer *r,uint32_t op,const uint8_t *data,uint32_t size) {
  case DSR_PROG_USE: r->cur=p[0]; break;
  case DSR_SHADER_CONST: shader_consts(r,p,size); break;
  case DSR_DRAW_PROG: draw_prog(r,p,size); break;
+ case DSR_VBUF_DATA: vbuf_data(p,size); break;
+ case DSR_VBUF_FREE: vbuf_free(p); break;
+ case DSR_DRAW_PROG_VB: draw_prog_x(r,p,size,1); break;
  case DSR_QUERY: query(r,p); break;
  case DSR_SCISSOR: memcpy(r->scissor,p,16); break;
  case DSR_PRESENT: r->presented=p[0]; dsr_gl_poll_queries(r);
