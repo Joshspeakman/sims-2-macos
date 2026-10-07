@@ -239,6 +239,7 @@ static const char *script_tick(uint32_t fno)       /* returns a screenshot path 
             if (fno == a->frame) { if (k.vk) key_event(k, 1, 0); else w32_di_key(a->x, 1); }
             if (fno == a->frame + 15) { if (k.vk) key_event(k, 0, 0); else w32_di_key(a->x, 0); }
         } else if (!strcmp(a->kind, "dimove") && fno >= a->frame && fno < a->frame + 10) w32_di_mouse_move(a->x / 10, a->y / 10);   /* mickeys over 10 frames */
+        else if (!strcmp(a->kind, "mmove") && fno >= a->frame && fno < a->frame + 10) { rel_motion(a->x / 10.0, a->y / 10.0); w32_di_mouse_move(a->x / 10, a->y / 10); }   /* as SDL motion: cursor, WM_MOUSEMOVE and DirectInput */
         else if (!strcmp(a->kind, "diclick")) {           /* diclick: the left button through DirectInput */
             if (fno == a->frame) { w32_di_mouse_button(0, 1); buttons |= 1; w32_keys[1] = 0x80; post(0x201, mk(), pos_lp()); }
             if (fno == a->frame + 15) { w32_di_mouse_button(0, 0); buttons &= ~1u; w32_keys[1] = 0; post(0x202, mk(), pos_lp()); }   /* held long enough for a game frame to see it */
@@ -326,7 +327,11 @@ int main(int argc,char **argv) {
  /* Linux automatic mode follows the display, without the legacy 120 fps ceiling. */
  const char *fps=getenv("DSR_FPSCAP");
  if(!fps || !strcmp(fps,"auto") || !strcmp(fps,"display")) {
-  char rate[32]; snprintf(rate,sizeof rate,"%d",w32_screen_hz); setenv("DSR_FPSCAP",rate,1);
+  int hz=w32_screen_hz;
+#ifdef FNV_EDITION
+  if(hz>60) hz=60;   /* Gamebryo's physics and animation misbehave above 60 fps (as on Windows without a frame limiter); DSR_FPSCAP=<n> overrides */
+#endif
+  char rate[32]; snprintf(rate,sizeof rate,"%d",hz); setenv("DSR_FPSCAP",rate,1);
  }
  w32_screen_scale=1;
  char drive[1200],overlay[1200],bin[2048]; ssize_t len=readlink("/proc/self/exe",bin,sizeof bin-1);

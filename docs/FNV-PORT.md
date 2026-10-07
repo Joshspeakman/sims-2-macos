@@ -15,11 +15,11 @@ under Proton in headless gamescope (`tests/fnv_ref.py`, `tests/scenario.py`), sa
 - intro movie, main menu and its music, new game, Doc Mitchell's dialogue (voices correlate 0.999 with a reference
   decode), subtitles, name entry, the Reflectron (face), the DLC messages, saving, loading (Continue)
 - Goodsprings by day, dusk and night, the saloon, Vault 22, the Lucky 38 penthouse (30-50 dB PSNR against the
-  original); the pause menu; the Pip-Boy (35 dB); a gecko fight with a 9mm pistol (creatures, hits, HUD)
+  original); the pause menu; the Pip-Boy (35 dB); a gecko next to the player (creature rendering, the combat HUD)
 - the intro movie's sound: correlation 1.0000 with a reference decode of FNVIntro.bik (`tools/audiocmp.py`)
 - a 10-minute tour through 12 interiors (Lucky 38, Gomorrah, the Tops, Hoover Dam, Vaults 11 and 22, Freeside,
-  Novac, Primm, Hidden Valley, Forlorn Hope): no crash, 23 million draws; player position and heading after a
-  `coc` identical to the original's
+  Novac, Primm, Hidden Valley, Forlorn Hope): no crash; player position and heading after a `coc` read back
+  identical to the original's
 - all 1809 unique shaders in the game's .sdp packages translate (MojoShader, patched) and compile
   (`tools/sdp_glsl_check.c`)
 
@@ -28,7 +28,14 @@ Fixed while comparing: D3D9 pixel centres (night was rendered as day: the 1x1 ad
 and relatively addressed constant arrays (skinned meshes thrown across the screen as dark planes: FNV's skinning
 shaders declare 18 bones and index 26+, see `third_party/mojoshader/README.md`), and silence after loading a save
 (the DirectSound mixer waited for the primary buffer to be played, which only the intro movie's player does).
-Also checked: firing a pistol (ammo, recoil, shot sounds), containers and the quantity dialog.
+Also checked: firing a pistol (ammo, recoil, shot sounds), containers and the quantity dialog, mouse hover and
+clicks in menus and message boxes (scripts need `mmove`, the real mouse path: message boxes follow the Windows
+cursor, which `dimove` doesn't move). The frame rate is capped at 60 by default (`DSR_FPSCAP`): Gamebryo's physics
+and animation misbehave above it, as on Windows without a frame limiter.
+
+Not yet verified: VATS (the scripted runs never got a target in the crosshair; neither did the reference), the
+end slides, and the third `coc` of `load-cells` (Gomorrah) whose third-person camera faces differently from the
+original's (15 dB; the player's position and heading read back identical, the camera after chained `coc`s does not).
 
 `tests/saves/fnvtest1.fos` is a save made just after character creation; the `load-*` scenarios start from it.
 
