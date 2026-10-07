@@ -30,8 +30,12 @@ shaders declare 18 bones and index 26+, see `third_party/mojoshader/README.md`),
 (the DirectSound mixer waited for the primary buffer to be played, which only the intro movie's player does).
 Also checked: firing a pistol (ammo, recoil, shot sounds), containers and the quantity dialog, mouse hover and
 clicks in menus and message boxes (scripts need `mmove`, the real mouse path: message boxes follow the Windows
-cursor, which `dimove` doesn't move). The frame rate is capped at 60 by default (`DSR_FPSCAP`): Gamebryo's physics
-and animation misbehave above it, as on Windows without a frame limiter.
+cursor, which `dimove` doesn't move). The launch window (`recomp/host/linux_launcher/fnv_launcher.py`, as the original's launcher does) sets the
+render resolution (any size, ultrawide presets, Custom), full screen or windowed, the frame rate (60 by default;
+any cap, the display's rate with VSync, or unlimited: the host sets Fallout.ini's `[HAVOK] fMaxTime` to 1 / rate so
+physics keep up) and antialiasing (FXAA, MSAA 2/4/8x, MSAA + FXAA; the renderer's own, as a driver override: the
+game's MSAA path draws its scene without a depth buffer here). Environment: `DS_RESOLUTION`, `DS_WINDOW_MODE`,
+`DSR_FPSCAP`, `DSR_VSYNC`, `DSR_MSAA`, `DSR_FXAA`; `FNV_NO_LAUNCHER=1` skips the window.
 
 VATS: the tutorial panel, the targeting camera and body-part highlight with hit chances, and queued attacks firing
 (ten geckos placed with AI off so one is in view; not compared with the original, whose spawn spots differ).
