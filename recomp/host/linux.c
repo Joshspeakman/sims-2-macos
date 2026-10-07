@@ -28,6 +28,7 @@ extern void w32_post(uint32_t,uint32_t,uint32_t,uint32_t,uint32_t);
 extern uint32_t w32_window_tid(uint32_t);
 extern void w32_set_cursor(int,int),w32_get_cursor(int *,int *),w32_move_cursor(int,int,int,int,int *,int *);
 extern uint8_t w32_keys[256];
+extern void w32_di_key(int,int),w32_di_mouse_move(int,int),w32_di_mouse_wheel(int),w32_di_mouse_button(int,int),w32_di_release_all(void);
 extern void w32_relative_cursor(int);
 extern int w32_screen_w,w32_screen_h,w32_screen_hz; extern double w32_screen_scale;
 extern void (*w32_host_window_created)(uint32_t,int,int,int,int,uint32_t);
@@ -132,7 +133,6 @@ static Key keymap(SDL_Scancode sc) {
  default: return (Key){0,0,0};
  }
 }
-extern void w32_di_key(int,int),w32_di_mouse_move(int,int),w32_di_mouse_wheel(int),w32_di_mouse_button(int,int),w32_di_release_all(void);
 static void key_event(Key k,int down,int repeat) {
  if(!k.vk) return;
  if(!repeat&&k.scan) w32_di_key(k.scan|(k.ext?0x80:0),down);   /* DirectInput: DIK codes are set-1 scan codes, extended keys +0x80 */ int prev=(w32_keys[k.vk]&128)!=0;
@@ -232,6 +232,13 @@ static const char *script_tick(uint32_t fno)       /* returns a screenshot path 
         } else if (!strcmp(a->kind, "hold")) {            /* hold:vk,frames: a key held down (the modifier of a chord) */
             if (fno == a->frame) { w32_keys[a->x & 0xff] = 0x80; post(0x100, (uint32_t)a->x, 1); }
             if (fno == a->frame + (uint32_t)a->y) { w32_keys[a->x & 0xff] = 0; post(0x101, (uint32_t)a->x, 0xc0000001u); }
+        } else if (!strcmp(a->kind, "dik")) {             /* dik:code: a DirectInput key (set-1 scan code, extended +0x80) for 4 frames */
+            if (fno == a->frame) w32_di_key(a->x, 1);
+            if (fno == a->frame + 4) w32_di_key(a->x, 0);
+        } else if (!strcmp(a->kind, "dimove") && fno >= a->frame && fno < a->frame + 10) w32_di_mouse_move(a->x / 10, a->y / 10);   /* mickeys over 10 frames */
+        else if (!strcmp(a->kind, "diclick")) {           /* diclick: the left button through DirectInput */
+            if (fno == a->frame) w32_di_mouse_button(0, 1);
+            if (fno == a->frame + 4) w32_di_mouse_button(0, 0);
         } else if (!strcmp(a->kind, "shot") && fno == a->frame) shot = a->path;
         else if (!strcmp(a->kind, "peek") && fno == a->frame) {
             extern uint8_t *G_MEM; char *e = a->path; uint32_t at = (uint32_t)strtoul(e, &e, 16), v = 0;
