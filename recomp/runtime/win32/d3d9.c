@@ -1269,7 +1269,10 @@ M(d9_GetAdapterDisplayMode, 3) uint32_t v[4] = {(uint32_t)w32_screen_w, (uint32_
 M(d9_CheckDeviceType, 6) RET(ARG(3) == 22 || ARG(3) == 21 ? D3D_OK : D3DERR_NOTAVAILABLE, 6); END
 M(d9_CheckDeviceFormat, 7)                             /* (adapter, type, adapter format, usage, resource type, format) */
     uint32_t usage = ARG(4), f = ARG(6);
-    int ok = (usage & USAGE_DEPTHSTENCIL) ? d9_fmt_depth(f) : (usage & USAGE_RENDERTARGET) ? (f == 21 || f == 22) : d9_fmt_known(f) && !d9_fmt_depth(f);
+    /* render targets: 8-bit RGB(A) and the floating-point formats the renderer draws into (asked for by FNV for its shadow
+     * maps: refused, it fell back to A8R8G8B8 and stored depth in 8 bits, which flickered as lit specks on characters) */
+    int ok = (usage & USAGE_DEPTHSTENCIL) ? d9_fmt_depth(f) : (usage & USAGE_RENDERTARGET) ? (f == 21 || f == 22 || d9_fmt_float(f)) : d9_fmt_known(f) && !d9_fmt_depth(f);
+    if (getenv("D3D9_RTLOG")) fprintf(stderr, "rtlog: CheckDeviceFormat(usage %x, resource %u, format %u) -> %s\n", usage, ARG(5), f, ok ? "ok" : "no");
     RET(ok ? D3D_OK : D3DERR_NOTAVAILABLE, 7);
 END
 /* (adapter, type, format, windowed, multisample type, quality levels). Multisampling is offered to the game only with
