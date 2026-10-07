@@ -1,6 +1,7 @@
 /* Opt-in local test lab. Requests run on the game thread through its own Skrit
  * compiler, so objects, spells and teleports follow the normal engine paths. */
 #include "w32.h"
+#include "edition.h"
 #include "ext.h"
 #include <unistd.h>
 #include <sys/stat.h>
@@ -60,7 +61,7 @@ void w32_lab_poll(Ctx *c) {
     uint64_t now=(uint64_t)ts.tv_sec*1000000000ull+ts.tv_nsec;
     if(now<next) return;
     next=now+200000000;
-    if(!rt_r32(G_MEM,0x00bcb248)) return; /* Skrit manager has not started yet. */
+    if(!rt_r32(G_MEM,DS2_SKRIT_MANAGER)) return; /* Skrit manager has not started yet. */
     char path[2300]; snprintf(path,sizeof path,"%s/request",lab_dir);
     FILE *f=fopen(path,"r"); if(!f) return;
     char kind[16], code[16000]; unsigned id;

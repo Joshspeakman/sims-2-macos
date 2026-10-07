@@ -9,6 +9,7 @@ import sys
 from settings import (DISTANCES, read_settings, save_settings, environment, resolution_choices,
                       resolution_choice, frame_rate_choices, save_cdkey)
 from tank import read_art
+from profiles import select_profile, command as profile_command
 
 
 def main():
@@ -16,14 +17,15 @@ def main():
     for name in ('exe', 'game', 'data', 'binary'): parser.add_argument('--' + name, required=True)
     parser.add_argument('--profiles', type=Path)
     args = parser.parse_args()
-    command = [args.binary, '--exe', args.exe, '--game', args.game, '--data', args.data]
     profiles = json.loads(args.profiles.read_text()) if args.profiles else {'Game folder': args.game}
     saved = read_settings(args.data)
-    if saved.get('gameProfile') in profiles: args.game = profiles[saved['gameProfile']]
-    command[command.index('--game')+1] = args.game
+    def selected_profile(label):
+        return select_profile(profiles, label, binary=args.binary, exe=args.exe, game=args.game, data=args.data)
+    active = selected_profile(saved.get('gameProfile'))
+    command = profile_command(active)
     shot = os.environ.get('DS_LAUNCHER_SHOT')
-    if os.environ.get('DS_TEST') and not shot: os.execve(args.binary, command, os.environ)
-    if os.environ.get('DS_NO_LAUNCHER') and not shot: os.execve(args.binary, command, environment(saved))
+    if os.environ.get('DS_TEST') and not shot: os.execve(command[0], command, os.environ)
+    if os.environ.get('DS_NO_LAUNCHER') and not shot: os.execve(command[0], command, environment(saved))
 
     from PIL import Image
     from PySide6.QtCore import Qt, QRectF, QUrl
@@ -39,7 +41,7 @@ def main():
     geo = screen.geometry()
     width, height = round(geo.width()*screen.devicePixelRatio()), round(geo.height()*screen.devicePixelRatio())
     images = {}
-    archives = sorted((Path(args.game) / 'Resources').glob('*'), key=lambda p: p.name.lower())
+    archives = sorted((Path(active['game']) / 'Resources').glob('*'), key=lambda p: p.name.lower())
     archive = next((p for p in archives if p.name.lower() == 'objects.ds2res'), None)
     if archive:
         for name, raw in read_art(archive).items():
@@ -137,19 +139,20 @@ def main():
             try:
                 from test_lab import TestLab
                 selected = self.controls.get('gameProfile')
-                game = profiles.get(selected.currentData(), args.game) if selected else args.game
+                profile = selected_profile(selected.currentData() if selected else None)
                 settings = {key:widget.currentData() for key,widget in self.controls.items()}
-                self.lab = TestLab(args.binary, args.exe, game, args.data, self, settings=settings)
+                self.lab = TestLab(profile['binary'], profile['exe'], profile['game'], profile['data'], self, settings=settings, edition=profile['edition'])
                 self.lab.show()
-            except (OSError, RuntimeError) as e:
+            except (OSError, RuntimeError, ValueError) as e:
                 QMessageBox.warning(self,'Test Lab',str(e))
         def start(self):
             if self.lab and self.lab.isVisible(): self.lab.close()
             selections={key:widget.currentData() for key,widget in self.controls.items()}
             try:
+                selected_command = profile_command(selected_profile(selections.get('gameProfile')))
                 self.launch_env=environment(selections); save_settings(args.data,selections)
             except (OSError,ValueError) as e: QMessageBox.warning(self,'Settings',str(e)); return
-            command[command.index('--game')+1]=profiles.get(selections.get('gameProfile'),args.game)
+            command[:] = selected_command
             self.accepted=True; self.close()
         def keyPressEvent(self,event):
             if event.key() in (Qt.Key.Key_Return,Qt.Key.Key_Enter): self.start()
@@ -175,7 +178,7 @@ def main():
     if shot:
         window.ensurePolished(); window.grab().save(shot); return 0
     window.show(); app.exec()
-    if window.accepted: os.execve(args.binary,command,window.launch_env)
+    if window.accepted: os.execve(command[0],command,window.launch_env)
     return 0
 
 if __name__=='__main__': sys.exit(main())

@@ -1,9 +1,11 @@
 /* Runtime core for recompiled code: guest memory, indirect calls, faults, x87 helpers. */
 #include "rt.h"
+#include "edition.h"
 #include <fenv.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <setjmp.h>
+#include <sched.h>
 #include <sys/mman.h>
 #include "platform.h"
 
@@ -37,8 +39,89 @@ static void fault(Ctx *c, uint32_t pc, const char *what)
 void rt_unhandled(Ctx *c, uint32_t pc, const char *what) { fault(c, pc, what); __builtin_unreachable(); }
 void rt_div_fault(Ctx *c, uint32_t pc) { fault(c, pc, "integer divide fault"); __builtin_unreachable(); }
 
+#ifdef DS2_BROKEN_WORLD
+/* The verified BW VM writes acquire/release routines into its context at
+ * runtime. Their code is not in the PE file. Check the emitted templates
+ * before use; other generated code still faults explicitly. */
+static void bw_generated_lock(Ctx *c)
+{
+    static const uint8_t code[] = {
+        0x8b,0xbb,0x20,0x03,0,0, 0x81,0xc7,4,0,0,0, 0xf0,0xfe,0x0f,
+        0x79,9, 0x80,0x3f,0, 0xf3,0x90, 0x7e,0xf9, 0xeb,0xf2, 0xc3
+    };
+    const uint8_t *generated = G_MEM + 0x1b200c8u;
+    static const uint8_t release[] = {
+        0x58, 0x8b,0xbb,0x20,3,0,0, 0x81,0xc7,4,0,0,0,
+        0x8a,0x47,1, 0x86,7, 0x81,0xc3,0x24,0,0,0,
+        0xc7,3,0,0,0,0, 0x9d,0x61,0xc2,8,0
+    };
+    if (!memcmp(generated, release, 3) &&
+            !memcmp(generated + 7, release + 7, 2) &&
+            !memcmp(generated + 13, release + 13, 7) &&
+            !memcmp(generated + 24, release + 24, sizeof release - 24)) {
+        uint32_t pointer = rt_r32(G_MEM, c->ebx + rt_r32(generated, 3));
+        uint32_t address = pointer + rt_r32(generated, 9);
+        /* Memory XCHG is implicitly atomic, without a LOCK prefix. */
+        (void)__atomic_exchange_n(G_MEM + address, G_MEM[address + 1], __ATOMIC_SEQ_CST);
+        rt_w32(G_MEM, c->ebx + rt_r32(generated, 20), 0);
+        c->esp += 4;  /* discard this call's return address */
+        flags_set(&c->f, rt_r32(G_MEM, c->esp), 0xcd5u | F_DF);
+        c->esp += 4;
+        c->edi = rt_r32(G_MEM, c->esp);
+        c->esi = rt_r32(G_MEM, c->esp + 4);
+        c->ebp = rt_r32(G_MEM, c->esp + 8);
+        c->ebx = rt_r32(G_MEM, c->esp + 16);
+        c->edx = rt_r32(G_MEM, c->esp + 20);
+        c->ecx = rt_r32(G_MEM, c->esp + 24);
+        c->eax = rt_r32(G_MEM, c->esp + 28);
+        c->esp += 32;
+        c->tc = rt_r32(G_MEM, c->esp);
+        c->esp += 12;
+        return;
+    }
+    if (memcmp(generated, code, 2) || memcmp(generated + 6, code + 6, 2) ||
+            memcmp(generated + 12, code + 12, sizeof code - 12)) {
+        static __thread char why[384];
+        strcpy(why, "unexpected generated VM lock routine:");
+        size_t used = strlen(why);
+        for (unsigned i = 0; i < 64; i++)
+            used += (size_t)snprintf(why + used, sizeof why - used, " %02x", generated[i]);
+        rt_unhandled(c, 0x1b200c8u, why);
+    }
+    /* The creator selects a context slot and lock-byte offset each time. */
+    uint32_t slot = rt_r32(generated, 2), offset = rt_r32(generated, 8);
+    uint32_t pointer = rt_r32(G_MEM, c->ebx + slot);
+    c->edi = pointer + offset;
+    LFs f = c->f;
+    LF(LF_ADD, 2, pointer, offset, c->edi);
+    for (;;) {
+        uint32_t result = __atomic_sub_fetch(G_MEM + c->edi, (uint8_t)1, __ATOMIC_SEQ_CST);
+        f.cin = flag_cf(&f);
+        LF(LF_DEC, 0, (result + 1u) & 255u, 1, result);
+        if (!(result & 128u)) break;
+        uint32_t value;
+        do {
+            value = __atomic_load_n(G_MEM + c->edi, __ATOMIC_RELAXED);
+            LF(LF_SUB, 0, value, 0, value);
+            if ((int8_t)value <= 0) sched_yield();
+        } while ((int8_t)value <= 0);
+    }
+    c->f = f;
+    c->tc = rt_r32(G_MEM, c->esp);
+    c->esp += 4;
+}
+#endif
+
 GuestFn rt_lookup(uint32_t addr)
 {
+#ifdef DS2_BROKEN_WORLD
+    if (addr == 0x1b200c8u) return bw_generated_lock;
+    /* Guest continuations are ordinary native blocks. A compact address hash
+     * keeps dispatch cheap without a dense 4 GB guest-address lookup table. */
+    extern GuestFn rt_bw_lookup(uint32_t);
+    GuestFn cached = rt_bw_lookup(addr);
+    if (cached) return cached;
+#endif
     unsigned lo = 0, hi = rt_fntab_n;
     while (lo < hi) {
         unsigned mid = (lo + hi) / 2;
@@ -47,6 +130,33 @@ GuestFn rt_lookup(uint32_t addr)
     }
     return 0;
 }
+#ifdef DS2_BROKEN_WORLD
+static struct rt_fn *bw_functions;
+static uint32_t bw_mask;
+__attribute__((constructor)) static void bw_prepare_functions(void)
+{
+    uint32_t n = 1;
+    while (n < rt_fntab_n * 2u) n <<= 1;
+    bw_functions = calloc(n, sizeof *bw_functions);
+    if (!bw_functions) return;  /* the sorted table remains a correct fallback */
+    bw_mask = n - 1;
+    for (unsigned i = 0; i < rt_fntab_n; i++) {
+        uint32_t j = (rt_fntab[i].addr * 2654435761u) & bw_mask;
+        while (bw_functions[j].fn) j = (j + 1) & bw_mask;
+        bw_functions[j] = rt_fntab[i];
+    }
+}
+GuestFn rt_bw_lookup(uint32_t addr)
+{
+    if (!bw_functions) return 0;
+    uint32_t j = (addr * 2654435761u) & bw_mask;
+    while (bw_functions[j].fn) {
+        if (bw_functions[j].addr == addr) return bw_functions[j].fn;
+        j = (j + 1) & bw_mask;
+    }
+    return 0;
+}
+#endif
 static __thread RtSehPad *seh_pads;
 void rt_seh_push(RtSehPad *p) { p->next = seh_pads; seh_pads = p; }
 void rt_seh_pop(RtSehPad *p)
@@ -56,6 +166,13 @@ void rt_seh_pop(RtSehPad *p)
 __attribute__((weak)) void w32_seh_abandon(void) {}
 void rt_call(Ctx *c, uint32_t t)
 {
+#ifdef DS2_BROKEN_WORLD
+    /* BW's relocated code uses push/ret for branches and push/jmp for calls.
+     * Its lifted blocks publish the next guest PC in tc. Stop at the caller's
+     * actual return address; normal C returns alone cannot represent this. */
+    uint32_t ret = rt_r32(G_MEM, c->esp);
+again:
+#endif
     for (RtSehPad *p = seh_pads; p; p = p->next)              /* control transfer to an __except block? */
         for (const uint32_t *h = p->handlers; *h; h++) if (*h == t) {
             Ctx *dst = p->c;
@@ -64,18 +181,38 @@ void rt_call(Ctx *c, uint32_t t)
             w32_seh_abandon();
             _longjmp(p->jb, 1);
         }
-    if (t >= RT_IMPORT_BASE) { rt_import(c, (t - RT_IMPORT_BASE) / 16); return; }
+    if (t >= RT_IMPORT_BASE) {
+#ifdef DS2_BROKEN_WORLD
+        uint32_t next = rt_r32(G_MEM, c->esp);
+        rt_import(c, (t - RT_IMPORT_BASE) / 16);
+        if (next && next != ret) { t = next; goto again; }
+        c->tc = 0;
+#else
+        rt_import(c, (t - RT_IMPORT_BASE) / 16);
+#endif
+        return;
+    }
     GuestFn fn = rt_lookup(t);
     if (!fn) {                                                /* name the image, so a report says which binary needs analysis */
         extern const struct rt_image { const char *name; uint32_t base, imp_first, imp_count; } rt_images[]; extern const unsigned rt_images_n;
         static __thread char m[160]; const char *img = "outside every image";
         for (unsigned k = 0; k < rt_images_n; k++) {
-            uint32_t b = rt_images[k].base, sz = k ? 0x01000000u : 0x01000000u - b;   /* address windows: headers may be unmapped */
+            uint32_t b = rt_images[k].base, sz = k ? 0x01000000u : DS2_IMAGE_END - b;   /* address windows: headers may be unmapped */
             if (t - b < sz) { img = *rt_images[k].name ? rt_images[k].name : "DungeonSiege.exe"; break; }
         }
         snprintf(m, sizeof m, "indirect call to unknown code in %s", img); fault(c, t, m);
     }
+#ifdef DS2_BROKEN_WORLD
+    int flow = t >= 0x400000u && t < DS2_IMAGE_END;
+    uint32_t foreign_return = flow ? 0 : rt_r32(G_MEM, c->esp);
+    c->tc = 0;
+#endif
     fn(c);
+#ifdef DS2_BROKEN_WORLD
+    if (!flow && foreign_return && foreign_return != ret) { t = foreign_return; goto again; }
+    if (flow && c->tc && c->tc != ret) { t = c->tc; goto again; }
+    c->tc = 0;
+#endif
 }
 /* Weak default: the platform layer (Win32 on macOS) provides the real one. */
 __attribute__((weak)) void rt_import(Ctx *c, uint32_t index)
@@ -210,7 +347,13 @@ int rt_test_run(Ctx *c, uint32_t fn_addr, uint32_t *pc, const char **what)
     if (!fn) { *pc = fn_addr; *what = "no such function"; return 2; }
     jmp_buf jb; fault_jmp = &jb;
     if (setjmp(jb)) { fault_jmp = 0; rt_fpcr_sync(0x27f); *pc = fault_pc; *what = fault_what; return 1; }
-    rt_fpcr_sync(c->fcw); fn(c); fault_jmp = 0; rt_fpcr_sync(0x27f); return 0;   /* the caller's (Python's) rounding back */
+    rt_fpcr_sync(c->fcw);
+#ifdef DS2_BROKEN_WORLD
+    rt_call(c, fn_addr);
+#else
+    fn(c);
+#endif
+    fault_jmp = 0; rt_fpcr_sync(0x27f); return 0;   /* the caller's (Python's) rounding back */
 }
 uint32_t rt_test_flags(const Ctx *c) { return flags_get(&c->f); }
 

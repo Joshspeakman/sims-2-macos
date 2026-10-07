@@ -11,6 +11,7 @@
 #include "../runtime/win32/w32.h"
 #include "../runtime/win32/display_modes.h"
 #include "../runtime/platform.h"
+#include "../runtime/edition.h"
 #include "../../src/dsr/dsr_shm.h"
 #include "../../src/renderer/linux/renderer.h"
 #include "frame_trace.h"
@@ -65,8 +66,8 @@ static void *game_thread(void *arg) { (void)arg; char msg[256]; game_code=w32_ru
 static void mkdirs(const char *path) { char s[2048]; snprintf(s,sizeof s,"%s",path); for(char *p=s+1;*p;p++) if(*p=='/') { *p=0; mkdir(s,0755); *p='/'; } mkdir(s,0755); }
 static void ensure_resolution(const char *drive) {
  char dir[1400],path[1500];
- snprintf(dir,sizeof dir,"%s/Users/player/Documents/My Games/Dungeon Siege 2",drive); mkdirs(dir);
- snprintf(path,sizeof path,"%s/DungeonSiege2.ini",dir);
+ snprintf(dir,sizeof dir,"%s/Users/player/Documents/My Games/" DS2_DOCUMENTS,drive); mkdirs(dir);
+ snprintf(path,sizeof path,"%s/" DS2_INI,dir);
  int w=w32_screen_w,h=w32_screen_h; const char *res=getenv("DS_RESOLUTION");
  if(res && !ds_parse_resolution(res,&w,&h)) { fprintf(stderr,"Invalid DS_RESOLUTION\n"); exit(1); }
  FILE *in=fopen(path,"r"); if(in&&!res) { fclose(in); return; }
@@ -252,7 +253,7 @@ int main(int argc,char **argv) {
  test_mode=getenv("DS_TEST")&&atoi(getenv("DS_TEST"));
  signal(SIGINT,stop_host); signal(SIGTERM,stop_host);
  const char *title=getenv("DS_TEST_LAB") && !strcmp(getenv("DS_TEST_LAB"),"1")
-     ? "Dungeon Siege II — Test Lab" : "Dungeon Siege II — Linux";
+     ? DS2_TITLE " — Test Lab" : DS2_TITLE " — Linux";
  SDL_SetHint(SDL_HINT_APP_NAME,title);
  SDL_SetHint("SDL_APP_ID","dungeon-siege-2-linux");
  SDL_SetHint("SDL_VIDEO_X11_WMCLASS","dungeon-siege-2-linux");

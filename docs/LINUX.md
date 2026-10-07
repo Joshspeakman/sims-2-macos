@@ -10,20 +10,21 @@ lifted code and native hot loops, and synchronize the x87 rounding mode on Linux
 | Input observed locally | SHA-256 | Status |
 |---|---|---|
 | GOG 2.3, installer 37617 | `c17e1cc9e01b5d2439a92e06b905040379ad4bb8618b822582c46f5fa29db4e2` | Native compilation supported |
-| Modified 2.3 executable in the Steam/Broken World installation | `5e82a52aac1bc23bd174bf837a7181af7a7d84dcc76aae7c27ab4bb08df37ba7` | Different layout; rejected by the recompiler |
+| Modified Broken World 2.30.0.4277 executable in the Steam installation | `5e82a52aac1bc23bd174bf837a7181af7a7d84dcc76aae7c27ab4bb08df37ba7` | Experimental native build; opening area, save and ultrawide reload tested |
 
 The second executable was also found in a local Broken World fix package. This is not a verified pristine Steam
 executable, so its checksum must not be treated as a canonical Steam release identifier. Its entry is `0xa45e80`,
 versus GOG's `0xa2b818`, and known hot-loop/hook addresses contain different instructions. Simply accepting its hash
-would apply patches to unrelated code. A proper port needs independent analysis, address identification, validation
-of overrides, and per-edition build outputs. Do not patch a live Steam installation to make a build pass.
+would apply patches to unrelated code. The expansion now has independent address mappings, preparation and build
+outputs. See [Broken World development notes](BROKEN_WORLD.md) for the remaining validation. The build does not
+patch a live Steam installation.
 
 The eight base `Resources/*.ds2res` archives and `Maps/World.ds2map` in the tested Steam folder are byte-identical
 to the GOG copies. Its five Miles/Bink binaries also match. Loading the mixed base/expansion folder with the GOG
 runtime fails during startup. Loading a view containing just the base resources and world reaches the menu.
 `recomp/tools/steam_data_view.py` constructs that view using links, without moving or modifying originals.
-The native code in both cases is still compiled from GOG. Broken World requires its own port and is not a supported
-content mode in this preview.
+The native code in both base-game profiles is still compiled from GOG. The experimental Broken World profile
+selects its own native executable, expansion assets and separate save directory.
 
 ## Platform work
 
@@ -106,7 +107,9 @@ Reports/catalogs contain descriptions read from your game files and should remai
 personal saves, normal launcher settings or stored multiplayer keys are modified by these controls.
 
 The native bridge registers small FuBi functions before engine startup and executes Skrit requests from the main
-game thread's message pump. It is opt-in (`DS_TEST_LAB=1`) and uses the supported GOG 2.3 export layout. There is no
+game thread's message pump. It is opt-in (`DS_TEST_LAB=1`) and selects addresses for the compiled edition. The
+Broken World mapping has been exercised for status and invincibility in the Dryad Outpost;
+its other Test Lab commands still need expansion-specific gameplay checks. There is no
 network control listener. Command delivery is atomic, only one request is pending, and an unanswered mutation is
 reported as unconfirmed instead of automatically retried.
 

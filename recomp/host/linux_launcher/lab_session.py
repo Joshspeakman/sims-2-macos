@@ -3,12 +3,14 @@ from pathlib import Path
 import shutil
 import time
 from settings import environment
+from profiles import save_relative
 
 SAVE_RELATIVE = Path('drive_c/Users/player/Documents/My Games/Dungeon Siege 2/Save/SinglePlayer')
 
 
-def copy_saves(source, destination):
-    src, dst = Path(source) / SAVE_RELATIVE, Path(destination) / SAVE_RELATIVE
+def copy_saves(source, destination, edition='gog'):
+    relative = save_relative(edition)
+    src, dst = Path(source) / relative, Path(destination) / relative
     if dst.exists():
         backup = Path(destination) / 'save-backups' / str(time.time_ns())
         backup.parent.mkdir(parents=True, exist_ok=True)
