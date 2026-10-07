@@ -43,7 +43,7 @@ typedef struct Surf9 {
     uint32_t g; int ref; Dev9 *dev; Tex9 *tex; uint32_t level, face;
     uint32_t id, w, h, fmt, usage, pool; int kind;     /* renderer kind: 1 render target, 2 depth, 3 texture, 4 offscreen */
     uint32_t mem, pitch, size;                          /* CPU copy in the game's format */
-    int locked; uint32_t lflags, ly0, ly1; int gpu_newer;
+    int locked; uint32_t lflags, ly0, ly1; int gpu_newer; uint32_t samples;
 } Surf9;
 struct Tex9 {
     uint32_t g; int ref; Dev9 *dev; int type;          /* O9_TEX, O9_CUBE, O9_VOLTEX */

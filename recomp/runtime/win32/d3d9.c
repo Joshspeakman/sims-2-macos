@@ -19,16 +19,21 @@ static void surf_destroy(Surf9 *s);
 /* ---- surfaces ---- */
 /* the renderer's surface formats: 1 ARGB8, 2 XRGB8, 3 depth/stencil, 4-9 R16F, G16R16F, A16B16G16R16F, R32F, G32R32F, A32B32G32R32F */
 static int fmt_code(uint32_t fmt) { return d9_fmt_depth(fmt) ? 3 : d9_fmt_float(fmt) ? 4 + (int)(fmt - 111) : d9_fmt_alpha(fmt) ? 1 : 2; }
+/* samples for the next surf_new (render targets, depth buffers, the back buffer): D3DMULTISAMPLE_TYPE n (2-16) is n
+ * samples; the renderer draws into multisampled storage and resolves when the surface is read */
+static _Thread_local uint32_t new_samples;   /* per thread: loader threads create textures meanwhile */
+static uint32_t ms_samples(uint32_t type) { return type >= 2 && type <= 16 ? type : 0; }
 static Surf9 *surf_new(Dev9 *d, uint32_t w, uint32_t h, uint32_t fmt, uint32_t usage, uint32_t pool, int kind, Tex9 *tex, uint32_t level, uint32_t face, uint32_t parent_id, uint32_t levels)
 {
+    uint32_t samples = new_samples; new_samples = 0;
     Surf9 *s = calloc(1, sizeof *s); s->ref = 1; s->dev = d; s->tex = tex; s->level = level; s->face = face;
     s->w = w ? w : 1; s->h = h ? h : 1; s->fmt = fmt; s->usage = usage; s->pool = pool; s->kind = kind;
     s->pitch = d9_pitch(fmt, s->w); s->size = s->pitch * d9_rows(fmt, s->h); s->mem = gmem(s->size);
-    s->g = make_iface(O9_SURF, s); s->id = next_object_id();
+    s->g = make_iface(O9_SURF, s); s->id = next_object_id(); s->samples = samples;
     if (pool != 2 && pool != 3) {                       /* SYSTEMMEM / SCRATCH surfaces have no GPU copy */
         uint32_t *p = cmd_begin(DSR_SURFACE_CREATE, 40);
         p[0] = s->id; p[1] = s->w; p[2] = s->h; p[3] = (uint32_t)kind; p[4] = (uint32_t)fmt_code(fmt); p[5] = parent_id; p[6] = level; p[7] = levels;
-        p[8] = face; p[9] = tex && tex->type == O9_CUBE ? 1 : 0;
+        p[8] = face; p[9] = (tex && tex->type == O9_CUBE ? 1 : 0) | samples << 8;
         cmd_end();
     }
     return s;
@@ -464,6 +469,9 @@ static void set_vp(Dev9 *d, const uint32_t *v)
 }
 static void set_rt(Dev9 *d)
 {
+    { static int lg = -1, n; if (lg < 0) lg = getenv("D3D9_RTLOG") != 0;
+      if (lg && n++ < 400) fprintf(stderr, "rtlog: rt %u %ux%u fmt %u x%u | ds %u %ux%u fmt %u x%u\n", d->rt ? d->rt->id : 0, d->rt ? d->rt->w : 0, d->rt ? d->rt->h : 0,
+          d->rt ? d->rt->fmt : 0, d->rt ? d->rt->samples : 0, d->ds ? d->ds->id : 0, d->ds ? d->ds->w : 0, d->ds ? d->ds->h : 0, d->ds ? d->ds->fmt : 0, d->ds ? d->ds->samples : 0); }
     uint32_t *p = cmd_begin(DSR_SET_RT, 8); p[0] = d->rt ? d->rt->id : 0; p[1] = d->ds ? d->ds->id : 0; cmd_end();
 }
 static void sb_apply(Dev9 *d, SB9 *b)
@@ -882,10 +890,10 @@ static uint32_t create_buf(Dev9 *d, int index, uint32_t len, uint32_t usage, uin
 M(dv_CreateVertexBuffer, 7) DEV_ME RET(create_buf(me, 0, ARG(1), ARG(2), ARG(3), ARG(4), ARG(5)), 7); END
 M(dv_CreateIndexBuffer, 7) DEV_ME RET(create_buf(me, 1, ARG(1), ARG(2), ARG(3), ARG(4), ARG(5)), 7); END
 M(dv_CreateRenderTarget, 9) DEV_ME                     /* (w, h, format, multisample, quality, lockable, surface, shared) */
-    Surf9 *s = surf_new(me, ARG(1), ARG(2), ARG(3), USAGE_RENDERTARGET, 0, 1, 0, 0, 0, 0, 0); rt_w32(G_MEM, ARG(7), s->g); RET(D3D_OK, 9);
+    new_samples = ms_samples(ARG(4)); Surf9 *s = surf_new(me, ARG(1), ARG(2), ARG(3), USAGE_RENDERTARGET, 0, 1, 0, 0, 0, 0, 0); rt_w32(G_MEM, ARG(7), s->g); RET(D3D_OK, 9);
 END
 M(dv_CreateDepthStencilSurface, 9) DEV_ME
-    Surf9 *s = surf_new(me, ARG(1), ARG(2), ARG(3), USAGE_DEPTHSTENCIL, 0, 2, 0, 0, 0, 0, 0); rt_w32(G_MEM, ARG(7), s->g); RET(D3D_OK, 9);
+    new_samples = ms_samples(ARG(4)); Surf9 *s = surf_new(me, ARG(1), ARG(2), ARG(3), USAGE_DEPTHSTENCIL, 0, 2, 0, 0, 0, 0, 0); rt_w32(G_MEM, ARG(7), s->g); RET(D3D_OK, 9);
 END
 M(dv_CreateOffscreenPlainSurface, 7) DEV_ME            /* (w, h, format, pool, surface, shared) */
     if (!d9_fmt_known(ARG(3))) RET(D3DERR_INVALIDCALL, 7);
@@ -933,7 +941,9 @@ M(dv_SetRenderTarget, 3) DEV_ME                        /* (index, surface); inde
 END
 M(dv_GetRenderTarget, 3) DEV_ME if (ARG(1) || !me->rt) RET(D3DERR_NOTFOUND, 3); rt_w32(G_MEM, ARG(2), me->rt->g); surf_addref(me->rt); RET(D3D_OK, 3); END
 M(dv_SetDepthStencilSurface, 2) DEV_ME
-    Surf9 *s = ARG(1) ? obj(ARG(1), O9_SURF) : 0; if (ARG(1) && !s) RET(D3DERR_INVALIDCALL, 2);
+    Surf9 *s = ARG(1) ? obj(ARG(1), O9_SURF) : 0;
+    { static int lg = -1, n; if (lg < 0) lg = getenv("D3D9_RTLOG") != 0; if (lg && n++ < 200) fprintf(stderr, "rtlog: SetDepthStencilSurface(%08x) from %08x -> %s\n", ARG(1), rt_r32(G_MEM, c->esp), ARG(1) && !s ? "not a surface" : "ok"); }
+    if (ARG(1) && !s) RET(D3DERR_INVALIDCALL, 2);
     if (s) surf_addref(s); if (me->ds) surf_release(me->ds); me->ds = s; set_rt(me); RET(D3D_OK, 2);
 END
 M(dv_GetDepthStencilSurface, 2) DEV_ME if (!me->ds) RET(D3DERR_NOTFOUND, 2); rt_w32(G_MEM, ARG(1), me->ds->g); surf_addref(me->ds); RET(D3D_OK, 2); END
@@ -1190,12 +1200,14 @@ static void dev_defaults(Dev9 *d)                      /* Direct3D 9's initial s
 static void dev_surfaces(Dev9 *d, uint32_t pp)          /* back buffer (and the automatic depth buffer) from the present parameters */
 {
     memcpy(d->pp, GP(pp), 56);
+    if (getenv("D3D9_RTLOG")) { fprintf(stderr, "rtlog: present parameters:"); for (int k = 0; k < 14; k++) fprintf(stderr, " %x", d->pp[k]); fprintf(stderr, "\n"); }
     if (!d->pp[0] || !d->pp[1]) { d->pp[0] = (uint32_t)w32_screen_w; d->pp[1] = (uint32_t)w32_screen_h; }
     if (!d->pp[2]) d->pp[2] = 22;
     if (!d->pp[3]) d->pp[3] = 1;
     memcpy(GP(pp), d->pp, 56);                          /* (the game reads back what was chosen) */
     dsr_d3d9_w = d->pp[0]; dsr_d3d9_h = d->pp[1];
-    d->back = surf_new(d, d->pp[0], d->pp[1], d->pp[2] == 21 ? 21 : 22, USAGE_RENDERTARGET, 0, 1, 0, 0, 0, 0, 0);
+    new_samples = ms_samples(d->pp[4]); d->back = surf_new(d, d->pp[0], d->pp[1], d->pp[2] == 21 ? 21 : 22, USAGE_RENDERTARGET, 0, 1, 0, 0, 0, 0, 0);
+    if (d->pp[9]) new_samples = ms_samples(d->pp[4]);
     d->depth = d->pp[9] ? surf_new(d, d->pp[0], d->pp[1], d->pp[10] ? d->pp[10] : 75, USAGE_DEPTHSTENCIL, 0, 2, 0, 0, 0, 0, 0) : 0;
     d->rt = d->back; surf_addref(d->back); d->ds = d->depth; if (d->depth) surf_addref(d->depth);
     uint32_t *p = cmd_begin(DSR_MODE, 8); p[0] = d->pp[0]; p[1] = d->pp[1]; cmd_end();
@@ -1260,7 +1272,14 @@ M(d9_CheckDeviceFormat, 7)                             /* (adapter, type, adapte
     int ok = (usage & USAGE_DEPTHSTENCIL) ? d9_fmt_depth(f) : (usage & USAGE_RENDERTARGET) ? (f == 21 || f == 22) : d9_fmt_known(f) && !d9_fmt_depth(f);
     RET(ok ? D3D_OK : D3DERR_NOTAVAILABLE, 7);
 END
-M(d9_CheckDeviceMultiSampleType, 7) if (ARG(6)) rt_w32(G_MEM, ARG(6), 1); RET(ARG(5) ? D3DERR_NOTAVAILABLE : D3D_OK, 7); END
+/* (adapter, type, format, windowed, multisample type, quality levels). Multisampling is offered to the game only with
+ * D3D9_GAME_MSAA=1: its MSAA path then draws the scene into a multisampled target with no depth buffer bound (the depth
+ * it pairs with it is never created here). Antialiasing is the renderer's instead (DSR_MSAA, DSR_FXAA). */
+M(d9_CheckDeviceMultiSampleType, 7)
+    uint32_t t = ARG(5); int ok = t == 0 || ((t == 2 || t == 4 || t == 8) && getenv("D3D9_GAME_MSAA"));
+    if (getenv("D3D9_RTLOG")) fprintf(stderr, "rtlog: CheckDeviceMultiSampleType(devtype %u, format %u, windowed %u, type %u) -> %s\n", ARG(2), ARG(3), ARG(4), t, ok ? "ok" : "no");
+    if (ARG(6)) rt_w32(G_MEM, ARG(6), ok ? 1 : 0); RET(ok ? D3D_OK : D3DERR_NOTAVAILABLE, 7);
+END
 M(d9_CheckDepthStencilMatch, 6) RET(d9_fmt_depth(ARG(5)) ? D3D_OK : D3DERR_NOTAVAILABLE, 6); END
 M(d9_CheckDeviceFormatConversion, 5) RET(D3D_OK, 5); END
 static void fill_caps(uint32_t out)                    /* D3DCAPS9: a Radeon 8500-class card (shader model 1.x), or X800-class with effects */

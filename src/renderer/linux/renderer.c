@@ -11,7 +11,7 @@
 #include <time.h>
 #define MAXSURF 65536
 long dsr_stat[8];
-typedef struct { GLuint tex; uint32_t w,h,fmt,level,root,levels,face; GLenum target; int used; } Surf;   /* target: GL_TEXTURE_2D or GL_TEXTURE_CUBE_MAP (face 0-5) */
+typedef struct { GLuint tex; uint32_t w,h,fmt,level,root,levels,face; GLenum target; int used; GLuint ms; uint32_t samples; int ms_dirty; uint32_t kind; } Surf;   /* ms: multisampled storage drawn into, resolved into tex when read */   /* target: GL_TEXTURE_2D or GL_TEXTURE_CUBE_MAP (face 0-5) */
 typedef struct {   // must match game.*.glsl (std140) Uniforms
     float wvp[16], wv[16], tex0[16];
     float vp[4], fog[4], fogcolor[4], tfactor[4];
@@ -25,7 +25,7 @@ typedef struct {   // must match game.*.glsl (std140) Uniforms
 
 struct DSRRenderer {
  Surf s[MAXSURF]; uint32_t rs[256],tss[16][32],tex[16],rt,ds,presented;
- float xf[32][16],vp[6]; GLuint fbo,vao,vbo,ebo,ubo,game,quad,dummy,scratch,gamma,sampler[16];
+ float xf[32][16],vp[6]; GLuint rfbo,dfbo; uint32_t mode_w,mode_h; GLuint fbo,vao,vbo,ebo,ubo,game,quad,dummy,scratch,gamma,sampler[16];
  uint16_t ramps[3][256]; void *readback; size_t readback_size; volatile uint32_t *readback_done;
  struct GProg *progs; uint32_t nprogs, cur; GLuint dummy_cube, dummy_3d, pvbo, pebo, svao;
  int32_t scissor[4]; int framelog; uint32_t nframes; double t0; volatile uint32_t *qres; GLuint qobj[1024]; uint32_t qserial[1024]; uint16_t qpend[1024]; int nqpend; int qactive;   /* occlusion queries (DSR_QUERY) */
@@ -112,17 +112,60 @@ DSRRenderer *dsr_gl_create(const char *dir) {
  glBindVertexArray(r->vao);
  ramp(r); glDisable(GL_DITHER); return r;
 }
+/* a multisampled surface's samples into its texture (before it is sampled, copied, read back or presented) */
+static void resolve(DSRRenderer *r,Surf *s) {
+ if(!s || !s->ms || !s->ms_dirty) return;
+ if(!r->rfbo) { glGenFramebuffers(1,&r->rfbo); glGenFramebuffers(1,&r->dfbo); }
+ GLenum att=s->fmt==3?GL_DEPTH_STENCIL_ATTACHMENT:GL_COLOR_ATTACHMENT0;
+ glBindFramebuffer(GL_READ_FRAMEBUFFER,r->rfbo); glFramebufferTexture2D(GL_READ_FRAMEBUFFER,att,GL_TEXTURE_2D_MULTISAMPLE,s->ms,0);
+ glBindFramebuffer(GL_DRAW_FRAMEBUFFER,r->dfbo); glFramebufferTexture2D(GL_DRAW_FRAMEBUFFER,att,GL_TEXTURE_2D,s->tex,0);
+ GLboolean sc=glIsEnabled(GL_SCISSOR_TEST); glDisable(GL_SCISSOR_TEST);    /* (called mid-draw too: the scissor is put back) */
+ glBlitFramebuffer(0,0,s->w,s->h,0,0,s->w,s->h,s->fmt==3?GL_DEPTH_BUFFER_BIT|GL_STENCIL_BUFFER_BIT:GL_COLOR_BUFFER_BIT,GL_NEAREST);
+ if(sc) glEnable(GL_SCISSOR_TEST);
+ glBindFramebuffer(GL_FRAMEBUFFER,r->fbo); s->ms_dirty=0;
+}
+static int target_read(DSRRenderer *r,uint32_t id) {       /* for glReadPixels: resolved, single-sampled */
+ Surf *s=surf(r,id); if(!s) return 0; resolve(r,s);
+ glBindFramebuffer(GL_FRAMEBUFFER,r->fbo);
+ glFramebufferTexture2D(GL_FRAMEBUFFER,GL_COLOR_ATTACHMENT0,face_target(s),s->tex,s->level);
+ glFramebufferTexture2D(GL_FRAMEBUFFER,GL_DEPTH_STENCIL_ATTACHMENT,GL_TEXTURE_2D,0,0);
+ return glCheckFramebufferStatus(GL_FRAMEBUFFER)==GL_FRAMEBUFFER_COMPLETE;
+}
 static int target(DSRRenderer *r,uint32_t color,uint32_t depth) {
  Surf *c=surf(r,color), *z=surf(r,depth); if(!c) return 0;
+ /* multisampled storage when color and depth agree on it (as Direct3D requires); else both single-sampled */
+ int ms=c->ms && (!z || (z->ms && z->samples==c->samples));
+ if(getenv("DSR_MSLOG") && ((c->ms!=0)!=(z && z->ms!=0)) && z) { static int n; if(n++<40) fprintf(stderr,"mslog: color %u %ux%u samples %u + depth %u %ux%u samples %u\n",color,c->w,c->h,c->samples,depth,z->w,z->h,z->samples); }
+ if(!ms) { resolve(r,c); if(z && z->ms) resolve(r,z); }
  glBindFramebuffer(GL_FRAMEBUFFER,r->fbo);
- glFramebufferTexture2D(GL_FRAMEBUFFER,GL_COLOR_ATTACHMENT0,face_target(c),c->tex,c->level);
- glFramebufferTexture2D(GL_FRAMEBUFFER,GL_DEPTH_STENCIL_ATTACHMENT,z?face_target(z):GL_TEXTURE_2D,z?z->tex:0,z?z->level:0);
+ if(ms) { glFramebufferTexture2D(GL_FRAMEBUFFER,GL_COLOR_ATTACHMENT0,GL_TEXTURE_2D_MULTISAMPLE,c->ms,0); c->ms_dirty=1; }
+ else glFramebufferTexture2D(GL_FRAMEBUFFER,GL_COLOR_ATTACHMENT0,face_target(c),c->tex,c->level);
+ if(ms && z) { glFramebufferTexture2D(GL_FRAMEBUFFER,GL_DEPTH_STENCIL_ATTACHMENT,GL_TEXTURE_2D_MULTISAMPLE,z->ms,0); z->ms_dirty=1; }
+ else glFramebufferTexture2D(GL_FRAMEBUFFER,GL_DEPTH_STENCIL_ATTACHMENT,z?face_target(z):GL_TEXTURE_2D,z?z->tex:0,z?z->level:0);
  return glCheckFramebufferStatus(GL_FRAMEBUFFER)==GL_FRAMEBUFFER_COMPLETE;
+}
+/* multisampled storage for a surface (render targets and depth buffers; resolved into tex when read) */
+static void make_ms(Surf *s,uint32_t samples) {
+ if(samples<2 || s->ms || s->target!=GL_TEXTURE_2D || s->levels!=1 || s->level) return;
+ GLint maxs=0; glGetIntegerv(GL_MAX_SAMPLES,&maxs); if((GLint)samples>maxs) samples=(uint32_t)maxs;
+ GLint in; GLenum f,t; gl_format(s->fmt,&in,&f,&t); while(glGetError()) {}
+ glGenTextures(1,&s->ms); glBindTexture(GL_TEXTURE_2D_MULTISAMPLE,s->ms);
+ glTexImage2DMultisample(GL_TEXTURE_2D_MULTISAMPLE,(GLsizei)samples,in,s->w,s->h,GL_TRUE); s->samples=samples; s->ms_dirty=0;
+ if(glGetError()) { glDeleteTextures(1,&s->ms); s->ms=0; s->samples=0; }
+}
+/* DSR_MSAA=2/4/8: multisampling forced on the game's full-screen render targets and depth buffers, as a driver
+ * override does (the game's own MSAA path leaves its scene without a depth buffer here); textures that are render
+ * targets count when they are floating point (the HDR scene) */
+static uint32_t forced_samples(DSRRenderer *r,const Surf *s) {
+ static int n=-1; if(n<0) { const char *e=getenv("DSR_MSAA"); n=e?atoi(e):0; if(n!=2 && n!=4 && n!=8) n=0; }
+ if(!n || !r->mode_w || s->w!=r->mode_w || s->h!=r->mode_h) return 0;
+ if(s->kind==1 || s->kind==2 || (s->kind==3 && s->fmt>=4 && s->fmt<=9)) return (uint32_t)n;
+ return 0;
 }
 static void create_surface(DSRRenderer *r,const uint32_t *p,uint32_t size) {
  uint32_t id=p[0],w=p[1],h=p[2],fmt=p[4],parent=p[5],level=p[6]; if(!id || id>=MAXSURF || !w || !h) return;
- uint32_t face=size>=40?p[8]:0; int cube=size>=40 && (p[9]&1);
- Surf *s=&r->s[id]; if(s->used && s->root==id) glDeleteTextures(1,&s->tex);
+ uint32_t face=size>=40?p[8]:0; int cube=size>=40 && (p[9]&1); uint32_t samples=size>=40?(p[9]>>8)&255:0;
+ Surf *s=&r->s[id]; if(s->used && s->root==id) { glDeleteTextures(1,&s->tex); if(s->ms) glDeleteTextures(1,&s->ms); }
  *s=(Surf){.w=w,.h=h,.fmt=fmt,.level=level,.root=id,.used=1,.levels=size>=32 && p[7]?p[7]:1,.face=face<6?face:0,.target=GL_TEXTURE_2D};
  Surf *root=surf(r,parent); if(root) { s->tex=root->tex; s->root=root->root; s->levels=root->levels; s->target=root->target; return; }
  GLint in; GLenum f,t; gl_format(fmt,&in,&f,&t);
@@ -137,6 +180,9 @@ static void create_surface(DSRRenderer *r,const uint32_t *p,uint32_t size) {
  }
  glTexParameteri(s->target,GL_TEXTURE_MIN_FILTER,GL_LINEAR); glTexParameteri(s->target,GL_TEXTURE_MAG_FILTER,GL_LINEAR);
  glTexParameteri(s->target,GL_TEXTURE_WRAP_S,GL_CLAMP_TO_EDGE); glTexParameteri(s->target,GL_TEXTURE_WRAP_T,GL_CLAMP_TO_EDGE);
+ s->kind=p[3];
+ if(samples<2) samples=forced_samples(r,s);
+ make_ms(s,samples);
 }
 static void quad(DSRRenderer *r,GLuint texture,const float *dst,const float *src,uint32_t color,int mode,int present) {
  glBindSampler(0,0); glBindSampler(1,0);
@@ -145,6 +191,8 @@ static void quad(DSRRenderer *r,GLuint texture,const float *dst,const float *src
  glUniform4fv(glGetUniformLocation(r->quad,"dst"),1,dst); glUniform4fv(glGetUniformLocation(r->quad,"src"),1,src);
  glUniform4f(glGetUniformLocation(r->quad,"color"),((color>>16)&255)/255.f,((color>>8)&255)/255.f,(color&255)/255.f,(color>>24)/255.f);
  glUniform1i(glGetUniformLocation(r->quad,"mode"),mode); glUniform1i(glGetUniformLocation(r->quad,"present"),present);
+ { static int fx=-1; if(fx<0) { const char *e=getenv("DSR_FXAA"); fx=e && *e && *e!='0'; }   /* DSR_FXAA=1: FXAA on the presented image */
+   glUniform1i(glGetUniformLocation(r->quad,"fxaa"),present && fx); }
  glActiveTexture(GL_TEXTURE0); glBindTexture(GL_TEXTURE_2D,texture?texture:r->dummy);
  glTexParameteri(GL_TEXTURE_2D,GL_TEXTURE_MIN_FILTER,present?GL_LINEAR:GL_NEAREST); glTexParameteri(GL_TEXTURE_2D,GL_TEXTURE_MAG_FILTER,present?GL_LINEAR:GL_NEAREST);
  glTexParameteri(GL_TEXTURE_2D,GL_TEXTURE_WRAP_S,GL_CLAMP_TO_EDGE); glTexParameteri(GL_TEXTURE_2D,GL_TEXTURE_WRAP_T,GL_CLAMP_TO_EDGE);
@@ -152,7 +200,7 @@ static void quad(DSRRenderer *r,GLuint texture,const float *dst,const float *src
  glDrawArrays(GL_TRIANGLE_STRIP,0,4);
 }
 static void blit(DSRRenderer *r,uint32_t dst,const int32_t *dr,uint32_t src,const int32_t *sr,int mode,uint32_t color) {
- Surf *d=surf(r,dst),*s=surf(r,src); if(!d || !target(r,dst,0)) return;
+ Surf *d=surf(r,dst),*s=surf(r,src); resolve(r,s); if(!d || !target(r,dst,0)) return;
  float rect[4]={dr[0]/(float)d->w,dr[1]/(float)d->h,dr[2]/(float)d->w,dr[3]/(float)d->h},uv[4]={0,0,1,1};
  if(s || mode==2) { float w=s?s->w:256,h=s?s->h:256; for(int k=0;k<4;k++) uv[k]=sr[k]/(k%2?h:w); }
  GLuint texture=mode==2?r->scratch:s?s->tex:r->dummy;
@@ -189,6 +237,7 @@ static GLenum address(uint32_t a) { return a==2?GL_MIRRORED_REPEAT:a==3?GL_CLAMP
 static void bind_texture(DSRRenderer *r,int stage,Surf *s) {
  glActiveTexture(GL_TEXTURE0+stage);
  if(s && s->target==GL_TEXTURE_CUBE_MAP) s=NULL;  /* a 2D sampler: a cube texture cannot be bound there */
+ if(s && s->ms_dirty) { resolve(r,s); glActiveTexture(GL_TEXTURE0+stage); }
  glBindTexture(GL_TEXTURE_2D,s?s->tex:r->dummy);
  GLuint sampler=r->sampler[stage]; glBindSampler(stage,sampler);
  uint32_t *t=r->tss[stage]; int linear=t[17]>=2,mip=s && s->levels>1 ? t[18]:0;
@@ -308,14 +357,14 @@ void dsr_gl_poll_queries(DSRRenderer *r) {                       /* publish the 
 void dsr_gl_readback(DSRRenderer *r,void *data,size_t size,volatile uint32_t *done) { r->readback=data; r->readback_size=size; r->readback_done=done; }
 static void readback(DSRRenderer *r,const uint32_t *p) {
  Surf *s=surf(r,p[0]); int ok=0;
- if(s && s->fmt!=3 && r->readback && p[3] && p[4] && (uint64_t)p[3]*p[4]*4<=r->readback_size && (uint64_t)p[1]+p[3]<=s->w && (uint64_t)p[2]+p[4]<=s->h && target(r,p[0],0)) {
+ if(s && s->fmt!=3 && r->readback && p[3] && p[4] && (uint64_t)p[3]*p[4]*4<=r->readback_size && (uint64_t)p[1]+p[3]<=s->w && (uint64_t)p[2]+p[4]<=s->h && target_read(r,p[0])) {
   glReadPixels(p[1],p[2],p[3],p[4],GL_BGRA,GL_UNSIGNED_BYTE,r->readback); ok=1;
  }
  if(r->readback_done) __atomic_store_n(r->readback_done,p[5]|(ok?0:0x80000000u),__ATOMIC_RELEASE);
 }
 void dsr_gl_size(DSRRenderer *r,uint32_t *w,uint32_t *h) { Surf *s=surf(r,r->presented); *w=s?s->w:0; *h=s?s->h:0; }
 void dsr_gl_present(DSRRenderer *r,int width,int height) {
- Surf *s=surf(r,r->presented); if(!s) return;
+ Surf *s=surf(r,r->presented); if(!s) return; resolve(r,s);
  glBindFramebuffer(GL_FRAMEBUFFER,0); glDisable(GL_SCISSOR_TEST); glClearColor(0,0,0,1); glClear(GL_COLOR_BUFFER_BIT);
  double scale=(double)width/s->w; if((double)height/s->h<scale) scale=(double)height/s->h;
  int w=(int)(s->w*scale),h=(int)(s->h*scale); glViewport((width-w)/2,(height-h)/2,w,h);
@@ -323,7 +372,7 @@ void dsr_gl_present(DSRRenderer *r,int width,int height) {
 }
 int dsr_gl_screenshot(DSRRenderer *r,const char *path) {
  Surf *s=surf(r,r->presented);
- if(!s || !target(r,r->presented,0)) { fprintf(stderr,"screenshot: presented surface %u %s (status %#x)\n",r->presented,s?"is not renderable":"is unknown",s?glCheckFramebufferStatus(GL_FRAMEBUFFER):0); return -1; }
+ if(!s || !target_read(r,r->presented)) { fprintf(stderr,"screenshot: presented surface %u %s (status %#x)\n",r->presented,s?"is not renderable":"is unknown",s?glCheckFramebufferStatus(GL_FRAMEBUFFER):0); return -1; }
  uint8_t *pixels=malloc((size_t)s->w*s->h*4); if(!pixels) return -1;
  glReadPixels(0,0,s->w,s->h,GL_RGBA,GL_UNSIGNED_BYTE,pixels);
  png_image image={0}; image.version=PNG_IMAGE_VERSION; image.width=s->w; image.height=s->h; image.format=PNG_FORMAT_RGBA;
@@ -528,7 +577,7 @@ int dsr_gl_exec(DSRRenderer *r,uint32_t op,const uint8_t *data,uint32_t size) {
  case DSR_DRAW: draw(r,p,size); break;
  case DSR_SET_RT: r->rt=p[0]; r->ds=p[1]; break;
  case DSR_SURFACE_CREATE: create_surface(r,p,size); break;
- case DSR_SURFACE_DESTROY: if(p[0]<MAXSURF) { Surf *s=&r->s[p[0]]; if(s->used && s->root==p[0]) glDeleteTextures(1,&s->tex); s->used=0; } break;
+ case DSR_SURFACE_DESTROY: if(p[0]<MAXSURF) { Surf *s=&r->s[p[0]]; if(s->used && s->root==p[0]) { glDeleteTextures(1,&s->tex); if(s->ms) glDeleteTextures(1,&s->ms); } s->ms=0; s->used=0; } break;
  case DSR_SURFACE_UPLOAD: upload(r,p,size,0); break;
  case DSR_UPLOAD_OVER: upload(r,p,size,1); break;
  case DSR_READBACK: readback(r,p); break;
@@ -537,6 +586,8 @@ int dsr_gl_exec(DSRRenderer *r,uint32_t op,const uint8_t *data,uint32_t size) {
  case DSR_PROG_USE: r->cur=p[0]; break;
  case DSR_SHADER_CONST: shader_consts(r,p,size); break;
  case DSR_DRAW_PROG: draw_prog(r,p,size); break;
+ case DSR_MODE: if(size>=8) { r->mode_w=p[0]; r->mode_h=p[1];      /* the game's screen size: surfaces made just before (the back buffer) too */
+   for(uint32_t k=1;k<MAXSURF;k++) { Surf *t=&r->s[k]; if(t->used && t->root==k && !t->ms) make_ms(t,forced_samples(r,t)); } } break;
  case DSR_VBUF_DATA: vbuf_data(p,size); break;
  case DSR_VBUF_FREE: vbuf_free(p); break;
  case DSR_DRAW_PROG_VB: draw_prog_x(r,p,size,1); break;
@@ -546,7 +597,7 @@ int dsr_gl_exec(DSRRenderer *r,uint32_t op,const uint8_t *data,uint32_t size) {
   { static const char *pk; static int pk_init; if(!pk_init) { pk_init=1; pk=getenv("DSR_PEEK"); }   /* DSR_PEEK=id,id: those surfaces' first texel each present */
     if(pk) { static uint32_t n; if(n++%30==0) { const char *q=pk; fprintf(stderr,"peek %u:",n);
       while(*q) { uint32_t id=(uint32_t)strtoul(q,(char **)&q,10); Surf *t=surf(r,id); float v[4]={0};
-        if(t && target(r,id,0)) glReadPixels(0,0,1,1,GL_RGBA,GL_FLOAT,v); fprintf(stderr," [%u] %g %g %g %g",id,v[0],v[1],v[2],v[3]); if(*q==',') q++; else break; }
+        if(t && target_read(r,id)) glReadPixels(0,0,1,1,GL_RGBA,GL_FLOAT,v); fprintf(stderr," [%u] %g %g %g %g",id,v[0],v[1],v[2],v[3]); if(*q==',') q++; else break; }
       fprintf(stderr,"\n"); } } }
   { static double at=-1; if(at<0) { const char *e=getenv("DSR_FRAMELOG_SEC"); at=e?atof(e):0; }
     struct timespec ts; clock_gettime(CLOCK_MONOTONIC,&ts); double now=ts.tv_sec+ts.tv_nsec/1e9; if(!r->t0) r->t0=now;
