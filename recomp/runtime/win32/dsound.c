@@ -70,7 +70,7 @@ static void render(void *u, void *buffer, uint32_t frames)
     (void)u;
     float *out = buffer; memset(out, 0, frames * 8);
     if (frames > slice_max) slice_max = frames;
-    if (primary_playing) for (int k = 0; k < NBUF; k++) {
+    for (int k = 0; k < NBUF; k++) {          /* secondaries play whether or not the primary was Play()ed: DirectSound runs it implicitly */
         Buf *b = &bufs[k]; if (!b->used || b->primary || !b->playing) continue;
         double gl, gr; gains3d(b, &gl, &gr);
         uint32_t nframes = b->size / b->align, pos = b->play / b->align; double step = (double)(b->freq ? b->freq : (uint32_t)b->rate) / OUT_RATE, fr = b->frac;
