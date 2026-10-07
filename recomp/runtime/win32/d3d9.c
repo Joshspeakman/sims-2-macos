@@ -286,7 +286,7 @@ END
 
 /* ---- shaders: kept (not run yet) ---- */
 #define SH_ME Shader9 *me = obj(ARG(0), O9_VS); if (!me) me = obj(ARG(0), O9_PS); if (!me) RET(D3DERR_INVALIDCALL, nargs_);
-static uint32_t shader_release(Shader9 *s) { uint32_t r = (uint32_t)--s->ref; if (!r) { gfree_(s->mem, s->len); obj_drop(s->g); free(s); } return r; }
+static uint32_t shader_release(Shader9 *s) { uint32_t r = (uint32_t)--s->ref; if (!r) { d9_shader_forget(s); gfree_(s->mem, s->len); obj_drop(s->g); free(s); } return r; }
 M(sh_QueryInterface, 3) SH_ME rt_w32(G_MEM, ARG(2), ARG(0)); me->ref++; RET(D3D_OK, 3); END
 M(sh_AddRef, 1) SH_ME RET((uint32_t)++me->ref, 1); END
 M(sh_Release, 1) SH_ME RET(shader_release(me), 1); END
@@ -875,25 +875,35 @@ OK_M(dv_SetSoftwareVertexProcessing, 2)
 M(dv_GetSoftwareVertexProcessing, 1) RET(0, 1); END
 OK_M(dv_SetNPatchMode, 2)
 M(dv_GetNPatchMode, 1) FPUSH(0.0); RET(0, 1); END
+/* the game's own vertex shader bound: its program (d3d9_shader.c) and constants, then a programmable draw */
+static int shader_bind(Dev9 *d)
+{
+    uint32_t id = d9_shader_program(d); if (!id) return 0;
+    d9_program_use(d, id); d9_shader_consts(d, id); return 1;
+}
 M(dv_DrawPrimitive, 4) DEV_ME                          /* (type, start vertex, primitives) */
+    if (me->vs) { if (shader_bind(me)) prog_draw(me, ARG(1), ARG(2), prim_verts(ARG(1), ARG(3)), 0, 0, 0, 0); RET(D3D_OK, 4); }
     if (me->prog) { prog_draw(me, ARG(1), ARG(2), prim_verts(ARG(1), ARG(3)), 0, 0, 0, 0); RET(D3D_OK, 4); }
     if (!can_draw(me)) RET(D3D_OK, 4);
     uint32_t nv = prim_verts(ARG(1), ARG(3)), fvf; const uint8_t *v = gather(me, ARG(2), nv, &fvf, 0, 0);
     if (v) emit(me, ARG(1), fvf, v, nv, 0, 0); RET(D3D_OK, 4);
 END
 M(dv_DrawIndexedPrimitive, 7) DEV_ME                   /* (type, base vertex, min index, vertices, start index, primitives) */
+    if (me->vs && (!me->ib || !shader_bind(me))) RET(D3D_OK, 7);
     if ((!me->prog && !can_draw(me)) || !me->ib) RET(D3D_OK, 7);
     uint32_t ni = prim_verts(ARG(1), ARG(6)), is = me->ib->fmt == 102 ? 4 : 2;
     if ((uint64_t)(ARG(5) + ni) * is > me->ib->len) { static int w; if (!w++) fprintf(stderr, "d3d9: indices past the index buffer (skipped)\n"); RET(D3D_OK, 7); }
     (me->prog ? prog_draw_indexed : draw_indexed)(me, ARG(1), (int32_t)ARG(2), ARG(3), ARG(4), G_MEM + me->ib->mem + ARG(5) * is, is == 4, ni, 0, 0); RET(D3D_OK, 7);
 END
 M(dv_DrawPrimitiveUP, 5) DEV_ME                        /* (type, primitives, data, stride) */
+    if (me->vs) { if (shader_bind(me)) prog_draw(me, ARG(1), 0, prim_verts(ARG(1), ARG(2)), 0, 0, G_MEM + ARG(3), ARG(4)); RET(D3D_OK, 5); }
     if (me->prog) { prog_draw(me, ARG(1), 0, prim_verts(ARG(1), ARG(2)), 0, 0, G_MEM + ARG(3), ARG(4)); RET(D3D_OK, 5); }
     if (!can_draw(me)) RET(D3D_OK, 5);
     uint32_t nv = prim_verts(ARG(1), ARG(2)), fvf; const uint8_t *v = gather(me, 0, nv, &fvf, G_MEM + ARG(3), ARG(4));
     if (v) emit(me, ARG(1), fvf, v, nv, 0, 0); RET(D3D_OK, 5);
 END
 M(dv_DrawIndexedPrimitiveUP, 9) DEV_ME                 /* (type, min index, vertices, primitives, indices, index format, data, stride) */
+    if (me->vs && !shader_bind(me)) RET(D3D_OK, 9);
     if (!me->prog && !can_draw(me)) RET(D3D_OK, 9);
     uint32_t ni = prim_verts(ARG(1), ARG(4)), stride = ARG(8);
     (me->prog ? prog_draw_indexed : draw_indexed)(me, ARG(1), 0, ARG(2), ARG(3), G_MEM + ARG(5), ARG(6) == 102, ni, G_MEM + ARG(7) + ARG(2) * stride, stride); RET(D3D_OK, 9);
@@ -941,10 +951,22 @@ static uint32_t set_consts(float (*dst)[4], uint32_t max, uint32_t start, uint32
 }
 M(dv_SetVertexShaderConstantF, 4) DEV_ME RET(set_consts(me->vsc, 256, ARG(1), ARG(2), ARG(3), 0), 4); END
 M(dv_GetVertexShaderConstantF, 4) DEV_ME RET(set_consts(me->vsc, 256, ARG(1), ARG(2), ARG(3), 1), 4); END
-OK_M(dv_SetVertexShaderConstantI, 4)
-TODO_M(dv_GetVertexShaderConstantI, 4, D3DERR_INVALIDCALL)
-OK_M(dv_SetVertexShaderConstantB, 4)
-TODO_M(dv_GetVertexShaderConstantB, 4, D3DERR_INVALIDCALL)
+static uint32_t set_iconsts(int32_t (*dst)[4], uint32_t start, uint32_t data, uint32_t n, int get)
+{
+    if (start + n > 16) return D3DERR_INVALIDCALL;
+    if (get) memcpy(GP(data), dst[start], 16 * n); else memcpy(dst[start], GP(data), 16 * n);
+    return D3D_OK;
+}
+static uint32_t set_bconsts(uint32_t *dst, uint32_t start, uint32_t data, uint32_t n, int get)
+{
+    if (start + n > 16) return D3DERR_INVALIDCALL;
+    if (get) memcpy(GP(data), dst + start, 4 * n); else memcpy(dst + start, GP(data), 4 * n);
+    return D3D_OK;
+}
+M(dv_SetVertexShaderConstantI, 4) DEV_ME RET(set_iconsts(me->vsi, ARG(1), ARG(2), ARG(3), 0), 4); END
+M(dv_GetVertexShaderConstantI, 4) DEV_ME RET(set_iconsts(me->vsi, ARG(1), ARG(2), ARG(3), 1), 4); END
+M(dv_SetVertexShaderConstantB, 4) DEV_ME RET(set_bconsts(me->vsb, ARG(1), ARG(2), ARG(3), 0), 4); END
+M(dv_GetVertexShaderConstantB, 4) DEV_ME RET(set_bconsts(me->vsb, ARG(1), ARG(2), ARG(3), 1), 4); END
 M(dv_SetStreamSource, 5) DEV_ME                        /* (stream, buffer, offset, stride) */
     if (ARG(1) >= 16) RET(D3DERR_INVALIDCALL, 5);
     Buf9 *b = ARG(2) ? obj(ARG(2), O9_VB) : 0; if (ARG(2) && !b) RET(D3DERR_INVALIDCALL, 5);
@@ -972,10 +994,10 @@ END
 M(dv_GetPixelShader, 2) DEV_ME rt_w32(G_MEM, ARG(1), me->ps ? me->ps->g : 0); if (me->ps) me->ps->ref++; RET(D3D_OK, 2); END
 M(dv_SetPixelShaderConstantF, 4) DEV_ME RET(set_consts(me->psc, 224, ARG(1), ARG(2), ARG(3), 0), 4); END
 M(dv_GetPixelShaderConstantF, 4) DEV_ME RET(set_consts(me->psc, 224, ARG(1), ARG(2), ARG(3), 1), 4); END
-OK_M(dv_SetPixelShaderConstantI, 4)
-TODO_M(dv_GetPixelShaderConstantI, 4, D3DERR_INVALIDCALL)
-OK_M(dv_SetPixelShaderConstantB, 4)
-TODO_M(dv_GetPixelShaderConstantB, 4, D3DERR_INVALIDCALL)
+M(dv_SetPixelShaderConstantI, 4) DEV_ME RET(set_iconsts(me->psi, ARG(1), ARG(2), ARG(3), 0), 4); END
+M(dv_GetPixelShaderConstantI, 4) DEV_ME RET(set_iconsts(me->psi, ARG(1), ARG(2), ARG(3), 1), 4); END
+M(dv_SetPixelShaderConstantB, 4) DEV_ME RET(set_bconsts(me->psb, ARG(1), ARG(2), ARG(3), 0), 4); END
+M(dv_GetPixelShaderConstantB, 4) DEV_ME RET(set_bconsts(me->psb, ARG(1), ARG(2), ARG(3), 1), 4); END
 TODO_M(dv_DrawRectPatch, 4, D3DERR_INVALIDCALL)
 TODO_M(dv_DrawTriPatch, 4, D3DERR_INVALIDCALL)
 TODO_M(dv_DeletePatch, 2, D3DERR_INVALIDCALL)
