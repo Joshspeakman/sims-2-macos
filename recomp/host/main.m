@@ -16,6 +16,9 @@
 #include "../../src/dsr/dsr_proto.h"
 #include "../../src/dsr/dsr_shm.h"
 #include "../runtime/win32/w32.h"
+#include "../runtime/edition.h"
+#include <dirent.h>
+void w32_di_key(int dik, int down), w32_di_mouse_move(int dx, int dy), w32_di_mouse_wheel(int dz), w32_di_mouse_button(int b, int down), w32_di_release_all(void);   /* dinput8.c */
 
 int  w32_prepare(const char *exe, const char *game_dir, const char *drive_c, const char *overlay);
 uint32_t w32_run(char *msg, size_t cap);
@@ -49,6 +52,7 @@ static void *render_thread(void *arg)
     @autoreleasepool {
         DSRRenderer *r = dsr_renderer_create(layer.device);
         dsr_renderer_set_readback(r, (uint8_t *)H + DSR_READBACK_OFFSET, DSR_READBACK_SIZE, &H->readback_done);
+        dsr_renderer_set_queries(r, (volatile uint32_t *)((uint8_t *)H + DSR_QUERY_OFFSET));
         uint32_t rpos = H->read_pos, frames = 0, spins = 0;
         __atomic_store_n(&H->host_ready, 1, __ATOMIC_RELEASE);
         for (;;) {
@@ -151,7 +155,7 @@ static void parse_script(void)
         if (tok[0] == '@') a->frame = 0xffffffffu;
         if (ok >= 2) {
             snprintf(a->kind, sizeof a->kind, "%s", kind);
-            if (!strcmp(kind, "shot") || !strcmp(kind, "type") || !strcmp(kind, "peek")) snprintf(a->path, sizeof a->path, "%s", rest); else sscanf(rest, "%d,%d", &a->x, &a->y);
+            if (!strcmp(kind, "shot") || !strcmp(kind, "type") || !strcmp(kind, "ditype") || !strcmp(kind, "peek")) snprintf(a->path, sizeof a->path, "%s", rest); else sscanf(rest, "%d,%d", &a->x, &a->y);
             nacts++;
         }
         tok = strtok_r(0, ";", &save);
@@ -189,11 +193,14 @@ static void cmdfile_poll(uint32_t fno)
         Act *a = &acts[nacts]; char kind[8] = "", rest[600] = "";
         if (sscanf(line, "%7[a-z]:%599[^\n]", kind, rest) < 1 || !kind[0]) continue;
         memset(a, 0, sizeof *a); a->frame = fno + 1; snprintf(a->kind, sizeof a->kind, "%s", kind);
-        if (!strcmp(kind, "shot") || !strcmp(kind, "type") || !strcmp(kind, "peek")) snprintf(a->path, sizeof a->path, "%s", rest); else sscanf(rest, "%d,%d", &a->x, &a->y);
+        if (!strcmp(kind, "shot") || !strcmp(kind, "type") || !strcmp(kind, "ditype") || !strcmp(kind, "peek")) snprintf(a->path, sizeof a->path, "%s", rest); else sscanf(rest, "%d,%d", &a->x, &a->y);
         nacts++; fprintf(stderr, "DungeonSiegeNative: command %s\n", line);
     }
     fclose(f);
 }
+static int dik_code(int dik);                      /* the Mac key code with that DirectInput code, or -1 */
+static uint32_t buttons; static uint32_t mk(void);
+static void key_event(uint16_t code, int down, int repeat);
 static const char *script_tick(uint32_t fno)       /* returns a screenshot path if one is due */
 {
     const char *shot = 0;
@@ -219,6 +226,32 @@ static const char *script_tick(uint32_t fno)       /* returns a screenshot path 
         } else if (!strcmp(a->kind, "hold")) {            /* hold:vk,frames: a key held down (the modifier of a chord) */
             if (fno == a->frame) { w32_keys[a->x & 0xff] = 0x80; post(0x100, (uint32_t)a->x, 1); }
             if (fno == a->frame + (uint32_t)a->y) { w32_keys[a->x & 0xff] = 0; post(0x101, (uint32_t)a->x, 0xc0000001u); }
+        } else if (!strcmp(a->kind, "dik")) {             /* dik:code: a key by its DirectInput code (set-1 scan code, extended +0x80) for 15
+                                                              frames, as a real key press: DirectInput and window messages (Fallout: New Vegas) */
+            int code = dik_code(a->x);
+            if (fno == a->frame) { if (code >= 0) key_event((uint16_t)code, 1, 0); else w32_di_key(a->x, 1); }
+            if (fno == a->frame + 15) { if (code >= 0) key_event((uint16_t)code, 0, 0); else w32_di_key(a->x, 0); }
+        } else if (!strcmp(a->kind, "dimove") && fno >= a->frame && fno < a->frame + 10) w32_di_mouse_move(a->x / 10, a->y / 10);   /* mickeys over 10 frames */
+        else if (!strcmp(a->kind, "mmove") && fno >= a->frame && fno < a->frame + 10) { rel_motion(a->x / 10.0, a->y / 10.0); w32_di_mouse_move(a->x / 10, a->y / 10); }   /* as real motion: cursor, WM_MOUSEMOVE and DirectInput */
+        else if (!strcmp(a->kind, "diclick")) {           /* diclick: the left button through DirectInput, held long enough for a game frame to see it */
+            if (fno == a->frame) { w32_di_mouse_button(0, 1); buttons |= 1; w32_keys[1] = 0x80; post(0x201, mk(), pos_lp()); }
+            if (fno == a->frame + 15) { w32_di_mouse_button(0, 0); buttons &= ~1u; w32_keys[1] = 0; post(0x202, mk(), pos_lp()); }
+        } else if (!strcmp(a->kind, "ditype") && fno >= a->frame) {   /* ditype:text: typed through DirectInput, one key every 3 frames */
+            static const char *row1 = "1234567890-=", *rowq = "qwertyuiop[]", *rowa = "asdfghjkl;'`", *rowz = "zxcvbnm,./";
+            uint32_t i = (fno - a->frame) / 3, ph = (fno - a->frame) % 3; size_t n = strlen(a->path);
+            if (i < n) {
+                char ch = (char)tolower((unsigned char)a->path[i]); const char *q; int dik = 0, shift = a->path[i] >= 'A' && a->path[i] <= 'Z';
+                if (ch == '_') { ch = '-'; shift = 1; }
+                if (ch == ' ') dik = 0x39; else if (ch == '\n') dik = 0x1c;
+                else if ((q = strchr(row1, ch))) dik = 2 + (int)(q - row1);
+                else if ((q = strchr(rowq, ch))) dik = 0x10 + (int)(q - rowq);
+                else if ((q = strchr(rowa, ch))) dik = 0x1e + (int)(q - rowa);
+                else if ((q = strchr(rowz, ch))) dik = 0x2c + (int)(q - rowz);
+                if (ch == '`') dik = 0x29;
+                int code = dik ? dik_code(dik) : -1;
+                if (dik && ph == 0) { if (shift) w32_di_key(0x2a, 1); if (code >= 0) key_event((uint16_t)code, 1, 0); else w32_di_key(dik, 1); post(0x102, (uint32_t)(unsigned char)a->path[i], 1); }
+                if (dik && ph == 1) { if (code >= 0) key_event((uint16_t)code, 0, 0); else w32_di_key(dik, 0); if (shift) w32_di_key(0x2a, 0); }
+            }
         } else if (!strcmp(a->kind, "shot") && fno == a->frame) shot = a->path;
         else if (!strcmp(a->kind, "peek") && fno == a->frame) {
             extern uint8_t *G_MEM; char *e = a->path; uint32_t at = (uint32_t)strtoul(e, &e, 16), v = 0;
@@ -256,6 +289,11 @@ static void init_keymap(void)
         {0x43,0x6a,0x37,0},{0x45,0x6b,0x4e,0},{0x4e,0x6d,0x4a,0},{0x4b,0x6f,0x35,1},{0x4c,0x0d,0x1c,1}};
     for (size_t k = 0; k < sizeof t / sizeof *t; k++) { keymap[t[k][0]].vk = t[k][1]; keymap[t[k][0]].scan = t[k][2]; keymap[t[k][0]].ext = t[k][3]; }
 }
+static int dik_code(int dik)
+{
+    for (int c = 0; c < 128; c++) if (keymap[c].vk && (keymap[c].scan | (keymap[c].ext ? 0x80 : 0)) == dik) return c;
+    return -1;
+}
 static uint32_t buttons;               // MK_ flags
 static void post(uint32_t msg, uint32_t wp, uint32_t lp) { if (game_hwnd) w32_post(w32_window_tid(game_hwnd), game_hwnd, msg, wp, lp); }
 static uint32_t mk(void)
@@ -269,6 +307,7 @@ static void key_event(uint16_t code, int down, int repeat)
 {
     if (code >= 128 || !keymap[code].vk) return;
     Key k = keymap[code]; int alt = (NSEvent.modifierFlags & NSEventModifierFlagOption) != 0;
+    if (!repeat && k.scan) w32_di_key(k.scan | (k.ext ? 0x80 : 0), down);   /* DirectInput: DIK codes are set-1 scan codes, extended keys + 0x80 */
     uint32_t prev = (w32_keys[k.vk] & 0x80) ? 1 : 0;
     w32_keys[k.vk] = down ? (uint8_t)(0x80 | ((w32_keys[k.vk] & 1) ^ (repeat ? 0 : 1))) : (uint8_t)(w32_keys[k.vk] & 1);
     if (k.vk == 0x10) w32_keys[code == 0x3c ? 0xa1 : 0xa0] = w32_keys[0x10];
@@ -315,6 +354,7 @@ static int notch_around(void) { static int v = -1; if (v < 0) v = getenv("DS_NOT
     uint32_t mw, mh; dsr_mode_size(&mw, &mh);
     double s = fmax(mw / self.bounds.size.width, mh / self.bounds.size.height);
     rel_motion(e.deltaX * s, e.deltaY * s);
+    w32_di_mouse_move((int)lround(e.deltaX), (int)lround(e.deltaY));   /* DirectInput (Fallout: New Vegas): the raw motion, in mickeys */
 }
 - (void)mouseMoved:(NSEvent *)e { [self moved:e]; }
 @end
@@ -332,16 +372,16 @@ static void rel_motion(double gx, double gy)
 - (void)rightMouseDragged:(NSEvent *)e { [self moved:e]; }
 - (void)otherMouseDragged:(NSEvent *)e { [self moved:e]; }
 - (void)mouseDown:(NSEvent *)e { if (lab_mode) capture(1);                           /* lab: a click in the game takes the mouse */
-                               buttons |= 1; w32_keys[1] = 0x80; post(e.clickCount == 2 ? 0x203 : 0x201, mk(), pos_lp()); }
-- (void)mouseUp:(NSEvent *)e { buttons &= ~1u; w32_keys[1] = 0; post(0x202, mk(), pos_lp()); }
-- (void)rightMouseDown:(NSEvent *)e { buttons |= 2; w32_keys[2] = 0x80; post(e.clickCount == 2 ? 0x206 : 0x204, mk(), pos_lp()); }
-- (void)rightMouseUp:(NSEvent *)e { buttons &= ~2u; w32_keys[2] = 0; post(0x205, mk(), pos_lp()); }
-- (void)otherMouseDown:(NSEvent *)e { buttons |= 0x10; w32_keys[4] = 0x80; post(0x207, mk(), pos_lp()); }
-- (void)otherMouseUp:(NSEvent *)e { buttons &= ~0x10u; w32_keys[4] = 0; post(0x208, mk(), pos_lp()); }
+                               w32_di_mouse_button(0, 1); buttons |= 1; w32_keys[1] = 0x80; post(e.clickCount == 2 ? 0x203 : 0x201, mk(), pos_lp()); }
+- (void)mouseUp:(NSEvent *)e { w32_di_mouse_button(0, 0); buttons &= ~1u; w32_keys[1] = 0; post(0x202, mk(), pos_lp()); }
+- (void)rightMouseDown:(NSEvent *)e { w32_di_mouse_button(1, 1); buttons |= 2; w32_keys[2] = 0x80; post(e.clickCount == 2 ? 0x206 : 0x204, mk(), pos_lp()); }
+- (void)rightMouseUp:(NSEvent *)e { w32_di_mouse_button(1, 0); buttons &= ~2u; w32_keys[2] = 0; post(0x205, mk(), pos_lp()); }
+- (void)otherMouseDown:(NSEvent *)e { w32_di_mouse_button(e.buttonNumber == 3 ? 3 : e.buttonNumber == 4 ? 4 : 2, 1); buttons |= 0x10; w32_keys[4] = 0x80; post(0x207, mk(), pos_lp()); }
+- (void)otherMouseUp:(NSEvent *)e { w32_di_mouse_button(e.buttonNumber == 3 ? 3 : e.buttonNumber == 4 ? 4 : 2, 0); buttons &= ~0x10u; w32_keys[4] = 0; post(0x208, mk(), pos_lp()); }
 - (void)scrollWheel:(NSEvent *)e
 {
     static double acc; acc += e.hasPreciseScrollingDeltas ? e.scrollingDeltaY / 10.0 : e.scrollingDeltaY;
-    while (acc >= 1 || acc <= -1) { int d = acc > 0 ? 1 : -1; acc -= d; post(0x20a, ((uint32_t)(int16_t)(120 * d) << 16) | mk(), pos_lp()); }
+    while (acc >= 1 || acc <= -1) { int d = acc > 0 ? 1 : -1; acc -= d; w32_di_mouse_wheel(120 * d); post(0x20a, ((uint32_t)(int16_t)(120 * d) << 16) | mk(), pos_lp()); }
 }
 - (void)keyDown:(NSEvent *)e
 {
@@ -398,7 +438,7 @@ static void window_created(uint32_t hwnd, int x, int y, int w, int h, uint32_t s
         win = [[GameWindow alloc] initWithContentRect:f styleMask:sm backing:NSBackingStoreBuffered defer:NO];
         win.releasedWhenClosed = NO;   /* ARC owns it (AppKit's default releases a closed window once more) */
         f.origin = NSZeroPoint;
-        win.title = lab_mode ? @"Dungeon Siege II — Test Lab" : @"Dungeon Siege"; win.backgroundColor = NSColor.blackColor; win.acceptsMouseMovedEvents = YES;
+        win.title = lab_mode ? @DS2_TITLE " — Test Lab" : @DS2_TITLE; win.backgroundColor = NSColor.blackColor; win.acceptsMouseMovedEvents = YES;
         GameView *v = [[GameView alloc] initWithFrame:f]; v.wantsLayer = YES;
         win.contentView = v; [win makeFirstResponder:v];
         win.collectionBehavior = NSWindowCollectionBehaviorFullScreenPrimary;
@@ -460,6 +500,69 @@ static void ensure_resolution(const char *drive_c)
     fprintf(stderr, "DungeonSiegeNative: resolution %dx%d (%s)\n", w, h, path);
 }
 
+
+#ifdef FNV_EDITION
+/* Fallout: New Vegas (as the Linux host does): the first run makes FalloutPrefs.ini from the game's High preset, as its
+ * own launcher does, at the display's size (DS_RESOLUTION to override), naming the adapter d3d9.c reports so the
+ * engine doesn't run its launcher to redetect the card; the engine itself makes Fallout.ini from Fallout_default.ini */
+static void mkdirs(const char *path) { char t[2048]; snprintf(t, sizeof t, "%s", path); for (char *q = t + 1; *q; q++) if (*q == '/') { *q = 0; mkdir(t, 0755); *q = '/'; } mkdir(t, 0755); }
+static void fnv_prefs(const char *drive, const char *game)
+{
+    char dir[1400], path[1500], src[1500];
+    snprintf(dir, sizeof dir, "%s/Users/player/Documents/My Games/FalloutNV", drive); mkdirs(dir);
+    snprintf(path, sizeof path, "%s/FalloutPrefs.ini", dir);
+    int w = w32_screen_w, h = w32_screen_h; const char *res = getenv("DS_RESOLUTION");
+    if (res && sscanf(res, "%dx%d", &w, &h) != 2) { w = w32_screen_w; h = w32_screen_h; res = NULL; }
+    FILE *in = fopen(path, "r");
+    if (in) { fclose(in); if (!res) return; }
+    else { snprintf(src, sizeof src, "%s/high.ini", game); in = fopen(src, "r"); if (!in) return; fclose(in); snprintf(path, sizeof path, "%s", src); }
+    in = fopen(path, "r"); if (!in) return;
+    char out_path[1500], temp[1600]; snprintf(out_path, sizeof out_path, "%s/FalloutPrefs.ini", dir); snprintf(temp, sizeof temp, "%s.tmp", out_path);
+    FILE *out = fopen(temp, "w"); if (!out) { fclose(in); return; }
+    char line[2048], key[80];
+    while (fgets(line, sizeof line, in)) {
+        key[0] = 0; sscanf(line, "%79[^=]", key);
+        if (!strcasecmp(key, "iSize W")) { fprintf(out, "iSize W=%d\r\n", w); continue; }
+        if (!strcasecmp(key, "iSize H")) { fprintf(out, "iSize H=%d\r\n", h); continue; }
+        if (!strcasecmp(key, "bFull Screen")) { fprintf(out, "bFull Screen=%d\r\n", test_mode ? 0 : 1); continue; }
+        if (!strcasecmp(key, "sD3DDevice")) continue;
+        fputs(line, out);
+        if (!strncasecmp(line, "[Display]", 9)) fprintf(out, "sD3DDevice=\"Apple Silicon (Metal)\"\r\niSize W=%d\r\niSize H=%d\r\nbFull Screen=%d\r\n", w, h, test_mode ? 0 : 1);
+    }
+    fclose(in); fclose(out); rename(temp, out_path);
+    fprintf(stderr, "%s: FalloutPrefs.ini at %dx%d\n", DS2_TITLE, w, h);
+}
+/* Havok steps at most fMaxTime seconds per frame (Fallout_default.ini: 0.016, made for 60 fps); above that physics jitter
+ * and objects fly, so Fallout.ini (the engine's copy; any case) gets 1 / the frame cap (unlimited: the display's rate) */
+static void fnv_havok(const char *drive, const char *game)
+{
+    const char *cap = getenv("DSR_FPSCAP"); double fps = cap ? atof(cap) : 60;
+    if (fps <= 0) fps = NSScreen.mainScreen.maximumFramesPerSecond > 0 ? (double)NSScreen.mainScreen.maximumFramesPerSecond : 60;
+    if (fps < 60) fps = 60;
+    char dir[1400], path[1700] = {0}, src[1500];
+    snprintf(dir, sizeof dir, "%s/Users/player/Documents/My Games/FalloutNV", drive); mkdirs(dir);
+    DIR *d = opendir(dir); struct dirent *e;
+    while (d && (e = readdir(d))) if (!strcasecmp(e->d_name, "Fallout.ini")) { snprintf(path, sizeof path, "%s/%s", dir, e->d_name); break; }
+    if (d) closedir(d);
+    FILE *in;
+    if (path[0]) in = fopen(path, "r");
+    else { snprintf(src, sizeof src, "%s/Fallout_default.ini", game); in = fopen(src, "r"); snprintf(path, sizeof path, "%s/FALLOUT.INI", dir); }
+    if (!in) return;
+    char temp[1800]; snprintf(temp, sizeof temp, "%s.tmp", path); FILE *out = fopen(temp, "w"); if (!out) { fclose(in); return; }
+    char line[2048], key[80]; int havok = 0, done = 0;
+    while (fgets(line, sizeof line, in)) {
+        if (line[0] == '[') { if (havok && !done) { fprintf(out, "fMaxTime=%.6f\r\n", 1.0 / fps); done = 1; } havok = !strncasecmp(line, "[HAVOK]", 7); }
+        key[0] = 0; sscanf(line, "%79[^=]", key);
+        if (havok && !strcasecmp(key, "fMaxTime")) { if (!done) fprintf(out, "fMaxTime=%.6f\r\n", 1.0 / fps); done = 1; continue; }
+        fputs(line, out);
+    }
+    if (!done && havok) fprintf(out, "fMaxTime=%.6f\r\n", 1.0 / fps);
+    else if (!done) fprintf(out, "\r\n[HAVOK]\r\nfMaxTime=%.6f\r\n", 1.0 / fps);
+    fclose(in); fclose(out); rename(temp, path);
+    fprintf(stderr, "%s: Havok step for %.0f fps (fMaxTime %.6f)\n", DS2_TITLE, fps, 1.0 / fps);
+}
+#endif
+
 static void type_text(NSString *text)
 {
     static const struct { unichar ch; uint16_t code; } letters[] = {{'a',0},{'s',1},{'d',2},{'f',3},{'h',4},{'g',5},{'z',6},{'x',7},{'c',8},{'v',9},
@@ -486,7 +589,7 @@ static void type_text(NSString *text)
 @interface AppDelegate : NSObject <NSApplicationDelegate> @end
 @implementation AppDelegate
 - (void)applicationDidBecomeActive:(NSNotification *)n { (void)n; if (win.visible && !lab_mode) capture(1); post(0x1c, 1, 0); }
-- (void)applicationDidResignActive:(NSNotification *)n { (void)n; capture(0); post(0x1c, 0, 0); }
+- (void)applicationDidResignActive:(NSNotification *)n { (void)n; capture(0); w32_di_release_all(); post(0x1c, 0, 0); }
 - (NSApplicationTerminateReply)applicationShouldTerminate:(NSApplication *)s { (void)s; ds_trace_save(&frame_trace); frame_trace.samples = NULL; return NSTerminateNow; }
 @end
 
@@ -512,7 +615,7 @@ static void *game_thread(void *arg)
         capture(0);
         if (path && !test_mode) {
             leave_fullscreen(); [win orderOut:nil]; [NSApp setPresentationOptions:NSApplicationPresentationDefault];
-            show_report_alert(@"Dungeon Siege stopped unexpectedly.", path);
+            show_report_alert(@DS2_TITLE " stopped unexpectedly.", path);
         }
         exit((int)code);
     });
@@ -528,7 +631,7 @@ static void report_from_last_session(const char *data)
         if (([f hasPrefix:@"crash-"] || ([f hasPrefix:@"hang-"] && ![f hasPrefix:@"hang-recovered-"])) && (!newest || [f compare:newest] == NSOrderedDescending)) newest = f;
     if (!newest || [newest compare:seen] != NSOrderedDescending) return;
     [newest writeToFile:marker atomically:YES encoding:NSUTF8StringEncoding error:nil];
-    show_report_alert([newest hasPrefix:@"hang-"] ? @"Last time, Dungeon Siege stopped responding." : @"Last time, Dungeon Siege stopped unexpectedly.",
+    show_report_alert([newest hasPrefix:@"hang-"] ? @"Last time, " DS2_TITLE " stopped responding." : @"Last time, " DS2_TITLE " stopped unexpectedly.",
                       [dir stringByAppendingPathComponent:newest]);
 }
 static void on_objc_exception(NSException *e)
@@ -627,8 +730,13 @@ int main(int argc, char **argv)
         w32_crash_init(data, DS_BUILD); w32_crash_thread("macOS UI thread");
         { void w32_registry_install(const char *); w32_registry_install(data); }   /* values the game's installer would have written */
         NSSetUncaughtExceptionHandler(on_objc_exception);
-        ensure_resolution(drive_c);
         test_mode = getenv("DS_TEST") && atoi(getenv("DS_TEST"));
+#ifdef FNV_EDITION
+        if (!getenv("DSR_FPSCAP")) setenv("DSR_FPSCAP", "60", 1);   /* Gamebryo's physics and animation misbehave above 60 fps unless Havok's step follows (fnv_havok) */
+        fnv_prefs(drive_c, game); fnv_havok(drive_c, game);
+#else
+        ensure_resolution(drive_c);
+#endif
         ds_trace_init(&frame_trace);
         lab_mode = !test_mode && getenv("DS_TEST_LAB") && !strcmp(getenv("DS_TEST_LAB"), "1");
         if (test_mode) parse_script();
@@ -636,7 +744,7 @@ int main(int argc, char **argv)
         [NSApplication sharedApplication]; [NSApp setActivationPolicy:test_mode ? NSApplicationActivationPolicyAccessory : NSApplicationActivationPolicyRegular];
         AppDelegate *del = [AppDelegate new]; NSApp.delegate = del;
         NSMenu *bar = [NSMenu new], *appm = [NSMenu new]; NSMenuItem *it = [NSMenuItem new]; it.submenu = appm; [bar addItem:it];
-        [appm addItemWithTitle:@"Quit Dungeon Siege II" action:@selector(terminate:) keyEquivalent:@"q"]; NSApp.mainMenu = bar;
+        [appm addItemWithTitle:@"Quit " DS2_TITLE action:@selector(terminate:) keyEquivalent:@"q"]; NSApp.mainMenu = bar;
 
         layer = [CAMetalLayer layer]; layer.device = MTLCreateSystemDefaultDevice(); layer.pixelFormat = MTLPixelFormatBGRA8Unorm;
         layer.framebufferOnly = YES; layer.opaque = YES; layer.contentsGravity = kCAGravityResizeAspect; layer.maximumDrawableCount = 3;

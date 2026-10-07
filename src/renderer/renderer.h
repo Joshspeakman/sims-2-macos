@@ -11,6 +11,7 @@ void dsr_renderer_flush(DSRRenderer *r, int wait);
 id<MTLCommandBuffer> dsr_renderer_present_to(DSRRenderer *r, id<MTLTexture> dst);
 void dsr_renderer_presented_size(DSRRenderer *r, uint32_t *w, uint32_t *h);
 void dsr_renderer_set_readback(DSRRenderer *r, void *area, size_t size, volatile uint32_t *done);
+void dsr_renderer_set_queries(DSRRenderer *r, volatile uint32_t *results);   // occlusion query counts and serials (dsr_shm.h DSR_QUERY_OFFSET)
 double dsr_renderer_present_time(DSRRenderer *r);   // game-side seconds (QPC) of the last PRESENT, or -1
 void dsr_renderer_set_graph(DSRRenderer *r, const float *a, int ha, const float *b, int hb);
 extern int dsr_verbose;
