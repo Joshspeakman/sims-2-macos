@@ -25,6 +25,9 @@ Build the C (Mac or Linux):
 recomp/build_fnv.sh "/path/to/Fallout New Vegas/FalloutNV.exe"      # -> recomp/work/fnv/c/*.c and obj/
 ```
 
+**Not re-run yet: the Dungeon Siege II build.** These changes are additive (`--game` defaults to `ds2`, and
+`rt_cpuid_sse2` is off by default), but on the Mac run DS2's `recomp/build.sh` once as a regression check.
+
 ## What carries over unchanged from DS2
 
 The execution model (guest memory at the PE's base, real guest stack, lazy flags, x87 as doubles), the Win32 layer
