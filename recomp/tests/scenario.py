@@ -65,6 +65,25 @@ def _():                               # the Pip-Boy (opened with Tab, moved bet
     c, t = console(100, 'enableplayercontrols', 'player.additem 00015038 1', 'player.equipitem 00015038')   # the save skipped Doc Mitchell's quest: menus disabled, no Pip-Boy yet
     return LOAD + c + [(t + 2, 'key', 'Tab'), (t + 6, 'shot', 'pipboy'), (t + 8, 'key', 'Right'), (t + 11, 'shot', 'pipboy2'),
                        (t + 13, 'key', 'Tab'), (t + 18, 'key', 'v'), (t + 21, 'shot', 'vats'), (t + 24, 'key', 'v'), (t + 30, 'shot', 'after')]
+@scenario('load-combat', 175)
+def _():                               # a 9mm pistol, a small gecko frozen in view (AI off), VATS, the shots, the kill cam
+    c, t = console(100, 'enableplayercontrols', 'tgm', 'player.additem 000E3778 1', 'player.additem 0008ED03 200',
+                   'player.equipitem 000E3778', 'tai', 'player.setangle x 70', 'player.placeatme 0014F47C 1')
+    t += 2
+    return LOAD + c + [(t, 'shot', 'gecko'), (t + 2, 'key', 'v'), (t + 4, 'shot', 'vats'), (t + 5, 'key', 'e'), (t + 6, 'key', 'e'),
+                       (t + 7, 'shot', 'vats-queued'), (t + 8, 'key', 'Return'), (t + 9.5, 'shot', 'killcam1'), (t + 11, 'shot', 'killcam2'),
+                       (t + 14, 'shot', 'killcam3'), (t + 20, 'shot', 'after')]
+@scenario('load-spawn', 175)
+def _():                               # a small gecko placed, AI off, the view turned all the way round
+    c, t = console(100, 'enableplayercontrols', 'tgm', 'tai', 'player.placeatme 0014F47C 1')
+    steps = LOAD + c
+    for k, a in enumerate((0, 90, 180, 270)):
+        c2, t = console(t + 1, 'player.setangle z %d' % a); steps += c2 + [(t + 1.5, 'shot', 'spawn%d' % a)]; t += 2
+    return steps
+@scenario('load-gecko', 165)
+def _():                               # a small gecko placed with AI on, the view tilted down at it
+    c, t = console(100, 'enableplayercontrols', 'tgm', 'player.setangle x 50', 'player.placeatme 0014F47C 1')
+    return LOAD + c + [(t + 1 + k * 3, 'shot', 'g%d' % k) for k in range(6)]
 @scenario('saloon', 170)
 def _():
     s, t = console(125, 'coc GSProspectorSaloonInterior')
