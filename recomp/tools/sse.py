@@ -74,8 +74,8 @@ def emit(L, i, mn):
     if mn in BIN_IMM: return op2('sse_' + mn, ', %d' % (o[2].imm & 0xff))
     m = PUNPCK.match(mn)
     if m:
-        if is_mm(L, i, o[0]) and m.group(1) == 'h': raise Unsupported('mmx ' + mn)
-        return op2('sse_punpck', ', %d, %d' % ({'bw': 1, 'wd': 2, 'dq': 4, 'qdq': 8}[m.group(2)], m.group(1) == 'h'))
+        width = 8 if is_mm(L, i, o[0]) else 16
+        return op2('sse_punpck', ', %d, %d, %d' % ({'bw': 1, 'wd': 2, 'dq': 4, 'qdq': 8}[m.group(2)], m.group(1) == 'h', width))
     if mn in SHIFT:
         dp, dptr, de = dst(o[0])
         if o[1].type == X.X86_OP_IMM: return '{ %ssse_%s(%s, %du);%s }' % (dp, mn, dptr, o[1].imm & 0xff, de)

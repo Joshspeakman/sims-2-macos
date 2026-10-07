@@ -62,8 +62,37 @@ static void rel_motion(double gx,double gy) {
 }
 static void window_created(uint32_t w,int x,int y,int width,int height,uint32_t style) { (void)x;(void)y;(void)width;(void)height;(void)style; if(!game_hwnd) game_hwnd=w; }
 static void window_changed(uint32_t w,int x,int y,int width,int height,int visible) { (void)w;(void)x;(void)y;(void)width;(void)height;(void)visible; }
-static void *game_thread(void *arg) { (void)arg; char msg[256]; game_code=w32_run(msg,sizeof msg); fprintf(stderr,"DungeonSiege2Linux: %s\n",msg); game_running=0; return NULL; }
+static void *game_thread(void *arg) { (void)arg; char msg[256]; game_code=w32_run(msg,sizeof msg); fprintf(stderr,"game: %s\n",msg); game_running=0; return NULL; }
 static void mkdirs(const char *path) { char s[2048]; snprintf(s,sizeof s,"%s",path); for(char *p=s+1;*p;p++) if(*p=='/') { *p=0; mkdir(s,0755); *p='/'; } mkdir(s,0755); }
+#ifdef FNV_EDITION
+/* Fallout NV: the first run makes FalloutPrefs.ini from the game's High preset, as its launcher does, at the display's
+ * size (DS_RESOLUTION to override); the engine itself creates Fallout.ini from Fallout_default.ini */
+static void fnv_prefs(const char *drive,const char *game) {
+ char dir[1400],path[1500],src[1500];
+ snprintf(dir,sizeof dir,"%s/Users/player/Documents/My Games/FalloutNV",drive); mkdirs(dir);
+ snprintf(path,sizeof path,"%s/FalloutPrefs.ini",dir);
+ int w=w32_screen_w,h=w32_screen_h; const char *res=getenv("DS_RESOLUTION");
+ if(res && !ds_parse_resolution(res,&w,&h)) { fprintf(stderr,"Invalid DS_RESOLUTION\n"); exit(1); }
+ FILE *in=fopen(path,"r"); if(in) { fclose(in); if(!res) return; } else { snprintf(src,sizeof src,"%s/high.ini",game); in=fopen(src,"r"); if(!in) return; fclose(in); snprintf(path,sizeof path,"%s",src); }
+ in=fopen(path,"r"); if(!in) return;
+ char out_path[1500],temp[1600]; snprintf(out_path,sizeof out_path,"%s/FalloutPrefs.ini",dir); snprintf(temp,sizeof temp,"%s.tmp",out_path);
+ FILE *out=fopen(temp,"w"); if(!out) { fclose(in); return; }
+ char line[2048],key[80];
+ while(fgets(line,sizeof line,in)) {
+  key[0]=0; sscanf(line,"%79[^=]",key);
+  if(!strcasecmp(key,"iSize W")) { fprintf(out,"iSize W=%d\r\n",w); continue; }
+  if(!strcasecmp(key,"iSize H")) { fprintf(out,"iSize H=%d\r\n",h); continue; }
+  if(!strcasecmp(key,"bFull Screen")) { fprintf(out,"bFull Screen=%d\r\n",test_mode?0:1); continue; }
+  fputs(line,out);
+ }
+ fclose(in); fclose(out); rename(temp,out_path);
+}
+#endif
+#ifdef FNV_EDITION
+#define ENSURE_PREFS(drive,game) fnv_prefs(drive,game)
+#else
+#define ENSURE_PREFS(drive,game) ensure_resolution(drive)
+#endif
 static void ensure_resolution(const char *drive) {
  char dir[1400],path[1500];
  snprintf(dir,sizeof dir,"%s/Users/player/Documents/My Games/" DS2_DOCUMENTS,drive); mkdirs(dir);
@@ -100,8 +129,10 @@ static Key keymap(SDL_Scancode sc) {
  default: return (Key){0,0,0};
  }
 }
+extern void w32_di_key(int,int),w32_di_mouse_move(int,int),w32_di_mouse_wheel(int),w32_di_mouse_button(int,int),w32_di_release_all(void);
 static void key_event(Key k,int down,int repeat) {
- if(!k.vk) return; int prev=(w32_keys[k.vk]&128)!=0;
+ if(!k.vk) return;
+ if(!repeat&&k.scan) w32_di_key(k.scan|(k.ext?0x80:0),down);   /* DirectInput: DIK codes are set-1 scan codes, extended keys +0x80 */ int prev=(w32_keys[k.vk]&128)!=0;
  w32_keys[k.vk]=down?(128|((w32_keys[k.vk]&1)^(repeat?0:1))):(w32_keys[k.vk]&1);
  if(k.vk==16) w32_keys[k.scan==0x36?0xa1:0xa0]=w32_keys[16];
  if(k.vk==17) w32_keys[k.ext?0xa3:0xa2]=w32_keys[17];
@@ -226,16 +257,17 @@ static int events(void) {
  case SDL_TEXTINPUT: for(const unsigned char *p=(unsigned char *)e.text.text;*p;p++) if(*p<128) post(0x102,*p,1); break;
  case SDL_MOUSEMOTION: {
   uint32_t w,h; dsr_mode_size(&w,&h); int ww,hh; SDL_GetWindowSize(window,&ww,&hh);
-  double scale=fmax(w/(double)ww,h/(double)hh); rel_motion(e.motion.xrel*scale,e.motion.yrel*scale); break;
+  double scale=fmax(w/(double)ww,h/(double)hh); rel_motion(e.motion.xrel*scale,e.motion.yrel*scale); w32_di_mouse_move(e.motion.xrel,e.motion.yrel); break;
  }
  case SDL_MOUSEBUTTONDOWN: case SDL_MOUSEBUTTONUP: {
   int down=e.type==SDL_MOUSEBUTTONDOWN,r=e.button.button==SDL_BUTTON_RIGHT,m=e.button.button==SDL_BUTTON_MIDDLE;
+  w32_di_mouse_button(r?1:m?2:e.button.button==SDL_BUTTON_X1?3:e.button.button==SDL_BUTTON_X2?4:0,down);
   unsigned b=r?2:m?16:1; if(down) buttons|=b; else buttons&=~b; w32_keys[r?2:m?4:1]=down?128:0;
   post(m?(down?0x207:0x208):r?(down?0x204:0x205):(down?0x201:0x202),mk(),pos_lp()); break;
  }
- case SDL_MOUSEWHEEL: post(0x20a,((uint32_t)(int16_t)(e.wheel.y*120)<<16)|mk(),pos_lp()); break;
+ case SDL_MOUSEWHEEL: w32_di_mouse_wheel(e.wheel.y*120); post(0x20a,((uint32_t)(int16_t)(e.wheel.y*120)<<16)|mk(),pos_lp()); break;
  case SDL_WINDOWEVENT:
-  if(e.window.event==SDL_WINDOWEVENT_FOCUS_LOST) { SDL_SetRelativeMouseMode(SDL_FALSE); w32_relative_cursor(0); memset(w32_keys,0,sizeof w32_keys); buttons=0; post(0x1c,0,0); }
+  if(e.window.event==SDL_WINDOWEVENT_FOCUS_LOST) { SDL_SetRelativeMouseMode(SDL_FALSE); w32_relative_cursor(0); memset(w32_keys,0,sizeof w32_keys); buttons=0; w32_di_release_all(); post(0x1c,0,0); }
   if(e.window.event==SDL_WINDOWEVENT_FOCUS_GAINED) { if(!test_mode) SDL_SetRelativeMouseMode(SDL_TRUE); w32_relative_cursor(0);  /* DS2 reads the absolute virtual cursor. */ post(0x1c,1,0); }
   break;
  }
@@ -269,7 +301,7 @@ int main(int argc,char **argv) {
  char drive[1200],overlay[1200],bin[2048]; ssize_t len=readlink("/proc/self/exe",bin,sizeof bin-1);
  if(len<=0) return 1; bin[len]=0; char *slash=strrchr(bin,'/'); if(slash) *slash=0;
  snprintf(dsr_snapshot_path,sizeof dsr_snapshot_path,"%s/dsr_snapshot.bin",bin);
- snprintf(drive,sizeof drive,"%s/drive_c",data); snprintf(overlay,sizeof overlay,"%s/game",data); mkdirs(drive); mkdirs(overlay); ensure_resolution(drive);
+ snprintf(drive,sizeof drive,"%s/drive_c",data); snprintf(overlay,sizeof overlay,"%s/game",data); mkdirs(drive); mkdirs(overlay); ENSURE_PREFS(drive,game);
  w32_crash_init(data,DS_BUILD); w32_crash_thread("Linux UI and renderer");
  /* Match the Mac host: publish the launcher's saved CD-key hash before the
   * game's multiplayer code looks up the retail installer's DoubleHash value. */

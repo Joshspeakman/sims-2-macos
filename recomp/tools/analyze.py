@@ -23,7 +23,7 @@ def plausible(va, n=12):          # a clean decode of the first n instructions w
     for _ in range(n):
         i = ins_at(va)
         if i is None or i.mnemonic in BAD or (relocated and i.mnemonic == 'int3'): return False
-        if i.mnemonic in ('ret', 'jmp'): return True
+        if i.mnemonic in ('ret', 'jmp', 'repz ret'): return True
         va += i.size
     return True
 def in_text(blob, k):             # the dword at k sits inside an ASCII/UTF-16 string, not a pointer table
@@ -53,6 +53,14 @@ for name, sva, vs, ra, rs, fl in pe.sections:
     for k in range(0, len(blob) - 3, 4):
         v = int.from_bytes(blob[k:k + 4], 'little')
         if TLO <= v < THI and v not in seeds and plausible(v): cands.setdefault(v, 'ptr' + name)
+    # packed tables (the C runtime's transcendental dispatch, 2-byte aligned): a code pointer at k = 2 mod 4 counts only
+    # beside another code pointer to nearby code, and not straddling an aligned table (whose halves would combine into false values)
+    def codeptr(j): return 0 <= j <= len(blob) - 4 and TLO <= int.from_bytes(blob[j:j + 4], 'little') < THI
+    def near(j, v): return codeptr(j) and abs(int.from_bytes(blob[j:j + 4], 'little') - v) < 0x10000
+    for k in range(2, len(blob) - 3, 4):
+        v = int.from_bytes(blob[k:k + 4], 'little')
+        if TLO <= v < THI and v not in seeds and (near(k - 4, v) or near(k + 4, v)) and not codeptr(k - 2) and not codeptr(k + 2) \
+                and plausible(v): cands.setdefault(v, 'ptr2' + name)
 funcs = {}; work = list(seeds); ptrsrc = dict(seeds)
 jumptables = []; jt_unresolved = []; decode_fail = []
 def jumptable(i, prev):            # jmp dword ptr [reg*4 + table]: bound from a preceding cmp reg, N / ja
@@ -94,7 +102,7 @@ def lift_func(f):
                 break
             elif mn[0] == 'j' or mn.startswith('loop') or mn == 'jecxz':
                 stack.append(op0.imm & 0xffffffff)
-            elif mn in ('ret', 'int3', 'hlt', 'ud2'): break
+            elif mn in ('ret', 'int3', 'hlt', 'ud2', 'repz ret', 'rep ret'): break
             va = nxt
     return insns
 while work:

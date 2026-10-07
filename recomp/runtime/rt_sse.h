@@ -84,9 +84,9 @@ static inline void sse_unpckhpd(X128 *d, const X128 *s) { X128 r; r.q[0] = d->q[
 static inline void sse_movhlps(X128 *d, const X128 *s) { d->q[0] = s->q[1]; }
 static inline void sse_movlhps(X128 *d, const X128 *s) { d->q[1] = s->q[0]; }
 /* integer interleaves: low or high halves, element size 1/2/4/8 bytes */
-static inline void sse_punpck(X128 *d, const X128 *s, int size, int high)
+static inline void sse_punpck(X128 *d, const X128 *s, int size, int high, int width)   /* width 16 (XMM) or 8 (MMX) */
 {
-    X128 r; int half = 8 / size, base = high ? half : 0;
+    X128 r = {{0}}; int half = width / 2 / size, base = high ? half : 0;
     for (int k = 0; k < half; k++) {
         memcpy(r.b + 2 * k * size, d->b + (base + k) * size, size);
         memcpy(r.b + (2 * k + 1) * size, s->b + (base + k) * size, size);

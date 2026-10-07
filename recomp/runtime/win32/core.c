@@ -117,6 +117,7 @@ IMPL(kernel32, GetModuleFileNameA)
     RET(n, 3);
 }
 IMPL(kernel32, GetCommandLineA) { RET(w32_cmdline_a, 0); }
+IMPL(kernel32, GetCommandLineW) { RET(w32_cmdline_w, 0); }
 IMPL(kernel32, GetStartupInfoA) { uint32_t p = ARG(0); memset(GP(p), 0, 68); rt_w32(G_MEM, p, 68); RET(0, 1); }
 IMPL(kernel32, GetEnvironmentStrings) { RET(w32_env_a, 0); }
 IMPL(kernel32, GetEnvironmentStringsW) { RET(w32_env_w, 0); }
@@ -204,6 +205,11 @@ IMPL(kernel32, GetSystemInfo)
     rt_w16(G_MEM, p + 32, 6); rt_w16(G_MEM, p + 34, 0x0f01);
     RET(0, 1);
 }
+IMPL(kernel32, GlobalMemoryStatusEx)                   /* MEMORYSTATUSEX: 2 GB of physical memory free for a 32-bit process */
+{
+    uint32_t p = ARG(0); uint64_t v[7] = {8ull << 30, 6ull << 30, 16ull << 30, 14ull << 30, 0x7ffe0000ull, 0x70000000ull, 0};
+    rt_w32(G_MEM, p, 64); rt_w32(G_MEM, p + 4, 25); memcpy(GP(p + 8), v, 56); RET(1, 1);
+}
 IMPL(kernel32, GlobalMemoryStatus)
 {
     uint32_t p = ARG(0), v[8] = {32, 20, 0x7fff0000u, 0x60000000u, 0x7fff0000u, 0x70000000u, 0x7ffe0000u, 0x70000000u};
@@ -262,6 +268,18 @@ IMPL(kernel32, LeaveCriticalSection)
     pthread_mutex_unlock(&s->m);
     RET(0, 1);
 }
+IMPL(kernel32, InitializeCriticalSectionAndSpinCount)
+{
+    uint32_t p = ARG(0); memset(GP(p), 0, 24); rt_w32(G_MEM, p + 4, 0xffffffffu); cs_find(p, 1); RET(1, 2);
+}
+IMPL(kernel32, TryEnterCriticalSection)
+{
+    uint32_t p = ARG(0); CS *s = cs_find(p, 1);
+    if (pthread_mutex_trylock(&s->m)) RET(0, 1);
+    rt_w32(G_MEM, p + 8, rt_r32(G_MEM, p + 8) + 1); rt_w32(G_MEM, p + 12, w32_tid(c));
+    RET(1, 1);
+}
+IMPL(kernel32, InterlockedExchangeAdd) { RET(__atomic_fetch_add((uint32_t *)GP(ARG(0)), ARG(1), __ATOMIC_SEQ_CST), 2); }
 IMPL(kernel32, InterlockedIncrement) { RET(__atomic_add_fetch((uint32_t *)GP(ARG(0)), 1u, __ATOMIC_SEQ_CST), 1); }
 IMPL(kernel32, InterlockedDecrement) { RET(__atomic_sub_fetch((uint32_t *)GP(ARG(0)), 1u, __ATOMIC_SEQ_CST), 1); }
 IMPL(kernel32, InterlockedExchange) { RET(__atomic_exchange_n((uint32_t *)GP(ARG(0)), ARG(1), __ATOMIC_SEQ_CST), 2); }
@@ -352,6 +370,26 @@ IMPL(kernel32, CreateMutexA)
     if (name && nnamed < 64) { snprintf(s->name, sizeof s->name, "%s", GS(name)); named[nnamed] = s; named_h[nnamed++] = h; }
     w32_set_last_error(c, 0); RET(h, 3);
 }
+IMPL(kernel32, CreateSemaphoreA)                       /* (attributes, initial, maximum, name) */
+{
+    uint32_t name = ARG(3);
+    if (name) for (int k = 0; k < nnamed; k++) if (!strcmp(named[k]->name, GS(name))) { w32_set_last_error(c, 183); htab[(named_h[k] - 0x100) / 4].refs++; RET(named_h[k], 4); }
+    Sync *s = sync_new(0, 0); s->count = (int)ARG(1); s->owner = ARG(2);          /* owner: the maximum count */
+    uint32_t h = h_new(H_SEMAPHORE, s);
+    if (name && nnamed < 64) { snprintf(s->name, sizeof s->name, "%s", GS(name)); named[nnamed] = s; named_h[nnamed++] = h; }
+    w32_set_last_error(c, 0); RET(h, 4);
+}
+IMPL(kernel32, ReleaseSemaphore)                       /* (handle, release count, previous count out) */
+{
+    HObj *o = h_get(ARG(0), H_SEMAPHORE); if (!o) { w32_set_last_error(c, 6); RET(0, 3); }
+    Sync *s = o->p; pthread_mutex_lock(&s->m);
+    int prev = s->count, ok = (uint32_t)prev + ARG(1) <= s->owner;
+    if (ok) { s->count += (int)ARG(1); pthread_cond_broadcast(&s->cv); }
+    pthread_mutex_unlock(&s->m);
+    if (ARG(2)) rt_w32(G_MEM, ARG(2), (uint32_t)prev);
+    if (!ok) w32_set_last_error(c, 298);                   /* ERROR_TOO_MANY_POSTS */
+    RET(ok, 3);
+}
 IMPL(kernel32, OpenMutexA)
 {
     uint32_t name = ARG(2);
@@ -423,7 +461,7 @@ __attribute__((weak)) void w32_file_closed(HObj *o) { (void)o; }
 void w32_handle_closed(HObj *o)
 {
     if (o->type == H_THREAD || o->type == H_PROCESS) return;       /* thread objects live as long as the process */
-    if (o->type == H_EVENT || o->type == H_MUTEX) {
+    if (o->type == H_EVENT || o->type == H_MUTEX || o->type == H_SEMAPHORE) {
         Sync *s = o->p; for (int k = 0; k < nnamed; k++) if (named[k] == s) { named[k] = named[--nnamed]; named_h[k] = named_h[nnamed]; }
         pthread_mutex_destroy(&s->m); pthread_cond_destroy(&s->cv); free(s);
     } else w32_file_closed(o);
