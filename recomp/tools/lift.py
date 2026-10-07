@@ -7,6 +7,8 @@ Unsupported or junk instructions become rt_unhandled() traps; the report lists t
 import sys, os, re, json, struct, argparse, collections, capstone
 from capstone import x86 as X
 sys.path.insert(0, os.path.dirname(__file__)); from pe import PE, code_range
+import sse
+from sse import Unsupported
 
 R32 = ['eax', 'ecx', 'edx', 'ebx', 'esp', 'ebp', 'esi', 'edi']
 R16 = {'ax': 'eax', 'cx': 'ecx', 'dx': 'edx', 'bx': 'ebx', 'sp': 'esp', 'bp': 'ebp', 'si': 'esi', 'di': 'edi'}
@@ -34,8 +36,6 @@ OVERRIDES = {             # address: description (runtime/win32/hooks.c rt_overr
     0x0067aeb6: '3x3 matrix times vector (terrain vertices): done natively (native.c)',
     0x007663b0: 'UIButton::DisableButton: the main menu keeps its Multiplayer button (GOG 2.3 disables it)',
 }
-
-class Unsupported(Exception): pass
 
 class Lifter:
     hooks = {}; overrides = {}; guest_flow = False
@@ -350,6 +350,7 @@ class Lifter:
         for pfx in ('rep ', 'repe ', 'repne ', 'lock '):
             if mn.startswith(pfx): rep = pfx.strip(); mn = mn[len(pfx):]
         if rep == 'lock' and getattr(self, 'nolock', False): rep = None
+        if not rep and sse.is_simd(self, i, mn): return sse.emit(self, i, mn)
         if i.opcode[0] in range(0xd8, 0xe0) or mn.startswith('f') and mn not in ('fs',):
             return self.x87(i)
         if mn == 'wait': return ';'                              # fwait: x87 exceptions are masked
@@ -377,6 +378,10 @@ class Lifter:
             if o[0].type == X.X86_OP_REG and o[1].type == X.X86_OP_REG:
                 return '{ uint32_t t0 = %s, t1 = %s; %s %s }' % (self.rd(i, o[0]), self.rd(i, o[1]), self.wr(i, o[0], 't1'), self.wr(i, o[1], 't0'))
             m, r = (o[0], o[1]) if o[0].type == X.X86_OP_MEM else (o[1], o[0])
+            if not self.guest_flow and m.size in (1, 2, 4) and not (m.mem.segment and i.reg_name(m.mem.segment) == 'fs'):   # implicitly locked: an atomic swap
+                t = {1: 'uint8_t', 2: 'uint16_t', 4: 'uint32_t'}[m.size]
+                return '{ uint32_t ea = %s; uint32_t old = __atomic_exchange_n((%s *)(M + ea), (%s)%s, __ATOMIC_SEQ_CST); %s }' % (
+                    self.addr(i, m), t, t, self.rd(i, r), self.wr(i, r, 'old'))
             rx, wfn, pre = self.rmw(i, m)
             body = '{ %suint32_t t0 = %s, t1 = %s; %s %s }' % (pre, rx, self.rd(i, r), wfn('t1'), self.wr(i, r, 't0'))
             # x86 memory XCHG is implicitly locked. BW's dispatcher uses this
@@ -454,7 +459,8 @@ class Lifter:
             rx, wfn, pre = self.rmw(i, d)
             if mn == 'shld':
                 return '{ %suint32_t n = %s & 31u; if (n) { uint32_t a = %s, r = (a << n) | (%s >> (32u - n)); %s LF(LF_SHL, 2, a, n, r); } }' % (pre, n, rx, self.rd(i, s), wfn('r'))
-            return '{ %suint32_t n = %s & 31u; if (n) { uint32_t a = %s, r = (a >> n) | (%s << (32u - n)); %s LF(LF_SHR, 2, a, n, r); } }' % (pre, n, rx, self.rd(i, s), wfn('r'))
+            # OF (defined for a count of 1) is a sign change, not shr's "top bit of the original"
+            return '{ %suint32_t n = %s & 31u; if (n) { uint32_t a = %s, r = (a >> n) | (%s << (32u - n)); %s LF(LF_SHR, 2, a, n, r); flags_set(&f, ((a ^ r) >> 31) ? F_OF : 0, F_OF); } }' % (pre, n, rx, self.rd(i, s), wfn('r'))
         if mn in ('mul', 'imul', 'div', 'idiv'): return self.muldiv(i, mn)
         if mn in ('bsr', 'bsf'):
             fn = '31 - __builtin_clz(s)' if mn == 'bsr' else '__builtin_ctz(s)'
@@ -554,6 +560,8 @@ class Lifter:
         o = i.operands; pc = i.address
         if mn == 'imul' and len(o) >= 2:
             s1 = self.rd(i, o[1] if len(o) == 2 else o[1]); s2 = self.rd(i, o[0]) if len(o) == 2 else self.rd(i, o[2], o[0].size)
+            if o[0].size == 2:
+                return '{ int32_t p = (int32_t)(int16_t)%s * (int32_t)(int16_t)%s; %s flags_set(&f, (p != (int16_t)p) ? (F_CF | F_OF) : 0, F_CF | F_OF); }' % (s1, s2, self.wr(i, o[0], '(uint32_t)p & 0xffffu'))
             if o[0].size != 4: raise Unsupported('imul16')
             return '{ int64_t p = (int64_t)(int32_t)%s * (int64_t)(int32_t)%s; uint32_t r = (uint32_t)p; %s flags_set(&f, (p != (int64_t)(int32_t)r) ? (F_CF | F_OF) : 0, F_CF | F_OF); }' % (s1, s2, self.wr(i, o[0], 'r'))
         s = o[0]; sz = s.size; v = self.rd(i, s)
@@ -573,6 +581,14 @@ class Lifter:
             if mn == 'div':
                 return '{ uint32_t n = eax & 0xffffu, d = %s; if (!d || n / d > 0xff) { SPILL; rt_div_fault(c, 0x%08xu); } eax = (eax & 0xffff0000u) | ((n %% d) << 8) | (n / d); }' % (v, pc)
             return '{ int32_t n = (int16_t)eax, d = (int8_t)%s; if (!d || n / d != (int8_t)(n / d)) { SPILL; rt_div_fault(c, 0x%08xu); } eax = (eax & 0xffff0000u) | (((uint32_t)(n %% d) & 0xffu) << 8) | ((uint32_t)(n / d) & 0xffu); }' % (v, pc)
+        if sz == 2:                                        # DX:AX
+            if mn == 'mul':
+                return '{ uint32_t p = (eax & 0xffffu) * %s; eax = (eax & 0xffff0000u) | (p & 0xffffu); edx = (edx & 0xffff0000u) | (p >> 16); flags_set(&f, (p >> 16) ? (F_CF | F_OF) : 0, F_CF | F_OF); }' % v
+            if mn == 'imul':
+                return '{ int32_t p = (int32_t)(int16_t)eax * (int16_t)%s; eax = (eax & 0xffff0000u) | ((uint32_t)p & 0xffffu); edx = (edx & 0xffff0000u) | (((uint32_t)p >> 16) & 0xffffu); flags_set(&f, (p != (int16_t)p) ? (F_CF | F_OF) : 0, F_CF | F_OF); }' % v
+            if mn == 'div':
+                return '{ uint32_t n = ((edx & 0xffffu) << 16) | (eax & 0xffffu), d = %s; if (!d || n / d > 0xffff) { SPILL; rt_div_fault(c, 0x%08xu); } eax = (eax & 0xffff0000u) | (n / d); edx = (edx & 0xffff0000u) | (n %% d); }' % (v, pc)
+            return '{ int32_t n = (int32_t)(((edx & 0xffffu) << 16) | (eax & 0xffffu)), d = (int16_t)%s; if (!d || n / d != (int16_t)(n / d)) { SPILL; rt_div_fault(c, 0x%08xu); } eax = (eax & 0xffff0000u) | ((uint32_t)(n / d) & 0xffffu); edx = (edx & 0xffff0000u) | ((uint32_t)(n %% d) & 0xffffu); }' % (v, pc)
         raise Unsupported('%s16' % mn)
 
     def locked(self, i, mn):
@@ -753,6 +769,7 @@ def main():
     ap.add_argument('--per-file', type=int, default=400)
     ap.add_argument('--imp-base', type=int, default=0, help='index of this image\'s first import in the global import table')
     ap.add_argument('--tag', default='', help='multi-image builds: file name prefix; tables come from tools/link_tables.py')
+    ap.add_argument('--game', default='ds2', choices=('ds2', 'fnv'), help='which executable: HOOKS/OVERRIDES are Dungeon Siege II addresses')
     a = ap.parse_args()
     L = Lifter(a.exe, a.analysis); L.jt_cache = {}
     L.imp_index = {va: a.imp_base + k for k, (va, _) in enumerate(L.imports)}
@@ -762,8 +779,10 @@ def main():
     L.overrides = {} if a.tag else dict(OVERRIDES)
     if not a.tag:
         from editions import identify, PROFILES
-        edition = identify(a.exe, prepared=True)
-        if edition == 'broken-world':
+        edition = 'fnv' if a.game == 'fnv' else identify(a.exe, prepared=True)
+        if edition == 'fnv':                                      # Fallout: New Vegas: none of the DS2 hooks apply
+            L.hooks = {}; L.overrides = {}
+        elif edition == 'broken-world':
             L.guest_flow = True
             L.hooks = dict(zip(PROFILES[edition]['hooks'], HOOKS.values()))
             L.overrides = {PROFILES[edition]['overrides'][0]: OVERRIDES[0x67aeb6]}

@@ -362,10 +362,12 @@ void rt_bus_lock(void) { while (__atomic_test_and_set(&bus_flag, __ATOMIC_ACQUIR
 void rt_bus_unlock(void) { __atomic_clear(&bus_flag, __ATOMIC_RELEASE); }
 
 /* cpuid: an Intel Pentium (P54C) without MMX, so code with CPU-specific paths takes its plain x86/x87 path */
+int rt_cpuid_sse2;                              /* report SSE/SSE2 (games recompiled with tools/sse.py, e.g. Fallout NV) */
 void rt_cpuid(Ctx *c, uint32_t *eax, uint32_t *ebx, uint32_t *ecx, uint32_t *edx)
 {
     (void)c;
     if (*eax == 0) { *eax = 1; *ebx = 0x756e6547u; *edx = 0x49656e69u; *ecx = 0x6c65746eu; return; }   /* "GenuineIntel" */
+    if (rt_cpuid_sse2) { *eax = 0x6f6; *ebx = 0; *ecx = 0; *edx = 0x078081bfu; return; }             /* family 6 (Core 2 era): + CMOV, MMX, FXSR, SSE, SSE2; no SSE3 */
     *eax = 0x524; *ebx = 0; *ecx = 0; *edx = 0x1bf;                                                      /* family 5: FPU, TSC, CX8... no MMX */
 }
 /* weak default without the Win32 layer: fatal */

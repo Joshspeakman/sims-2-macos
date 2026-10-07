@@ -26,7 +26,7 @@ int w32_harness_prepare(const char *exe, const char *game_dir, const char *drive
     main_ctx.fs_base = w32_new_thread_teb(stk, stk + MAIN_STACK);
     main_ctx.esp = stk + MAIN_STACK - 16;
     main_ctx.esp -= 4; rt_w32(G_MEM, main_ctx.esp, 0xffeff000u);    /* entry returns here */
-    main_ctx.f.eflags = 0x202; main_ctx.fcw = 0x027f;
+    main_ctx.f.eflags = 0x202; main_ctx.fcw = 0x027f; main_ctx.mxcsr = 0x1f80;
     if (out) *out = main_ctx;
     return 0;
 }

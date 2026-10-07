@@ -10,6 +10,8 @@ from capstone import x86 as X
 from lift import Lifter, Unsupported, JUNK
 from harness import *
 WORK = os.path.join(ROOT, 'work', 'fuzz')
+EXE = os.environ.get('FUZZ_EXE', EXE)                         # another executable (e.g. FalloutNV.exe) and its analysis
+ANALYSIS = os.environ.get('FUZZ_ANALYSIS', os.path.join(ROOT, 'work', 'analysis.json'))
 SKIP = JUNK | {'jmp', 'call', 'ret', 'loop', 'loope', 'loopne', 'jecxz', 'rdtsc', 'nop', 'enter', 'fnstenv', 'fldenv',
                'fnsave', 'frstor', 'fbstp'}
 def is_branch(mn): return mn[0] == 'j'
@@ -30,7 +32,7 @@ def instances(L, per_form=4):
     return seen
 
 def build():
-    L = Lifter(EXE, os.path.join(ROOT, 'work', 'analysis.json')); L.jt_cache = {}
+    L = Lifter(EXE, ANALYSIS); L.jt_cache = {}
     forms = instances(L)
     os.makedirs(WORK, exist_ok=True)
     vas = []; out = ['#include "rt.h"\n']
@@ -49,7 +51,7 @@ def build():
     open(os.path.join(WORK, 'fuzz.c'), 'w').write(''.join(out))
     json.dump(vas, open(os.path.join(WORK, 'vas.json'), 'w'))
     subprocess.check_call(['clang', '-O1', '-ffp-contract=off', '-shared', '-fPIC', '-I', os.path.join(ROOT, 'runtime'),
-                           '-o', os.path.join(WORK, 'libfuzz.dylib'), os.path.join(ROOT, 'runtime', 'rt.c'), os.path.join(WORK, 'fuzz.c')])
+                           '-o', os.path.join(WORK, 'libfuzz.dylib'), os.path.join(ROOT, 'runtime', 'rt.c'), os.path.join(WORK, 'fuzz.c'), '-lm'])
     print('%d forms, %d instances' % (len(forms), len(vas)))
 
 # flags that x86 leaves undefined, per mnemonic: these are not compared
@@ -68,9 +70,9 @@ def undefined(mn, i, count):
     return m
 
 def run(trials):
-    H = Harness(os.path.join(WORK, 'libfuzz.dylib'))
+    H = Harness(os.path.join(WORK, 'libfuzz.dylib'), EXE)
     H.lib.rt_test_flags.restype = ctypes.c_uint32; H.lib.rt_test_flags.argtypes = [ctypes.POINTER(Ctx)]
-    L = Lifter(EXE, os.path.join(ROOT, 'work', 'analysis.json'))
+    L = Lifter(EXE, ANALYSIS)
     vas = json.load(open(os.path.join(WORK, 'vas.json')))
     rng = random.Random(7)
     def rv():
