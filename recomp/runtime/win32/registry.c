@@ -52,6 +52,11 @@ void w32_reg_string(const char *path, const char *name, const char *str)
  *                   CDKey". Only the hash is kept, never the key. */
 void w32_registry_install(const char *data_dir)
 {
+#ifdef FNV_EDITION
+    /* where Fallout NV (and its tools) look for the installation; the virtual game folder is the same for every game */
+    w32_reg_string("hklm\\software\\bethesda softworks\\falloutnv", "Installed Path", "C:\\GOG Games\\Dungeon Siege\\");
+    w32_reg_string("hklm\\software\\wow6432node\\bethesda softworks\\falloutnv", "Installed Path", "C:\\GOG Games\\Dungeon Siege\\");
+#endif
 #ifdef DS2_BROKEN_WORLD
     /* BW loads the original campaign resources from this installer location.
      * The native asset view contains both sets of files under the same virtual

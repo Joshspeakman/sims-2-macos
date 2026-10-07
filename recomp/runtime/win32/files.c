@@ -328,6 +328,21 @@ IMPL(kernel32, GetFileSize)
     if (ARG(1)) rt_w32(G_MEM, ARG(1), (uint32_t)((uint64_t)st.st_size >> 32));
     RET((uint32_t)st.st_size, 2);
 }
+IMPL(kernel32, GetFileSizeEx)                         /* (handle, LARGE_INTEGER *size) */
+{
+    HObj *o = h_get(ARG(0), H_FILE); struct stat st;
+    if (!o || fstat(((File *)o->p)->fd, &st)) { w32_set_last_error(c, 6); RET(0, 2); }
+    rt_w64(G_MEM, ARG(1), (uint64_t)st.st_size); RET(1, 2);
+}
+IMPL(kernel32, SetFilePointerEx)                      /* (handle, LARGE_INTEGER distance (2 dwords), LARGE_INTEGER *new position, method) */
+{
+    HObj *o = h_get(ARG(0), H_FILE); int64_t off = (int64_t)(((uint64_t)ARG(2) << 32) | ARG(1)); uint32_t np = ARG(3), method = ARG(4);
+    if (!o) { w32_set_last_error(c, 6); RET(0, 5); }
+    off_t r = lseek(((File *)o->p)->fd, off, method == 0 ? SEEK_SET : method == 1 ? SEEK_CUR : SEEK_END);
+    if (r < 0) { w32_set_last_error(c, 131); RET(0, 5); }
+    if (np) rt_w64(G_MEM, np, (uint64_t)r);
+    RET(1, 5);
+}
 IMPL(kernel32, GetFileTime)
 {
     HObj *o = h_get(ARG(0), H_FILE); struct stat st;

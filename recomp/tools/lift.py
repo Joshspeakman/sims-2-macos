@@ -37,6 +37,8 @@ OVERRIDES = {             # address: description (runtime/win32/hooks.c rt_overr
     0x007663b0: 'UIButton::DisableButton: the main menu keeps its Multiplayer button (GOG 2.3 disables it)',
 }
 
+RET_FORMS = ('repz ret', 'rep ret', 'bnd ret')
+
 class Lifter:
     hooks = {}; overrides = {}; guest_flow = False
     def __init__(self, exe, analysis):
@@ -151,7 +153,7 @@ class Lifter:
                         jt = self.jumptable(i, insns, f)
                         if jt: stack.extend(jt[1])
                     break
-                if mn in ('ret', 'retf', 'int3', 'hlt', 'ud2') or mn in JUNK and mn not in ('lock', 'wait'): break
+                if mn in ('ret', 'retf', 'int3', 'hlt', 'ud2') + RET_FORMS or mn in JUNK and mn not in ('lock', 'wait'): break
                 if (mn[0] == 'j' and mn != 'jmp') or mn.startswith('loop'):
                     t = op0.imm & 0xffffffff
                     if t == f or t not in self.funcs: stack.append(t)
@@ -328,7 +330,7 @@ class Lifter:
     def falls_through(self, i):
         mn = i.mnemonic
         if mn == 'call' and self.guest_flow: return False
-        if mn in ('jmp', 'ret', 'retf', 'int3', 'hlt', 'ud2'): return False
+        if mn in ('jmp', 'ret', 'retf', 'int3', 'hlt', 'ud2') + RET_FORMS: return False
         if mn in JUNK and mn not in ('lock', 'wait'): return False
         return True
     def goto(self, t, f, insns, callees):
@@ -347,6 +349,7 @@ class Lifter:
     def emit(self, i, f, insns, callees):
         mn = i.mnemonic; ops = i.operands; va = i.address; nxt = va + i.size
         rep = None
+        if mn in RET_FORMS: mn = 'ret'                                    # 'repz ret': AMD's two-byte return
         for pfx in ('rep ', 'repe ', 'repne ', 'lock '):
             if mn.startswith(pfx): rep = pfx.strip(); mn = mn[len(pfx):]
         if rep == 'lock' and getattr(self, 'nolock', False): rep = None

@@ -1,6 +1,7 @@
 /* Loader and import dispatch for the recompiled game: maps DungeonSiege.exe into guest memory at its preferred base,
  * points every IAT slot at a thunk address, builds the PEB, the main TEB (with static TLS) and process parameters. */
 #include "w32.h"
+#include "edition.h"
 #include <strings.h>
 #include <setjmp.h>
 #include <sys/mman.h>
@@ -32,6 +33,7 @@ static void canon(const char *dll, const char *fn, char *out, size_t cap)
     char d[64]; size_t k = 0;
     for (; dll[k] && dll[k] != '.' && k < sizeof d - 1; k++) d[k] = (char)(dll[k] >= 'A' && dll[k] <= 'Z' ? dll[k] + 32 : dll[k]);
     d[k] = 0;
+    if (!strncmp(d, "d3dx9_", 6)) strcpy(d, "d3dx9_29");     /* every D3DX9 version: one implementation (DS2 29, Fallout NV 38) */
     char f[128]; const char *s = fn; size_t j = 0;
     if (*s == '#') { snprintf(f, sizeof f, "ord%s", s + 1); }
     else {
@@ -213,10 +215,10 @@ int w32_load(const char *exe_path)
     w32_process_heap = heap_create(0, 0);
     rt_w32(G_MEM, PEB_ADDR + 0x08, w32_image_base); rt_w32(G_MEM, PEB_ADDR + 0x18, w32_process_heap);
     uint32_t at = PARAMS_ADDR;
-    w32_modname_a = at; put_str(&at, "C:\\GOG Games\\Dungeon Siege\\DungeonSiege.exe");
+    w32_modname_a = at; put_str(&at, "C:\\GOG Games\\Dungeon Siege\\" GAME_EXE);
     {   /* the game's command line; DS_ARGS adds arguments (e.g. zonematch=true opens the multiplayer screens) */
         char cl[1024]; const char *extra = getenv("DS_ARGS");
-        snprintf(cl, sizeof cl, "\"C:\\GOG Games\\Dungeon Siege\\DungeonSiege.exe\"%s%s", extra ? " " : "", extra ? extra : "");
+        snprintf(cl, sizeof cl, "\"C:\\GOG Games\\Dungeon Siege\\" GAME_EXE "\"%s%s", extra ? " " : "", extra ? extra : "");
         w32_cmdline_a = at; put_str(&at, cl);
     }
     w32_cmdline_w = at; at += 2 * (uint32_t)w32_mb_to_wide(1252, (const uint8_t *)GS(w32_cmdline_a), -1, (uint16_t *)GP(at), 512); at = (at + 3) & ~3u;
@@ -305,7 +307,7 @@ static int load_image(int k)
     uint8_t *d = malloc(n); if (fread(d, 1, n, f) != n) { fclose(f); free(d); return -1; } fclose(f);
     uint32_t pe = *(uint32_t *)(d + 0x3c), opt = pe + 24, size = *(uint32_t *)(d + opt + 56);
     uint16_t nsec = *(uint16_t *)(d + pe + 6), optsz = *(uint16_t *)(d + pe + 20);
-    if (*(uint32_t *)(d + opt + 28) != im->base) { fprintf(stderr, "w32: %s: unexpected base\n", im->name); free(d); return -1; }
+    uint32_t file_base = *(uint32_t *)(d + opt + 28);
     vm_register(im->base, (size + 0xffff) & ~0xffffu, 0x1000000);
     memcpy(G_MEM + im->base, d, *(uint32_t *)(d + opt + 60));
     for (int s = 0; s < nsec; s++) {
@@ -314,6 +316,20 @@ static int load_image(int k)
         memcpy(G_MEM + im->base + va, d + ra, rs < vs ? rs : vs);
     }
     free(d);
+    if (file_base != im->base) {           /* recompiled at another base (tools/rebase_pe.py, two DLLs wanting one address): relocate */
+        uint32_t delta = im->base - file_base, rel = rt_r32(G_MEM, im->base + pe + 24 + 96 + 5 * 8), rsz = rt_r32(G_MEM, im->base + pe + 24 + 96 + 5 * 8 + 4);
+        if (!rel) { fprintf(stderr, "w32: %s: no relocations to move it to %#x\n", im->name, im->base); return -1; }
+        for (uint32_t b = 0; b + 8 <= rsz; ) {
+            uint32_t page = rt_r32(G_MEM, im->base + rel + b), bs = rt_r32(G_MEM, im->base + rel + b + 4);
+            if (bs < 8) break;
+            for (uint32_t e = 8; e + 2 <= bs; e += 2) {
+                uint32_t v = rt_r16(G_MEM, im->base + rel + b + e);
+                if ((v >> 12) == 3) { uint32_t a = im->base + page + (v & 0xfff); rt_w32(G_MEM, a, rt_r32(G_MEM, a) + delta); }
+            }
+            b += bs;
+        }
+        rt_w32(G_MEM, im->base + opt + 28, im->base);
+    }
     image_loaded[k] = 1;
     for (uint32_t j = im->imp_first; j < im->imp_first + im->imp_count; j++) rt_w32(G_MEM, rt_imptab[j].iat, THUNK_BASE + 16 * j);
     bind_imports(k);

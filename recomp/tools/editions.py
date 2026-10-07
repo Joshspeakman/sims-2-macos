@@ -5,7 +5,9 @@ from pathlib import Path
 
 GOG_23 = 'c17e1cc9e01b5d2439a92e06b905040379ad4bb8618b822582c46f5fa29db4e2'
 BROKEN_WORLD_23 = '5e82a52aac1bc23bd174bf837a7181af7a7d84dcc76aae7c27ab4bb08df37ba7'
+FNV_GOG = '89e7020487e80f20ddc92ea641c4433b2c6839a82f45a076e414d167d11dd0fe'
 PROFILES = {
+    'fnv': dict(name='Fallout: New Vegas GOG 1.4.0.525', sha256=FNV_GOG, hooks=(), overrides=()),
     'gog': dict(name='GOG 2.3', sha256=GOG_23, hooks=(0x544df0, 0x544ee5, 0x90a076),
                 overrides=(0x67aeb6, 0x7663b0)),
     'broken-world': dict(name='Broken World 2.30.0.4277', sha256=BROKEN_WORLD_23,

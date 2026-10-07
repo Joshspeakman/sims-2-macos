@@ -70,6 +70,14 @@ IMPL(user32, AdjustWindowRect)
     rt_w32(G_MEM, r + 8, rt_r32(G_MEM, r + 8) + (uint32_t)rr); rt_w32(G_MEM, r + 12, rt_r32(G_MEM, r + 12) + (uint32_t)b);
     RET(1, 3);
 }
+IMPL(user32, AdjustWindowRectEx)                      /* (rect, style, menu, extended style) */
+{
+    uint32_t r = ARG(0); int l, t, rr, b; nc_size(ARG(1), 0, &l, &t, &rr, &b);
+    if (ARG(2)) t += 19;
+    rt_w32(G_MEM, r, rt_r32(G_MEM, r) - (uint32_t)l); rt_w32(G_MEM, r + 4, rt_r32(G_MEM, r + 4) - (uint32_t)t);
+    rt_w32(G_MEM, r + 8, rt_r32(G_MEM, r + 8) + (uint32_t)rr); rt_w32(G_MEM, r + 12, rt_r32(G_MEM, r + 12) + (uint32_t)b);
+    RET(1, 4);
+}
 void (*w32_host_window_created)(uint32_t hwnd, int x, int y, int w, int h, uint32_t style);
 void (*w32_host_window_changed)(uint32_t hwnd, int x, int y, int w, int h, int visible);
 IMPL(user32, CreateWindowExA)
