@@ -19,6 +19,9 @@ generated code goes under `recomp/work/`, which git ignores.
 | Linking / running | **not yet**: see "Runtime gaps" |
 | Shaders → Metal | **15,775 of 15,791** `.sdp` shader entries (1,809 unique bytecodes, vs_1_1 to ps_3_0) translate to MSL with MojoShader plus `tools/mojoshader-metal-centroid.patch`. The only failure is `PARTICLE.vso` (indexed constant array). The MSL has **not** been compiled with `xcrun metal` yet: that needs the Mac |
 
+The installer (split zip) is attached to this repository's `game-installer` release. Its notes show how to join and
+extract it, and the release is not part of the git history.
+
 Build the C (Mac or Linux):
 
 ```sh
