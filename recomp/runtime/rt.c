@@ -5,7 +5,7 @@
 #include <stdlib.h>
 #include <setjmp.h>
 #include <sys/mman.h>
-#include <mach/mach_time.h>
+#include "platform.h"
 
 uint8_t *G_MEM;
 
@@ -86,36 +86,40 @@ __attribute__((weak)) void rt_import(Ctx *c, uint32_t index)
 }
 uint64_t rt_rdtsc(void)
 {
-    static mach_timebase_info_data_t tb;
-    if (!tb.denom) mach_timebase_info(&tb);
-    return mach_absolute_time() * tb.numer / tb.denom * 3;   /* a nominal 3 GHz counter */
+    return ds_clock_ns() * 3;   /* a nominal 3 GHz counter */
 }
 
 /* ---- x87 helpers ---- */
-__thread uint32_t rt_host_rc;                  /* the x87 rounding control this thread's FPCR is set to (rt_fpcr_sync) */
+__thread uint32_t rt_host_rc = UINT32_MAX;                  /* the x87 rounding control this thread's FPCR is set to (rt_fpcr_sync) */
 /* the x87 transcendentals through the system maths library, which assumes round-to-nearest: this thread's rounding
  * mode is set to nearest around the call (the empty asm statements tie the call to the switches, so the compiler can't
  * move it across them) */
 #if defined(__aarch64__)
+#define FPREG "w"
 #define NEAR_BEGIN uint64_t fpcr0 = __builtin_arm_rsr64("fpcr"); int dir = (fpcr0 >> 22) & 3; \
     if (dir) __builtin_arm_wsr64("fpcr", fpcr0 & ~(3ull << 22));
 #define NEAR_END   if (dir) __builtin_arm_wsr64("fpcr", fpcr0);
 #else
-#define NEAR_BEGIN
-#define NEAR_END
+#if defined(__x86_64__)
+#define FPREG "x"
+#else
+#define FPREG "g"
+#endif
+#define NEAR_BEGIN int mode0 = fegetround(); if (mode0 != FE_TONEAREST) fesetround(FE_TONEAREST);
+#define NEAR_END if (mode0 != FE_TONEAREST) fesetround(mode0);
 #endif
 double rt_x87_1(int op, double x)
 {
-    NEAR_BEGIN __asm__ volatile("" : "+w"(x));
+    NEAR_BEGIN __asm__ volatile("" : "+" FPREG (x));
     double r = op == 0 ? expm1(x * 0.693147180559945309417) : op == 1 ? tan(x) : op == 2 ? sin(x) : cos(x);
-    __asm__ volatile("" : "+w"(r)); NEAR_END
+    __asm__ volatile("" : "+" FPREG (r)); NEAR_END
     return r;
 }
 double rt_x87_2(int op, double y, double x)
 {
-    NEAR_BEGIN __asm__ volatile("" : "+w"(x), "+w"(y));
+    NEAR_BEGIN __asm__ volatile("" : "+" FPREG (x), "+" FPREG (y));
     double r = op == 0 ? y * log2(x) : op == 1 ? atan2(y, x) : y * log2(x + 1.0);
-    __asm__ volatile("" : "+w"(r)); NEAR_END
+    __asm__ volatile("" : "+" FPREG (r)); NEAR_END
     return r;
 }
 double rt_f80_load(const uint8_t *M, uint32_t a)
@@ -215,10 +219,12 @@ void rt_bus_lock(void) { while (__atomic_test_and_set(&bus_flag, __ATOMIC_ACQUIR
 void rt_bus_unlock(void) { __atomic_clear(&bus_flag, __ATOMIC_RELEASE); }
 
 /* cpuid: an Intel Pentium (P54C) without MMX, so code with CPU-specific paths takes its plain x86/x87 path */
+int rt_cpuid_sse2;                              /* report SSE/SSE2 (games recompiled with tools/sse.py, e.g. Fallout NV) */
 void rt_cpuid(Ctx *c, uint32_t *eax, uint32_t *ebx, uint32_t *ecx, uint32_t *edx)
 {
     (void)c;
     if (*eax == 0) { *eax = 1; *ebx = 0x756e6547u; *edx = 0x49656e69u; *ecx = 0x6c65746eu; return; }   /* "GenuineIntel" */
+    if (rt_cpuid_sse2) { *eax = 0x6f6; *ebx = 0; *ecx = 0; *edx = 0x078081bfu; return; }             /* family 6 (Core 2 era): + CMOV, MMX, FXSR, SSE, SSE2; no SSE3 */
     *eax = 0x524; *ebx = 0; *ecx = 0; *edx = 0x1bf;                                                      /* family 5: FPU, TSC, CX8... no MMX */
 }
 /* weak default without the Win32 layer: fatal */

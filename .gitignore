@@ -14,3 +14,4 @@ build/
 recomp/.venv
 recomp/work/
 recomp/out/
+__pycache__/

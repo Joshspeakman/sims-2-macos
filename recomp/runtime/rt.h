@@ -19,6 +19,10 @@
 extern uint8_t *G_MEM;                         /* guest address 0 */
 
 typedef struct LFs { uint32_t op, a, b, r, cin, eflags, df; } LFs;
+typedef union X128 {                           /* an SSE register (lanes of each width) */
+    uint8_t b[16]; int8_t sb[16]; uint16_t w[8]; int16_t sw[8]; uint32_t d[4]; int32_t sd[4];
+    uint64_t q[2]; int64_t sq[2]; float f[4]; double x[2];
+} X128;
 typedef struct Ctx {
     uint32_t eax, ecx, edx, ebx, esp, ebp, esi, edi;
     LFs f;
@@ -26,6 +30,9 @@ typedef struct Ctx {
     uint32_t top, fcw, fsw;                    /* fsw: condition codes and exception bits; TOP is kept in `top` */
     uint32_t fs_base;                          /* guest address of this thread's TEB */
     uint32_t tc;                               /* pending tail call inside a tail-call cycle (see lift.py) */
+    uint32_t mxcsr;                            /* SSE control/status (0x1f80 at thread start) */
+    X128 xmm[8];                               /* SSE registers: kept in the context, not in locals */
+    uint64_t mm[8];                            /* MMX registers (not aliased onto the x87 stack in this model) */
 } Ctx;
 
 /* ---- memory (memcpy: guest accesses may be unaligned) ---- */
@@ -245,6 +252,8 @@ void   rt_fldenv(Ctx *c, uint32_t a);
 void   rt_fnsave(Ctx *c, uint32_t a);
 void   rt_frstor(Ctx *c, uint32_t a);
 
+#include "rt_sse.h"
+
 /* ---- SEH landing pads: functions with __try/__except register one when they install their SEH frame; when the
  * exception dispatcher transfers control to one of their __except blocks, execution resumes in that function ---- */
 #include <setjmp.h>
@@ -262,6 +271,7 @@ uint64_t rt_rdtsc(void);
 void     rt_hook(Ctx *c, uint32_t addr);                   /* lift.py HOOKS: native features (runtime/win32/hooks.c) */
 int      rt_override(Ctx *c, uint32_t addr);               /* lift.py OVERRIDES: nonzero = the call was performed natively */
 void     rt_cpuid(Ctx *c, uint32_t *eax, uint32_t *ebx, uint32_t *ecx, uint32_t *edx);
+extern int rt_cpuid_sse2;                     /* 1: cpuid reports a family 6 CPU with MMX/SSE/SSE2 (Fallout NV profile) */
 /* lock-prefixed read-modify-write instructions without an atomic C equivalent: one lock for all of them */
 void     rt_bus_lock(void);
 void     rt_bus_unlock(void);
