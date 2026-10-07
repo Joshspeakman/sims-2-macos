@@ -88,6 +88,9 @@ IMPL(ole32, CoCreateInstance)
     uint32_t w32_dpnet_create(uint32_t clsid_first_dword);
     uint32_t obj = w32_dpnet_create(rt_r32(G_MEM, clsid));           /* DirectPlay 8 client, server, address */
     if (obj) { if (out) rt_w32(G_MEM, out, obj); RET(0, 5); }
+    uint32_t w32_dshow_create(uint32_t clsid_first_dword);
+    obj = w32_dshow_create(rt_r32(G_MEM, clsid));                     /* DirectShow filter graph (music) */
+    if (obj) { if (out) rt_w32(G_MEM, out, obj); RET(0, 5); }
     const uint8_t *g = GP(clsid);
     fprintf(stderr, "w32: CoCreateInstance({%08x-%04x-%04x-%02x%02x-%02x%02x%02x%02x%02x%02x}) -> class not registered\n", rt_r32(G_MEM, clsid),
             rt_r16(G_MEM, clsid + 4), rt_r16(G_MEM, clsid + 6), g[8], g[9], g[10], g[11], g[12], g[13], g[14], g[15]);
