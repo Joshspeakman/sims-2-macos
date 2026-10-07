@@ -141,6 +141,7 @@ DSRRenderer *dsr_renderer_create(id<MTLDevice> dev)
         float def[16][4]; for (int k = 0; k < 16; k++) { def[k][0] = def[k][1] = def[k][2] = 0; def[k][3] = 1; }
         def[2][0] = def[2][1] = def[2][2] = 1; def[3][3] = 0;
         r->attr_defaults = [dev newBufferWithBytes:def length:sizeof def options:MTLResourceStorageModeShared]; }
+    r->vis = [dev newBufferWithLength:8192 * 8 options:MTLResourceStorageModeShared];   /* occlusion queries' counts (VIS_SLOTS) */
     return r;
 }
 
@@ -990,7 +991,8 @@ static id<MTLRenderPipelineState> gpipeline(DSRRenderer *r, GP *g, const GAttr *
     for (int k2 = 0; k2 < na; k2++) { v.attributes[at[k2].reg].format = (MTLVertexFormat)at[k2].fmt; v.attributes[at[k2].reg].offset = at[k2].off; v.attributes[at[k2].reg].bufferIndex = at[k2].buf; }
     for (int k2 = 0; k2 < nl; k2++) { v.layouts[VB_FIRST + k2].stride = lay[k2].stride ? lay[k2].stride : 16;
         if (lay[k2].step) { v.layouts[VB_FIRST + k2].stepFunction = MTLVertexStepFunctionConstant; v.layouts[VB_FIRST + k2].stepRate = 0; } }
-    v.layouts[VB_DEFAULTS].stride = 16; v.layouts[VB_DEFAULTS].stepFunction = MTLVertexStepFunctionConstant; v.layouts[VB_DEFAULTS].stepRate = 0;
+    for (int k2 = 0; k2 < na; k2++) if (at[k2].buf == VB_DEFAULTS) {   /* (Metal: a layout only for a buffer an attribute reads) */
+        v.layouts[VB_DEFAULTS].stride = 16; v.layouts[VB_DEFAULTS].stepFunction = MTLVertexStepFunctionConstant; v.layouts[VB_DEFAULTS].stepRate = 0; break; }
     d.vertexDescriptor = v;
     double t0 = CACurrentMediaTime();
     id<MTLRenderPipelineState> pso = [r->dev newRenderPipelineStateWithDescriptor:d error:&err];
@@ -1110,7 +1112,7 @@ void dsr_renderer_set_queries(DSRRenderer *r, volatile uint32_t *results) { r->q
 static void query(DSRRenderer *r, const uint32_t *p)
 {
     uint32_t k = p[0]; if (!k || k >= 1024) return;
-    if (!r->vis) r->vis = [r->dev newBufferWithLength:VIS_SLOTS * 8 options:MTLResourceStorageModeShared];
+    if (!r->vis) return;                             /* (made with the renderer: every render pass has to carry it) */
     if (p[1]) {                                       /* begin (one active at a time, as the OpenGL renderer) */
         if (r->qactive && r->enc) [r->enc setVisibilityResultMode:MTLVisibilityResultModeDisabled offset:0];
         r->qactive = (int)k; r->nqseg = 0;

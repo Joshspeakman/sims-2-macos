@@ -764,7 +764,7 @@ void emit_METAL_uniform(Context *ctx, RegisterType regtype, int regnum,
 
         // !!! FIXME: might trigger unused var warnings in Clang.
         //output_line(ctx, "constant %s &%s = %s[%d];", utype, varname, name, index);
-        output_line(ctx, "#define %s %s[%d];", varname, name, index);
+        output_line(ctx, "#define %s %s[%d]", varname, name, index);   // fallout-nv-macos: no ";" (the macro is used inside expressions: dot(c36, r0))
         push_output(ctx, &ctx->mainline);
         ctx->indent++;
         output_line(ctx, "#undef %s", varname);  // !!! FIXME: gross.
