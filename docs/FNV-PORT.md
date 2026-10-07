@@ -6,23 +6,30 @@ This branch takes the static recompiler from this repository (x86 → C → clan
 `setup_fallout_new_vegas_1.4.0.525_(12010).exe`). As with Dungeon Siege, nothing from the game is committed. All
 generated code goes under `recomp/work/`, which git ignores.
 
-## Linux port status (2026-10-06, this repository)
+## Linux port status (2026-10-07, this repository)
 
-Done: the whole executable plus Bink and both Vorbis DLLs link into `FalloutNVLinux` (libvorbisfile is relocated
-to 0x11000000, see `tools/rebase_pe.py`). All 280 imports are implemented. It starts, plays the intro movie, draws
-the main menu and plays its music, then starts a new game and renders Doc Mitchell's house through the translated shaders.
+The whole executable plus Bink and both Vorbis DLLs link into `FalloutNVLinux` (libvorbisfile is relocated to
+0x11000000, see `tools/rebase_pe.py`); all 280 imports are implemented. Checked against the original game running
+under Proton in headless gamescope (`tests/fnv_ref.py`, `tests/scenario.py`), same inputs, same moments:
 
-Next, roughly in order:
-1. UI frames that don't draw (the new-game confirmation box draws only its text).
-2. Occlusion queries (`dv_CreateQuery` type 9): the sun/moon glare shows indoors.
-3. Render-target formats: everything is RGBA8 now. FNV's HDR targets (A16B16G16R16F), depth textures and shadow
-   maps need real formats in `renderer.c`. Also cube and volume textures (stand-ins at the moment).
-4. Fog for shader model 2 shaders (fixed-function fog after the pixel shader), and the D3D9 half-pixel offset.
-5. Sound effects (DirectSound 8 buffers, 3D buffers via QueryInterface) and the Mac side (MojoShader's Metal
-   profile in place of GLSL; `renderer.m` needs DSR_GLSL_CREATE's MSL equivalent).
-6. Performance: programmable draws copy every vertex as float4 through the command ring. Caching vertex/index
+- intro movie, main menu and its music, new game, Doc Mitchell's dialogue (voices correlate 0.999 with a reference
+  decode), subtitles, name entry, the Reflectron (face), the DLC messages, saving, loading (Continue)
+- Goodsprings by day, dusk and night, the saloon interior, the Strip; the pause menu
+- all 1809 unique shaders in the game's .sdp packages translate (MojoShader, patched) and compile
+  (`tools/sdp_glsl_check.c`)
+
+Fixed while comparing: D3D9 pixel centres (night was rendered as day: the 1x1 adaptation quad never rasterised),
+16 samplers (yellow terrain), occlusion queries (sun glare indoors), blend/scissor/depth-bias/two-sided stencil,
+and relatively addressed constant arrays (skinned meshes thrown across the screen as dark planes: FNV's skinning
+shaders declare 18 bones and index 26+, see `third_party/mojoshader/README.md`).
+
+`tests/saves/fnvtest1.fos` is a save made just after character creation; the `load-*` scenarios start from it.
+
+Still to do:
+1. Performance: programmable draws copy every vertex as float4 through the command ring. Caching vertex/index
    buffers on the GPU is the big win.
-7. The 127 unresolved jump tables, `_except_handler4`, C++ exceptions if the game throws.
+2. The Mac side: MojoShader's Metal profile in place of GLSL; `renderer.m` needs DSR_GLSL_CREATE's MSL equivalent.
+3. The 127 unresolved jump tables, `_except_handler4`, C++ exceptions if the game throws.
 
 The installer note below refers to the macOS repository's `game-installer` release (this repository has none).
 

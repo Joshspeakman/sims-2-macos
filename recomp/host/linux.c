@@ -202,7 +202,7 @@ static void cmdfile_poll(uint32_t fno)
         if (sscanf(line, "%7[a-z]:%599[^\n]", kind, rest) < 1 || !kind[0]) continue;
         memset(a, 0, sizeof *a); a->frame = fno + 1; snprintf(a->kind, sizeof a->kind, "%s", kind);
         if (!strcmp(kind, "shot") || !strcmp(kind, "type") || !strcmp(kind, "ditype") || !strcmp(kind, "peek")) snprintf(a->path, sizeof a->path, "%s", rest); else sscanf(rest, "%d,%d", &a->x, &a->y);
-        nacts++; fprintf(stderr, "DungeonSiege2Linux: command %s\n", line);
+        nacts++; fprintf(stderr, "host: command %s\n", line);
     }
     fclose(f);
 }
@@ -264,7 +264,7 @@ static const char *script_tick(uint32_t fno)       /* returns a screenshot path 
         else if (!strcmp(a->kind, "peek") && fno == a->frame) {
             extern uint8_t *G_MEM; char *e = a->path; uint32_t at = (uint32_t)strtoul(e, &e, 16), v = 0;
             for (;;) { if (at < 0x10000u) { v = 0; break; } memcpy(&v, G_MEM + at, 4); if (*e != ',') break; at = v + (uint32_t)strtoul(e + 1, &e, 16); }
-            fprintf(stderr, "DungeonSiege2Linux: peek %s = 0x%08x (byte 0x%02x)\n", a->path, v, v & 0xff);
+            fprintf(stderr, "host: peek %s = 0x%08x (byte 0x%02x)\n", a->path, v, v & 0xff);
         }
         else if (!strcmp(a->kind, "wheel") && fno >= a->frame && fno < a->frame + (uint32_t)abs(a->x)) post(0x20a, ((uint32_t)(int16_t)(a->x > 0 ? 120 : -120) << 16), pos_lp());   /* x notches */
         else if (!strcmp(a->kind, "type") && fno == a->frame) {   /* keyboard path */
@@ -414,6 +414,6 @@ int main(int argc,char **argv) {
  SDL_SetRelativeMouseMode(SDL_FALSE);
  ds_trace_save(&trace);
  /* Guest service threads share the renderer and address space until process exit. */
- fprintf(stderr,"DungeonSiege2Linux: %u frames presented\n",frames);
+ fprintf(stderr,"host: %u frames presented\n",frames);
  return game_running?0:(int)game_code;
 }
