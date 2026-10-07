@@ -60,6 +60,11 @@ def _():
 @scenario('load-strip', 160)
 def _():
     s, t = travel(100, 'set gamehour to 21', 'coc TheStrip'); return s + [(t + 4, 'shot', 'strip')]
+@scenario('load-ui', 150)
+def _():                               # the Pip-Boy (opened with Tab, moved between tabs with Right), then VATS
+    c, t = console(100, 'enableplayercontrols', 'player.additem 00015038 1', 'player.equipitem 00015038')   # the save skipped Doc Mitchell's quest: menus disabled, no Pip-Boy yet
+    return LOAD + c + [(t + 2, 'key', 'Tab'), (t + 6, 'shot', 'pipboy'), (t + 8, 'key', 'Right'), (t + 11, 'shot', 'pipboy2'),
+                       (t + 13, 'key', 'Tab'), (t + 18, 'key', 'v'), (t + 21, 'shot', 'vats'), (t + 24, 'key', 'v'), (t + 30, 'shot', 'after')]
 @scenario('saloon', 170)
 def _():
     s, t = console(125, 'coc GSProspectorSaloonInterior')
