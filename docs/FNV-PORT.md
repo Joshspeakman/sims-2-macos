@@ -14,7 +14,12 @@ under Proton in headless gamescope (`tests/fnv_ref.py`, `tests/scenario.py`), sa
 
 - intro movie, main menu and its music, new game, Doc Mitchell's dialogue (voices correlate 0.999 with a reference
   decode), subtitles, name entry, the Reflectron (face), the DLC messages, saving, loading (Continue)
-- Goodsprings by day, dusk and night, the saloon interior, the Strip; the pause menu
+- Goodsprings by day, dusk and night, the saloon, Vault 22, the Lucky 38 penthouse (30-50 dB PSNR against the
+  original); the pause menu; the Pip-Boy (35 dB); a gecko fight with a 9mm pistol (creatures, hits, HUD)
+- the intro movie's sound: correlation 1.0000 with a reference decode of FNVIntro.bik (`tools/audiocmp.py`)
+- a 10-minute tour through 12 interiors (Lucky 38, Gomorrah, the Tops, Hoover Dam, Vaults 11 and 22, Freeside,
+  Novac, Primm, Hidden Valley, Forlorn Hope): no crash, 23 million draws; player position and heading after a
+  `coc` identical to the original's
 - all 1809 unique shaders in the game's .sdp packages translate (MojoShader, patched) and compile
   (`tools/sdp_glsl_check.c`)
 

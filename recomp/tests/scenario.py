@@ -84,6 +84,17 @@ def _():                               # a small gecko placed, AI off, the view 
 def _():                               # a small gecko placed with AI on, the view tilted down at it
     c, t = console(100, 'enableplayercontrols', 'tgm', 'player.setangle x 50', 'player.placeatme 0014F47C 1')
     return LOAD + c + [(t + 1 + k * 3, 'shot', 'g%d' % k) for k in range(6)]
+@scenario('load-cells', 230)
+def _():                               # interiors around the map; after a coc the console closes itself
+    steps, t = list(LOAD), 100
+    for c in ('Vault22a', 'Lucky38Penthouse', 'Gomorrah00'):
+        steps += [(t, 'key', 'grave'), (t + 2, 'type', 'coc ' + c), (t + 6, 'key', 'Return'), (t + 36, 'shot', c)]; t += 40
+    return steps
+@scenario('load-heading', 175)
+def _():                               # the player's angles after a coc, printed by the console
+    steps = LOAD + [(100, 'key', 'grave'), (102, 'type', 'coc Gomorrah00'), (106, 'key', 'Return')]
+    c, t = console(136, 'player.getangle z', 'player.getangle x', 'player.getpos x', 'player.getpos y')
+    return steps + c[:-1] + [(t, 'shot', 'angles')]
 @scenario('saloon', 170)
 def _():
     s, t = console(125, 'coc GSProspectorSaloonInterior')
