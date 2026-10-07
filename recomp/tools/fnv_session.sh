@@ -8,6 +8,9 @@ HERE="$(cd "$(dirname "$0")/.." && pwd)"; cd "$HERE"
 NAME="$1"; SECS="$2"; EXTRA="${3:-}"; OUT="work/sess-$NAME"; rm -rf "$OUT"; mkdir -p "$OUT"
 GAME="${GAME:-$HOME/Games/FalloutNV-GOG/app}"; DATA="${DATA:-$PWD/$OUT/data}"
 [[ -n "${KEEP_DATA:-}" ]] || rm -rf "$DATA"
+if [[ -n "${SAVE:-}" ]]; then                      # SAVE=<file.fos>: the only save in the data folder (Continue loads it)
+  mkdir -p "$DATA/drive_c/Users/player/Documents/My Games/FalloutNV/Saves"; cp "$SAVE" "$DATA/drive_c/Users/player/Documents/My Games/FalloutNV/Saves/"
+fi
 S=""
 if [[ -n "${NEWGAME:-}" ]]; then
   S="@60:dik:208;@62:dik:208;@64:dik:28;@68:dik:203;@70:dik:28;@78:dik:1;@80:dik:57;@82:dik:1"

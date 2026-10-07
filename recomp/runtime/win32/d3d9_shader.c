@@ -108,6 +108,7 @@ static void create(Prog *p)
         int sl = slot_of(v->attributes[k].usage, v->attributes[k].index);
         if (sl < 0 || !v->attributes[k].name) { if (shlog()) fprintf(stderr, "d3d9: vertex shader %08x: input usage %d/%d has no slot\n", p->vs->g, v->attributes[k].usage, v->attributes[k].index); continue; }
         at[na].slot = (uint32_t)sl; memset(at[na].name, 0, 28); snprintf(at[na].name, 28, "%s", v->attributes[k].name); na++;
+        if (shlog()) fprintf(stderr, "d3d9: program %u input %s = usage %d/%d -> slot %d\n", next_id, v->attributes[k].name, v->attributes[k].usage, v->attributes[k].index, sl);
     }
     uint32_t vl = (uint32_t)vslen, pl = (uint32_t)pslen, size = 16 + 32 * (uint32_t)na + ((vl + 4) & ~3u) + ((pl + 4) & ~3u);
     p->id = next_id++;

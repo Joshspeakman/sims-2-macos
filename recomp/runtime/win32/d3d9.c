@@ -603,7 +603,12 @@ static int prog_layout(Dev9 *d, PElem *el, int *pretrans)      /* the bound decl
     if (d->decl) {
         for (int k = 0; k < d->decl->n && n < 32; k++) {
             DElem *e = &d->decl->e[k]; int sl = sem_slot(e->usage, e->uidx);
-            if (sl < 0 || e->type > 16) continue;
+            if (sl < 0 || e->type > 16) {
+                static uint32_t seen[64]; static int ns; uint32_t key = (uint32_t)e->usage << 8 | (uint32_t)e->uidx; int found = 0;
+                for (int j = 0; j < ns; j++) if (seen[j] == key) found = 1;
+                if (!found && ns < 64) { seen[ns++] = key; fprintf(stderr, "d3d9: vertex element usage %d index %d type %d has no attribute slot (dropped)\n", e->usage, e->uidx, e->type); }
+                continue;
+            }
             if (e->usage == DU_POSITIONT) *pretrans = 1;
             el[n].stream = e->stream; el[n].off = e->off; el[n].type = e->type; el[n].slot = sl; n++;
         }
@@ -646,6 +651,13 @@ static void prog_draw(Dev9 *d, uint32_t prim, uint32_t first, uint32_t nv, const
         }
         for (uint32_t v = 0; v < nv; v++) elem_f4(el[k].type, src + (size_t)v * stride + el[k].off, out + 4 * ((size_t)v * (size_t)ns + (size_t)col[el[k].slot]));
     }
+    { static long want = -1; static int nd; if (want < 0) { const char *e = getenv("D3D9_VDUMP"); want = e ? atol(e) : 0; }   /* D3D9_VDUMP=<program>: its first draws' vertices */
+      if (want && (long)d->prog == want && (mask >> 15 & 1) && nd < 400) {        /* blend indices (slot 15): the largest per draw */
+        float mx = 0, w = 0; int c15 = col[15]; for (uint32_t v = 0; v < nv; v++) for (int c = 0; c < 4; c++) { float x = out[4*(v*ns+c15)+c]; if (x > mx) mx = x; }
+        (void)w; fprintf(stderr, "vdump prog %u: nv %u largest blend index component %g (x765 = %g)\n", d->prog, nv, mx, mx * 765.01f); }
+      if (want && (long)d->prog == want && nd < 4) { nd++; fprintf(stderr, "vdump prog %u draw %d: nv %u ni %u mask %04x first %u stride %u\n", d->prog, nd, nv, ni, mask, first, d->vb_stride[0]);
+        for (uint32_t v = 0; v < nv && v < 8; v++) { fprintf(stderr, "  v%u:", v); for (int c = 0; c < ns; c++) fprintf(stderr, " (%g %g %g %g)", out[4*(v*ns+c)], out[4*(v*ns+c)+1], out[4*(v*ns+c)+2], out[4*(v*ns+c)+3]); fprintf(stderr, "\n"); }
+        if (ni) { fprintf(stderr, "  idx:"); for (uint32_t k = 0; k < ni && k < 24; k++) fprintf(stderr, " %u", idx[k]); fprintf(stderr, "\n"); } } }
     if (ni) memcpy((uint8_t *)(p + 5) + vb, idx, ni * 2);
     cmd_end();
     if (d->rt) d->rt->gpu_newer = 1;
@@ -908,6 +920,12 @@ M(dv_GetNPatchMode, 1) FPUSH(0.0); RET(0, 1); END
 static int shader_bind(Dev9 *d)
 {
     uint32_t id = d9_shader_program(d); if (!id) return 0;
+    { static int lg = -1; if (lg < 0) lg = getenv("D3D9_SHADERLOG") != 0;     /* each program's declarations, once */
+      static uint64_t seen[4096]; static int ns;
+      if (lg && d->decl) { uint64_t key = (uint64_t)id << 32 | (uint32_t)(uintptr_t)d->decl; int f = 0; for (int k = 0; k < ns; k++) if (seen[k] == key) f = 1;
+        if (!f && ns < 4096) { seen[ns++] = key; fprintf(stderr, "d3d9: program %u declaration:", id);
+          for (int k = 0; k < d->decl->n; k++) fprintf(stderr, " [s%d +%d type %d usage %d/%d]", d->decl->e[k].stream, d->decl->e[k].off, d->decl->e[k].type, d->decl->e[k].usage, d->decl->e[k].uidx);
+          fprintf(stderr, "\n"); } } }
     d9_program_use(d, id); d9_shader_consts(d, id); return 1;
 }
 M(dv_DrawPrimitive, 4) DEV_ME                          /* (type, start vertex, primitives) */
