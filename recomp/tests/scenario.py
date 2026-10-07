@@ -98,6 +98,9 @@ def _():                               # the player's angles after a coc, printe
 @scenario('doc-burst', 150)
 def _():                               # Doc Mitchell during the opening, a burst of frames (flicker shows as frame-to-frame change)
     return OPENING + [(128 + k * 0.25, 'shot', 'b%02d' % k) for k in range(12)]
+@scenario('store-burst', 130)
+def _():                               # tests/saves/store.fos (the general store, third person), frames 0.25 s apart
+    return [(62, 'key', 'Down'), (64, 'key', 'Return'), (67, 'key', 'Return')] + [(105 + k * 0.25, 'shot', 'b%02d' % k) for k in range(12)]
 @scenario('saloon', 170)
 def _():
     s, t = console(125, 'coc GSProspectorSaloonInterior')
@@ -130,16 +133,17 @@ if __name__ == '__main__':
     os.makedirs(nat, exist_ok=True); os.makedirs(ref, exist_ok=True)
     procs = []
     uses_save = any(st[0] == 67 and st[2] == 'Return' for st in steps)
+    save_file = os.path.join(HERE, 'tests', 'saves', 'store.fos') if name.startswith('store') else SAVE
     if which in ('native', 'both'):
         env = dict(os.environ, SESSION_ENV='DS_SHOT_RAW=1 ' + os.environ.get('SESSION_ENV', ''), SHOT='1000')
-        if uses_save: env['SAVE'] = SAVE
+        if uses_save: env['SAVE'] = save_file
         procs.append(subprocess.Popen([os.path.join(HERE, 'tools', 'fnv_session.sh'), 'scen-' + name, str(secs), native_script(steps, nat)], env=env,
                                       stdout=open(os.path.join(base, 'native.out'), 'w'), stderr=subprocess.STDOUT))
     if which in ('ref', 'both'):
         saves = os.path.expanduser('~/Games/fnv-ref-prefix/pfx/drive_c/users/steamuser/Documents/My Games/FalloutNV/Saves')
         os.makedirs(saves, exist_ok=True)
         for f in os.listdir(saves): os.remove(os.path.join(saves, f))
-        if uses_save: import shutil; shutil.copy(SAVE, saves)
+        if uses_save: import shutil; shutil.copy(save_file, saves)
         procs.append(subprocess.Popen(['timeout', str(secs + 80), 'gamescope', '--backend', 'headless', '-W', '1280', '-H', '720', '-w', '1280', '-h', '720', '--',
                                        os.path.join(HERE, 'tests', 'fnv_ref.py'), ref, str(secs), ref_script(steps)],
                                       stdout=open(os.path.join(base, 'ref.out'), 'w'), stderr=subprocess.STDOUT))

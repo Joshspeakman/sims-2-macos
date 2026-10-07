@@ -54,14 +54,17 @@ static char *wrap_ps(const char *src, size_t n, size_t *outlen)
     o = append(o, &len, &cap, "void d3d_main()", 15);
     const char *rest = m + 11; o = append(o, &len, &cap, rest, n - (size_t)(rest - src));
     const char *out = strstr(src, "gl_FragData[0]") ? "gl_FragData[0]" : "gl_FragColor";
-    char tail[1024];
+    char tail[1024], nanpaint[256] = "";   /* D3D9_NANPAINT=nan|inf: such outputs painted magenta (debugging) */
+    { const char *np = getenv("D3D9_NANPAINT");
+      if (np) snprintf(nanpaint, sizeof nanpaint, strcmp(np, "inf") ? "\tif (any(notEqual(%s, %s))) %s = vec4(1.0, 0.0, 1.0, 1.0);\n"   /* GLSL 1.20: no isnan/isinf */
+                                                                     : "\tif (any(greaterThan(abs(%s), vec4(3.0e38))) && %s == %s) %s = vec4(1.0, 0.0, 1.0, 1.0);\n", out, out, out, out); }
     int k = snprintf(tail, sizeof tail,
         "\nuniform vec4 d3d_alphatest;\n"
         "void main()\n{\n\td3d_main();\n"
         "\tif (d3d_alphatest.z != 0.0) {\n\t\tfloat a = floor(clamp(%s.a, 0.0, 1.0) * 255.0 + 0.5), r = d3d_alphatest.x; int f = int(d3d_alphatest.y); bool pass = true;\n"
         "\t\tif (f == 1) pass = false; else if (f == 2) pass = a < r; else if (f == 3) pass = a == r; else if (f == 4) pass = a <= r;\n"
         "\t\telse if (f == 5) pass = a > r; else if (f == 6) pass = a != r; else if (f == 7) pass = a >= r;\n"
-        "\t\tif (!pass) discard;\n\t}\n}\n", out);
+        "\t\tif (!pass) discard;\n\t}\n%s}\n", out, nanpaint);
     o = append(o, &len, &cap, tail, (size_t)k); *outlen = len; return o;
 }
 /* the vertex shader with D3D9's pixel centres: D3D9 puts them on integer coordinates, GL half a pixel further, so
@@ -74,6 +77,10 @@ static char *wrap_vs(const char *src, size_t n, size_t *outlen)
     const char *ver = strstr(src, "\n"), *flip = strstr(src, "\tgl_Position.y = gl_Position.y * vpFlip;");
     if (!ver || !flip) { o = append(o, &len, &cap, src, n); *outlen = len; return o; }
     o = append(o, &len, &cap, src, (size_t)(ver + 1 - src));
+    /* invariant: the same position math gives the same bits in every program, as D3D drivers guarantee. FNV lights
+     * characters in several passes that redraw them with depth test EQUAL; without it NVIDIA's compiler optimises each
+     * program differently, a pass misses on scattered pixels, and they flicker (bright specks on Doc Mitchell, the player) */
+    if (!getenv("D3D9_NO_INVARIANT")) o = append(o, &len, &cap, "invariant gl_Position;\n", 23);
     o = append(o, &len, &cap, "uniform vec4 d3d_pixfix;\n", 25);
     o = append(o, &len, &cap, ver + 1, (size_t)(flip - ver - 1));
     o = append(o, &len, &cap, "\tgl_Position.xy += d3d_pixfix.xy * gl_Position.w;\n", 50);
