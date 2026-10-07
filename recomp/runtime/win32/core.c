@@ -346,7 +346,7 @@ IMPL(kernel32, Sleep)
 }
 
 /* ---- synchronisation objects ---- */
-typedef struct Sync { pthread_mutex_t m; pthread_cond_t cv; int manual, signaled, count; uint32_t owner; char name[64]; } Sync;
+typedef struct Sync { pthread_mutex_t m; pthread_cond_t cv; int manual, signaled, count; uint32_t owner; char name[64]; int waiters, closed; } Sync;   /* same in core.c and threads.c */
 static Sync *sync_new(int manual, int signaled)
 {
     Sync *s = calloc(1, sizeof *s); pthread_mutex_init(&s->m, 0); pthread_cond_init(&s->cv, 0);
@@ -429,23 +429,26 @@ int w32_wait_one(Ctx *c, uint32_t h, uint32_t ms)
 {
     HObj *o = h_get(h, 0); if (!o) return -1;
     if (o->type != H_EVENT && o->type != H_MUTEX && o->type != H_THREAD && o->type != H_SEMAPHORE) return -1;
-    Sync *s = o->p; uint32_t tid = w32_tid(c);
+    Sync *s = o->p; uint32_t tid = w32_tid(c); int type = o->type;   /* o may be closed (and its slot reused) while we wait */
     struct timespec dl; clock_gettime(CLOCK_REALTIME, &dl);
     dl.tv_sec += ms / 1000; dl.tv_nsec += (long)(ms % 1000) * 1000000; if (dl.tv_nsec >= 1000000000) { dl.tv_sec++; dl.tv_nsec -= 1000000000; }
     void w32_crash_wait_begin(int, uint32_t, uint32_t), w32_crash_wait_end(void);
     if (ms) w32_crash_wait_begin(1, h, ms);
-    pthread_mutex_lock(&s->m);
+    pthread_mutex_lock(&s->m); s->waiters++;
+    int r = 0;
     for (;;) {
-        if (o->type == H_MUTEX && (s->count == 0 || s->owner == tid)) { s->owner = tid; s->count++; break; }
-        if (o->type == H_SEMAPHORE && s->count > 0) { s->count--; break; }
-        if ((o->type == H_EVENT || o->type == H_THREAD) && s->signaled) { if (o->type == H_EVENT && !s->manual) s->signaled = 0; break; }
-        if (w32_deterministic && ms != 0) { pthread_mutex_unlock(&s->m); rt_unhandled(c, rt_r32(G_MEM, c->esp), "wait would block on another thread (harness)"); }
-        if (ms == 0 || (ms != 0xffffffffu && pthread_cond_timedwait(&s->cv, &s->m, &dl))) { pthread_mutex_unlock(&s->m); if (ms) w32_crash_wait_end(); return 0x102; }
+        if (type == H_MUTEX && (s->count == 0 || s->owner == tid)) { s->owner = tid; s->count++; break; }
+        if (type == H_SEMAPHORE && s->count > 0) { s->count--; break; }
+        if ((type == H_EVENT || type == H_THREAD) && s->signaled) { if (type == H_EVENT && !s->manual) s->signaled = 0; break; }
+        if (w32_deterministic && ms != 0) { s->waiters--; pthread_mutex_unlock(&s->m); rt_unhandled(c, rt_r32(G_MEM, c->esp), "wait would block on another thread (harness)"); }
+        if (ms == 0 || (ms != 0xffffffffu && pthread_cond_timedwait(&s->cv, &s->m, &dl))) { r = 0x102; break; }
         if (ms == 0xffffffffu) pthread_cond_wait(&s->cv, &s->m);
     }
+    int last = --s->waiters == 0 && s->closed;
     pthread_mutex_unlock(&s->m);
+    if (last) { pthread_mutex_destroy(&s->m); pthread_cond_destroy(&s->cv); free(s); }
     if (ms) w32_crash_wait_end();
-    return 0;
+    return r;
 }
 IMPL(kernel32, WaitForSingleObject)
 {
@@ -470,7 +473,10 @@ void w32_handle_closed(HObj *o)
     if (o->type == H_THREAD || o->type == H_PROCESS) return;       /* thread objects live as long as the process */
     if (o->type == H_EVENT || o->type == H_MUTEX || o->type == H_SEMAPHORE) {
         Sync *s = o->p; for (int k = 0; k < nnamed; k++) if (named[k] == s) { named[k] = named[--nnamed]; named_h[k] = named_h[nnamed]; }
-        pthread_mutex_destroy(&s->m); pthread_cond_destroy(&s->cv); free(s);
+        /* Windows keeps an object alive while threads wait on it (they go on waiting); destroying a condition variable
+         * with waiters blocks forever in glibc (Fallout NV closes its worker threads' event on quit): the last waiter frees */
+        pthread_mutex_lock(&s->m); int busy = s->waiters > 0; s->closed = 1; pthread_mutex_unlock(&s->m);
+        if (!busy) { pthread_mutex_destroy(&s->m); pthread_cond_destroy(&s->cv); free(s); }
     } else w32_file_closed(o);
 }
 
