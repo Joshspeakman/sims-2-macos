@@ -21,7 +21,7 @@ int w32_prepare(const char *exe, const char *game_dir, const char *drive_c, cons
     game_ctx.fs_base = w32_new_thread_teb(stk, stk + (1u << 20));
     game_ctx.esp = stk + (1u << 20) - 16;
     game_ctx.esp -= 4; rt_w32(G_MEM, game_ctx.esp, 0xffeff000u);
-    game_ctx.f.eflags = 0x202; game_ctx.fcw = 0x027f;
+    game_ctx.f.eflags = 0x202; game_ctx.fcw = 0x027f; game_ctx.mxcsr = 0x1f80;
     return 0;
 }
 /* Runs the game's entry point on the calling thread (give it a large stack). Returns the exit code. */
