@@ -245,6 +245,16 @@ static uint32_t from_file(Ctx *c, int type, const char *what)
     if (logon()) fprintf(stderr, "d3dx9: %s %ux%ux%u format %#x, %u levels -> %08x\n", what, im.w, im.h, im.d, im.fmt, im.levels, hr);
     free(im.own); return hr;
 }
+IMPL(d3dx9_29, D3DXGetImageInfoFromFileInMemory)      /* (data, size, D3DXIMAGE_INFO *): width, height, depth, levels, format, type, file format */
+{
+    uint32_t src = ARG(0), len = ARG(1), out = ARG(2);
+    if (!src || !len) RET(D3DERR_INVALIDCALL, 3);
+    Img im; if (!load_image(G_MEM + src, len, &im)) RET(D3DXERR_INVALIDDATA, 3);
+    int dds = len >= 4 && !memcmp(G_MEM + src, "DDS ", 4), bmp = len >= 2 && !memcmp(G_MEM + src, "BM", 2);
+    uint32_t v[7] = {im.w, im.h, im.d, im.levels, im.fmt, im.faces == 6 ? 5u : im.d > 1 ? 4u : 3u, dds ? 4u : bmp ? 0u : 2u};
+    if (out) memcpy(GP(out), v, sizeof v);
+    free(im.own); RET(D3D_OK, 3);
+}
 IMPL(d3dx9_29, D3DXCreateTextureFromFileInMemory) { RET(from_file(c, O9_TEX, "texture"), 4); }
 IMPL(d3dx9_29, D3DXCreateCubeTextureFromFileInMemory) { RET(from_file(c, O9_CUBE, "cube texture"), 4); }
 IMPL(d3dx9_29, D3DXCreateVolumeTextureFromFileInMemory) { RET(from_file(c, O9_VOLTEX, "volume texture"), 4); }

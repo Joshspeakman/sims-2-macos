@@ -3,8 +3,8 @@
  * WHDR_DONE and reported through the client's chosen callback (function: on a guest service thread; event; window or
  * thread message). */
 #include "w32.h"
-#include <AudioToolbox/AudioToolbox.h>
-#include <os/lock.h>
+#include "host_audio.h"
+
 #include <unistd.h>
 #include <math.h>
 
@@ -12,7 +12,7 @@ enum { WHDR_DONE = 1, WHDR_PREPARED = 2, WHDR_INQUEUE = 0x10, WOM_OPEN = 0x3bb, 
 enum { CB_NULL = 0, CB_WINDOW = 0x10000, CB_THREAD = 0x20000, CB_FUNCTION = 0x30000, CB_EVENT = 0x50000 };
 typedef struct WaveOut {
     int used; uint32_t handle, cb, cbtype, inst; int ch, bits, rate;
-    AudioComponentInstance au; os_unfair_lock lock;
+    DsAudio * au; pthread_mutex_t lock;
     uint32_t q[256]; int qh, qn; uint32_t off;          /* queued WAVEHDRs (guest addresses), read offset in the head */
     float vol;
 } WaveOut;
@@ -77,13 +77,13 @@ void w32_audio_out(const float *lr, uint32_t frames, int rate, int source)
     h16 = 4; memcpy(h + 32, &h16, 2); h16 = 16; memcpy(h + 34, &h16, 2); memcpy(h + 36, "data", 4); v = (uint32_t)n; memcpy(h + 40, &v, 4);
     fseek(dump, 0, SEEK_SET); fwrite(h, 1, 44, dump); fseek(dump, 0, SEEK_END);
 }
-static OSStatus render(void *u, AudioUnitRenderActionFlags *fl, const AudioTimeStamp *ts, UInt32 bus, UInt32 frames, AudioBufferList *io)
+static void render(void *u, void *buffer, uint32_t frames)
 {
-    (void)fl; (void)ts; (void)bus;
+
     uint32_t k = (uint32_t)(uintptr_t)u; WaveOut *w = &wos[k];
-    uint8_t *out = io->mBuffers[0].mData; uint32_t want = io->mBuffers[0].mDataByteSize, got = 0;
+    uint8_t *out = buffer; uint32_t want = frames * (uint32_t)(w->ch * w->bits / 8), got = 0;
     uint32_t done[64]; int nd = 0;
-    os_unfair_lock_lock(&w->lock);
+    pthread_mutex_lock(&w->lock);
     while (got < want && w->qn) {
         uint32_t h = w->q[w->qh], data = rt_r32(G_MEM, h), len = rt_r32(G_MEM, h + 4);
         uint32_t n = len - w->off < want - got ? len - w->off : want - got;
@@ -94,7 +94,7 @@ static OSStatus render(void *u, AudioUnitRenderActionFlags *fl, const AudioTimeS
             if (nd < 64) done[nd++] = h;
         }
     }
-    os_unfair_lock_unlock(&w->lock);
+    pthread_mutex_unlock(&w->lock);
     if (got < want) memset(out + got, w->bits == 8 ? 0x80 : 0, want - got);
     if (k == 0 && w->ch == 2 && w->bits == 16) {                /* the shared output tap (level log, dump) */
         float tmp[2 * 1024];
@@ -106,12 +106,12 @@ static OSStatus render(void *u, AudioUnitRenderActionFlags *fl, const AudioTimeS
     }
     if (getenv("W32_AUDIO_MUTE")) memset(out, w->bits == 8 ? 0x80 : 0, want);
     for (int j = 0; j < nd; j++) note(k, WOM_DONE, done[j]);
-    return 0;
+
 }
 IMPL(winmm, waveOutGetDevCapsA)
 {
     uint32_t p = ARG(1), sz = ARG(2); uint8_t caps[52] = {0};
-    caps[0] = 1; caps[2] = 1; caps[4] = 1; snprintf((char *)caps + 8, 32, "Mac Audio Output");
+    caps[0] = 1; caps[2] = 1; caps[4] = 1; snprintf((char *)caps + 8, 32, "Native Audio Output");
     uint32_t fmts = 0xfff; memcpy(caps + 40, &fmts, 4); caps[44] = 2; uint32_t sup = 0x4 | 0x8; memcpy(caps + 48, &sup, 4);
     memcpy(GP(p), caps, sz < 52 ? sz : 52);
     RET(0, 3);
@@ -127,16 +127,9 @@ IMPL(winmm, waveOutOpen)
     if (k == 8) RET(4, 6);                                                        /* MMSYSERR_ALLOCATED */
     WaveOut *w = &wos[k]; memset(w, 0, sizeof *w);
     w->used = 1; w->handle = 0x00c00000u + 4 * (uint32_t)k; w->cb = cb; w->cbtype = fl & 0x70000; w->inst = inst;
-    w->ch = ch; w->bits = bits; w->rate = (int)rate; w->lock = OS_UNFAIR_LOCK_INIT; w->vol = 1;
-    AudioComponentDescription d = {kAudioUnitType_Output, kAudioUnitSubType_DefaultOutput, kAudioUnitManufacturer_Apple, 0, 0};
-    AudioComponent comp = AudioComponentFindNext(0, &d);
-    if (!comp || AudioComponentInstanceNew(comp, &w->au)) { w->used = 0; RET(2, 6); }
-    AudioStreamBasicDescription f = {(Float64)rate, kAudioFormatLinearPCM,
-        (bits == 16 ? kAudioFormatFlagIsSignedInteger : 0) | kAudioFormatFlagIsPacked, (UInt32)(ch * bits / 8), 1, (UInt32)(ch * bits / 8), ch, bits, 0};
-    AudioUnitSetProperty(w->au, kAudioUnitProperty_StreamFormat, kAudioUnitScope_Input, 0, &f, sizeof f);
-    AURenderCallbackStruct rc = {render, (void *)(uintptr_t)k};
-    AudioUnitSetProperty(w->au, kAudioUnitProperty_SetRenderCallback, kAudioUnitScope_Input, 0, &rc, sizeof rc);
-    if (AudioUnitInitialize(w->au) || AudioOutputUnitStart(w->au)) { AudioComponentInstanceDispose(w->au); w->used = 0; RET(2, 6); }
+    w->ch = ch; w->bits = bits; w->rate = (int)rate; pthread_mutex_init(&w->lock, NULL); w->vol = 1;
+    w->au = ds_audio_open((int)rate, ch, bits, 0, render, (void *)(uintptr_t)k);
+    if (!w->au) { pthread_mutex_destroy(&w->lock); w->used = 0; RET(2, 6); }
     if (!svc) { svc = 1; extern int w32_spawn_service(void (*)(Ctx *, void *), void *); w32_spawn_service(service, 0); }
     rt_w32(G_MEM, ph, w->handle);
     if (getenv("W32_AUDIOLOG")) fprintf(stderr, "audio: waveOutOpen %u Hz, %u bits, %u ch, callback type %x\n", rate, bits, ch, w->cbtype);
@@ -154,26 +147,27 @@ IMPL(winmm, waveOutUnprepareHeader)
 IMPL(winmm, waveOutWrite)
 {
     WaveOut *w = WO(ARG(0)); uint32_t h = ARG(1); if (!w) RET(5, 3);
-    os_unfair_lock_lock(&w->lock);
+    pthread_mutex_lock(&w->lock);
     if (w->qn < 256) { rt_w32(G_MEM, h + 16, (rt_r32(G_MEM, h + 16) & ~(uint32_t)WHDR_DONE) | WHDR_INQUEUE); w->q[(w->qh + w->qn) % 256] = h; w->qn++; }
-    os_unfair_lock_unlock(&w->lock);
+    pthread_mutex_unlock(&w->lock);
     RET(0, 3);
 }
 IMPL(winmm, waveOutReset)
 {
     WaveOut *w = WO(ARG(0)); if (!w) RET(5, 1);
     uint32_t done[256]; int nd = 0;
-    os_unfair_lock_lock(&w->lock);
+    pthread_mutex_lock(&w->lock);
     while (w->qn) { uint32_t h = w->q[w->qh]; rt_w32(G_MEM, h + 16, (rt_r32(G_MEM, h + 16) & ~(uint32_t)WHDR_INQUEUE) | WHDR_DONE); done[nd++] = h; w->qh = (w->qh + 1) % 256; w->qn--; }
     w->off = 0;
-    os_unfair_lock_unlock(&w->lock);
+    pthread_mutex_unlock(&w->lock);
     for (int j = 0; j < nd; j++) note((uint32_t)(w - wos), WOM_DONE, done[j]);
     RET(0, 1);
 }
 IMPL(winmm, waveOutClose)
 {
     WaveOut *w = WO(ARG(0)); if (!w) RET(5, 1);
-    AudioOutputUnitStop(w->au); AudioComponentInstanceDispose(w->au);
+    ds_audio_close(w->au);
+    pthread_mutex_destroy(&w->lock);
     note((uint32_t)(w - wos), WOM_CLOSE, 0); w->used = 0;
     RET(0, 1);
 }

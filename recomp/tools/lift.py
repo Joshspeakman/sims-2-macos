@@ -37,8 +37,10 @@ OVERRIDES = {             # address: description (runtime/win32/hooks.c rt_overr
     0x007663b0: 'UIButton::DisableButton: the main menu keeps its Multiplayer button (GOG 2.3 disables it)',
 }
 
+RET_FORMS = ('repz ret', 'rep ret', 'bnd ret')
+
 class Lifter:
-    hooks = {}; overrides = {}
+    hooks = {}; overrides = {}; guest_flow = False
     def __init__(self, exe, analysis):
         self.pe = PE(exe); self.TLO, self.THI, self.code = code_range(self.pe)
         self.md = capstone.Cs(capstone.CS_ARCH_X86, capstone.CS_MODE_32); self.md.detail = True
@@ -50,8 +52,35 @@ class Lifter:
         if va in self.cache: return self.cache[va]
         r = None
         if self.TLO <= va < self.THI:
-            for i in self.md.disasm(self.code[va - self.TLO:va - self.TLO + 16], va, 1): r = i
+            offset = va - self.TLO
+            # The expansion's added sections contain large zero-filled work areas.
+            # Candidate data pointers into those areas are not decoded engine
+            # functions. Fail explicitly if reached; do not generate megabytes
+            # of bogus "add [eax], al" instructions from their zero padding.
+            if not (self.guest_flow and va >= 0x1136000 and self.code[offset:offset + 32] == bytes(32)):
+                for i in self.md.disasm(self.code[offset:offset + 16], va, 1): r = i
         self.cache[va] = r; return r
+
+    def code_pointer(self, va):
+        for _ in range(12):
+            i = self.ins(va)
+            if i is None or i.mnemonic in JUNK:
+                return False
+            if i.mnemonic in ('ret', 'jmp'):
+                return True
+            va += i.size
+        return True
+
+    def adjusted_return(self, target, ret):
+        """A helper can change its CALL return before entering the real callee."""
+        q = self.ins(target)
+        if q and q.mnemonic in ('add', 'sub', 'xor') and len(q.operands) == 2:
+            dst, src = q.operands
+            if (dst.type == X.X86_OP_MEM and dst.size == 4 and
+                    dst.mem.base == X.X86_REG_ESP and not dst.mem.index and
+                    not dst.mem.disp and not dst.mem.segment and src.type == X.X86_OP_IMM):
+                return {'add': ret + src.imm, 'sub': ret - src.imm, 'xor': ret ^ src.imm}[q.mnemonic] & 0xffffffff
+        return None
 
     # ---------- operands ----------
     def rreg(self, n):
@@ -114,6 +143,8 @@ class Lifter:
                 if i is None: break
                 insns[va] = i; mn = i.mnemonic; nxt = va + i.size
                 op0 = i.operands[0] if i.operands else None
+                if mn == 'call' and self.guest_flow:
+                    break  # relocated calls resume through a guest continuation
                 if mn == 'jmp':
                     if op0.type == X.X86_OP_IMM:
                         t = op0.imm & 0xffffffff
@@ -122,7 +153,7 @@ class Lifter:
                         jt = self.jumptable(i, insns, f)
                         if jt: stack.extend(jt[1])
                     break
-                if mn in ('ret', 'retf', 'int3', 'hlt', 'ud2') or mn in JUNK and mn not in ('lock', 'wait'): break
+                if mn in ('ret', 'retf', 'int3', 'hlt', 'ud2') + RET_FORMS or mn in JUNK and mn not in ('lock', 'wait'): break
                 if (mn[0] == 'j' and mn != 'jmp') or mn.startswith('loop'):
                     t = op0.imm & 0xffffffff
                     if t == f or t not in self.funcs: stack.append(t)
@@ -148,7 +179,9 @@ class Lifter:
                 bt = q.operands[1].mem.disp & 0xffffffff; m = None
                 for r in reversed(p[:p.index(q)]):
                     if r.mnemonic == 'cmp' and r.operands[1].type == X.X86_OP_IMM: m = (r.operands[1].imm & 0xffffffff) + 1; break
-                if m and m < 4096: n = max(self.pe.bytes_at(bt, m)) + 1
+                if m and m < 4096:
+                    indices = self.pe.bytes_at(bt, m)
+                    if indices: n = max(indices) + 1
                 break
             if q.mnemonic == 'mov' and q.operands[0].type == X.X86_OP_REG and q.reg_name(q.operands[0].reg) == idx \
                     and q.operands[1].type == X.X86_OP_MEM:
@@ -160,7 +193,9 @@ class Lifter:
                 break
             if q.operands and q.operands[0].type == X.X86_OP_REG and q.reg_name(q.operands[0].reg) == idx and q.mnemonic not in ('cmp', 'test'):
                 break                                   # the index was computed some other way: no usable bound
-        def ok(v): return v is not None and self.TLO <= v < self.THI and abs(v - i.address) <= 0x2000
+        def ok(v):
+            return v is not None and self.TLO <= v < self.THI and (
+                self.code_pointer(v) if self.guest_flow else abs(v - i.address) <= 0x2000)
         if n is None or n > 4096:
             # no bound found (e.g. memcpy's masked or negative indices): take the valid entries around the table
             tg = []; bad = 0
@@ -205,7 +240,9 @@ class Lifter:
         return sorted(set(out))
     def lift_function(self, f):
         insns = self.collect(f)
-        seh = self.seh_handlers(insns)
+        # Flat guest blocks return to the dispatcher at every CALL. A C stack
+        # landing pad cannot remain registered after such a block returns.
+        seh = [] if self.guest_flow else self.seh_handlers(insns)
         if seh: insns = self.collect(f, seh)
         self.cur_seh = set(seh)
         order = sorted(insns)
@@ -221,11 +258,35 @@ class Lifter:
             i = insns[va]; nxt = va + i.size
             if self.falls_through(i) and (k + 1 == len(order) or order[k + 1] != nxt): labels.add(nxt)
         out = ['void f_%08x(Ctx *c)\n{\n    REGS;\n' % f]
+        if not order:
+            out.append('    SPILL; rt_unhandled(c, 0x%08xu, "no decoded instructions at code target");\n' % f)
         if seh:
             labels.update(seh)
             out.append('    RtSehPad seh_pad;\n')
         if order and order[0] != f: out.append('    goto L_%08x;\n' % f)     # code before the entry point (reached by jumps)
         callees = set()
+        if self.guest_flow:
+            # Relocated calls adjust a pushed return address before RET. Their
+            # continuations can also be ordinary branch labels inside another
+            # block, or follow the RET/JMP used to enter a return trampoline.
+            # Computed RETs can enter a branch label in the original .text as
+            # well as in added sections (including shared engine epilogues).
+            callees.update(t for t in labels if self.TLO <= t < self.THI)
+            for va in order:
+                if va in self.jt_cache and self.jt_cache[va]:
+                    callees.update(self.jt_cache[va][1])
+            for va in order:
+                i = insns[va]
+                # VM continuations may re-enter the middle of an otherwise
+                # linear block at its saved-flags prologue. These entries are
+                # encoded in bytecode rather than named by ordinary branches.
+                if va >= 0x1136000 and i.mnemonic == 'pushfd':
+                    callees.add(va)
+                if i.mnemonic in ('ret', 'jmp'):
+                    nxt = va + i.size
+                    q = self.ins(nxt)
+                    if q and q.mnemonic not in JUNK and self.code_pointer(nxt):
+                        callees.add(nxt)
         for k, va in enumerate(order):
             i = insns[va]
             if va in labels: out.append('L_%08x:;\n' % va)
@@ -247,7 +308,10 @@ class Lifter:
             if va in self.hooks:      # native features: runtime/win32/hooks.c runs before this instruction
                 body = 'SPILL; rt_hook(c, 0x%08xu); RELOAD; /* hook: %s */ ' % (va, self.hooks[va]) + body
             if va == f and va in self.overrides:   # a native implementation may perform the whole call
-                body = 'SPILL; if (rt_override(c, 0x%08xu)) return; RELOAD; /* override: %s */ ' % (va, self.overrides[va]) + body
+                override = 'SPILL; if (rt_override(c, 0x%08xu)) return; RELOAD; ' % va
+                if self.guest_flow:
+                    override = '{ uint32_t ret = R32(esp); SPILL; if (rt_override(c, 0x%08xu)) { c->tc = ret; return; } RELOAD; } ' % va
+                body = override + '/* override: %s */ ' % self.overrides[va] + body
             out.append('#line %d "x86"\n    /* %08x: %s %s */ %s\n' % (va, va, i.mnemonic, i.op_str, body))   # debug line = guest address
             nxt = va + i.size
             if self.falls_through(i) and (k + 1 == len(order) or order[k + 1] != nxt):
@@ -265,11 +329,15 @@ class Lifter:
         return src, callees
     def falls_through(self, i):
         mn = i.mnemonic
-        if mn in ('jmp', 'ret', 'retf', 'int3', 'hlt', 'ud2'): return False
+        if mn == 'call' and self.guest_flow: return False
+        if mn in ('jmp', 'ret', 'retf', 'int3', 'hlt', 'ud2') + RET_FORMS: return False
         if mn in JUNK and mn not in ('lock', 'wait'): return False
         return True
     def goto(self, t, f, insns, callees):
         if t in insns and (t == f or t not in self.funcs or t in getattr(self, 'cur_seh', ())): return 'goto L_%08x;' % t
+        if self.guest_flow and self.TLO <= t < self.THI:
+            callees.add(t)
+            return 'c->tc = 0x%08xu; SPILL; return;' % t
         if t in self.funcs:
             callees.add(t); self.tail_edges[f].add(t)
             if self.scc_of.get(f) is not None and self.scc_of.get(f) == self.scc_of.get(t):
@@ -281,6 +349,7 @@ class Lifter:
     def emit(self, i, f, insns, callees):
         mn = i.mnemonic; ops = i.operands; va = i.address; nxt = va + i.size
         rep = None
+        if mn in RET_FORMS: mn = 'ret'                                    # 'repz ret': AMD's two-byte return
         for pfx in ('rep ', 'repe ', 'repne ', 'lock '):
             if mn.startswith(pfx): rep = pfx.strip(); mn = mn[len(pfx):]
         if rep == 'lock' and getattr(self, 'nolock', False): rep = None
@@ -291,7 +360,7 @@ class Lifter:
         if mn == 'int3': return 'SPILL; rt_exception(c, 0x%08xu, 0x80000003u); RELOAD;' % i.address          # EXCEPTION_BREAKPOINT
         if mn == 'int': return 'SPILL; rt_exception(c, 0x%08xu, 0xc0000005u); RELOAD;' % i.address            # general protection
         if mn in JUNK: raise Unsupported(mn)
-        if rep == 'lock' and mn in ('add', 'adc', 'sub', 'sbb', 'and', 'or', 'xor') and ops[0].type == X.X86_OP_MEM:
+        if rep == 'lock' and mn in ('add', 'adc', 'sub', 'sbb', 'and', 'or', 'xor', 'xadd') and ops[0].type == X.X86_OP_MEM:
             self.nolock = True                                   # the plain instruction, under the runtime's bus lock
             try: body = self.emit(i, f, insns, callees)
             finally: self.nolock = False
@@ -312,12 +381,20 @@ class Lifter:
             if o[0].type == X.X86_OP_REG and o[1].type == X.X86_OP_REG:
                 return '{ uint32_t t0 = %s, t1 = %s; %s %s }' % (self.rd(i, o[0]), self.rd(i, o[1]), self.wr(i, o[0], 't1'), self.wr(i, o[1], 't0'))
             m, r = (o[0], o[1]) if o[0].type == X.X86_OP_MEM else (o[1], o[0])
-            if m.size in (1, 2, 4) and not (m.mem.segment and i.reg_name(m.mem.segment) == 'fs'):   # implicitly locked: an atomic swap
+            if not self.guest_flow and m.size in (1, 2, 4) and not (m.mem.segment and i.reg_name(m.mem.segment) == 'fs'):   # implicitly locked: an atomic swap
                 t = {1: 'uint8_t', 2: 'uint16_t', 4: 'uint32_t'}[m.size]
                 return '{ uint32_t ea = %s; uint32_t old = __atomic_exchange_n((%s *)(M + ea), (%s)%s, __ATOMIC_SEQ_CST); %s }' % (
                     self.addr(i, m), t, t, self.rd(i, r), self.wr(i, r, 'old'))
             rx, wfn, pre = self.rmw(i, m)
-            return '{ %suint32_t t0 = %s, t1 = %s; %s %s }' % (pre, rx, self.rd(i, r), wfn('t1'), self.wr(i, r, 't0'))
+            body = '{ %suint32_t t0 = %s, t1 = %s; %s %s }' % (pre, rx, self.rd(i, r), wfn('t1'), self.wr(i, r, 't0'))
+            # x86 memory XCHG is implicitly locked. BW's dispatcher uses this
+            # for its shared context lock, including calls from other threads.
+            return 'rt_bus_lock(); %s rt_bus_unlock();' % body if self.guest_flow else body
+        if mn == 'xadd':
+            rx, wfn, pre = self.rmw(i, o[0]); size = o[0].size
+            # Write the source first: xadd r,r must leave the sum in r.
+            return '{ %suint32_t a = %s, b = %s, r = (a + b) & %s; %s %s LF(LF_ADD, %d, a, b, r); }' % (
+                pre, rx, self.rd(i, o[1]), MASK[size], self.wr(i, o[1], 'a'), wfn('r'), SZ[size])
         if mn == 'bswap': n = i.reg_name(o[0].reg); return '%s = __builtin_bswap32(%s);' % (n, n)
         if mn == 'cdq': return 'edx = (uint32_t)((int32_t)eax >> 31);'
         if mn == 'cwde': return 'eax = (uint32_t)(int32_t)(int16_t)eax;'
@@ -331,6 +408,17 @@ class Lifter:
         if mn == 'cpuid': return 'rt_cpuid(c, &eax, &ebx, &ecx, &edx);'
         if mn == 'push':
             if o[0].size != 4: raise Unsupported('push16')
+            if self.guest_flow and o[0].type == X.X86_OP_IMM:
+                target = o[0].imm & 0xffffffff
+                if target not in self.funcs and self.TLO <= target < self.THI and self.code_pointer(target):
+                    callees.add(target)
+                if va >= 0x1136000:
+                    from flow_targets import stack_targets
+                    if not hasattr(self, 'constant_targets_cache'):
+                        self.constant_targets_cache = {}
+                    if va not in self.constant_targets_cache:
+                        self.constant_targets_cache[va] = stack_targets(self, va)
+                    callees.update(self.constant_targets_cache[va])
             return '{ uint32_t v = %s; esp -= 4; W32(esp, v); }' % self.rd(i, o[0])
         if mn == 'pop':
             if o[0].size != 4: raise Unsupported('pop16')
@@ -397,10 +485,11 @@ class Lifter:
         if mn == 'call': return self.call(i, callees)
         if mn == 'ret':
             n = (o[0].imm & 0xffff) if o else 0
-            return 'esp += %du; SPILL; return;' % (4 + n)
+            return ('c->tc = R32(esp); ' if self.guest_flow else '') + 'esp += %du; SPILL; return;' % (4 + n)
         if mn == 'jmp': return self.jmp(i, f, insns, callees)
-        if mn == 'jecxz':
-            return 'if (ecx == 0) { %s }' % self.goto(o[0].imm & 0xffffffff, f, insns, callees)
+        if mn in ('jecxz', 'jcxz'):
+            counter = '(ecx & 0xffffu)' if mn == 'jcxz' else 'ecx'
+            return 'if (%s == 0) { %s }' % (counter, self.goto(o[0].imm & 0xffffffff, f, insns, callees))
         if mn in ('loop', 'loope', 'loopne'):
             cond = {'loop': 'ecx != 0', 'loope': 'ecx != 0 && CC_E', 'loopne': 'ecx != 0 && CC_NE'}[mn]
             return 'ecx--; if (%s) { %s }' % (cond, self.goto(o[0].imm & 0xffffffff, f, insns, callees))
@@ -546,6 +635,18 @@ class Lifter:
     def call(self, i, callees):
         o = i.operands[0]; ret = i.address + i.size
         push = 'esp -= 4; W32(esp, 0x%08xu); SPILL; ' % ret
+        if self.guest_flow:
+            # VM handlers can unwind a guest CALL without returning to its C
+            # caller. Keep these calls entirely on the guest stack and publish
+            # both the callee and continuation to the dispatcher.
+            callees.add(ret)
+            if o.type == X.X86_OP_IMM:
+                target = o.imm & 0xffffffff
+                callees.add(target)
+                continuation = self.adjusted_return(target, ret)
+                if continuation is not None and self.code_pointer(continuation):
+                    callees.add(continuation)
+            return '{ uint32_t t = %s; %sc->tc = t; return; }' % (self.rd(i, o), push)
         if o.type == X.X86_OP_IMM:
             t = o.imm & 0xffffffff
             if not (self.TLO <= t < self.THI): return push + 'rt_unhandled(c, 0x%08xu, "call outside code");' % t
@@ -559,12 +660,17 @@ class Lifter:
         o = i.operands[0]
         if o.type == X.X86_OP_IMM: return self.goto(o.imm & 0xffffffff, f, insns, callees)
         if o.type == X.X86_OP_MEM and not o.mem.base and not o.mem.index and (o.mem.disp & 0xffffffff) in self.imp_index:
+            if self.guest_flow:
+                return 'c->tc = %s; SPILL; return;' % self.rd(i, o)
             k = self.imp_index[o.mem.disp & 0xffffffff]
             return 'SPILL; rt_import(c, %d); return; /* %s */' % (k, self.pe.imports[o.mem.disp & 0xffffffff])
         jt = self.jt_cache.get(i.address)
         if jt:
             cases = ' '.join('case 0x%08xu: %s' % (t, self.goto(t, f, insns, callees)) for t in sorted(set(jt[1])))
-            return '{ uint32_t t = %s; switch (t) { %s default: SPILL; rt_call(c, t); return; } }' % (self.rd(i, o), cases)
+            fallback = 'c->tc = t; SPILL; return;' if self.guest_flow else 'SPILL; rt_call(c, t); return;'
+            return '{ uint32_t t = %s; switch (t) { %s default: %s } }' % (self.rd(i, o), cases, fallback)
+        if self.guest_flow:
+            return '{ uint32_t t = %s; c->tc = t; SPILL; return; }' % self.rd(i, o)
         return '{ uint32_t t = %s; SPILL; rt_call(c, t); return; }' % self.rd(i, o)
 
     # ---------- x87 ----------
@@ -618,7 +724,7 @@ class Lifter:
                    0xf5: 'rt_fprem(c, 1);', 0xf6: 'c->top = (c->top - 1) & 7;', 0xf7: 'c->top = (c->top + 1) & 7;', 0xf8: 'rt_fprem(c, 0);',
                    0xf9: 'ST(1) = rt_x87_2(2, ST(1), ST(0)); FPOP();', 0xfa: 'ST(0) = PC(sqrt(ST(0)));',
                    0xfb: '{ double t = ST(0); ST(0) = rt_x87_1(2, t); FPUSH(rt_x87_1(3, t)); c->fsw &= ~(uint32_t)FSW_C2; }',
-                   0xfc: 'ST(0) = rt_frnd(c, ST(0));', 0xfd: 'ST(0) = ldexp(ST(0), (int)trunc(ST(1)));',
+                   0xfc: 'ST(0) = rt_frnd(c, ST(0));', 0xfd: 'ST(0) = rt_fscale(ST(0), ST(1));',
                    0xfe: 'ST(0) = rt_x87_1(2, ST(0)); c->fsw &= ~(uint32_t)FSW_C2;', 0xff: 'ST(0) = rt_x87_1(3, ST(0)); c->fsw &= ~(uint32_t)FSW_C2;'}
             if modrm in one: return one[modrm]
         if op == 0xdd:
@@ -672,8 +778,18 @@ def main():
     L.imp_index = {va: a.imp_base + k for k, (va, _) in enumerate(L.imports)}
     L.illegal_seh = bool(a.tag)
     if not a.tag: L.SEH_HANDLER3 = find_except_handler3(a.exe)      # (DLLs keep the DS1 behaviour: CPU-check paths only)
-    L.hooks = {} if a.tag or a.game != 'ds2' else dict(HOOKS)
-    L.overrides = {} if a.tag or a.game != 'ds2' else dict(OVERRIDES)
+    L.hooks = {} if a.tag else dict(HOOKS)
+    L.overrides = {} if a.tag else dict(OVERRIDES)
+    if not a.tag:
+        from editions import identify, PROFILES
+        edition = 'fnv' if a.game == 'fnv' else identify(a.exe, prepared=True)
+        if edition == 'fnv':                                      # Fallout: New Vegas: none of the DS2 hooks apply
+            L.hooks = {}; L.overrides = {}
+        elif edition == 'broken-world':
+            L.guest_flow = True
+            L.hooks = dict(zip(PROFILES[edition]['hooks'], HOOKS.values()))
+            L.overrides = {PROFILES[edition]['overrides'][0]: OVERRIDES[0x67aeb6]}
+            L.overrides[0x181d35a] = 'accept the supported GOG base content CRC during save compatibility checks'
     # development: DS_TRACE_HOOKS="0x48bf51,0x713158" adds hooks that log registers and stack arguments (DS_HOOKTRACE=1)
     for h in filter(None, os.environ.get('DS_TRACE_HOOKS', '').split(',')):
         if not a.tag: L.hooks.setdefault(int(h, 16), 'trace')
@@ -683,15 +799,15 @@ def main():
         if old.startswith(pre + 'lift_') and old.endswith('.c'): os.remove(os.path.join(a.outdir, old))
     todo = sorted(L.funcs) if not a.only else [int(x, 16) for x in a.only.split(',')]
     for t in todo: L.funcs.add(t)
-    done = {}; queue = list(todo)
+    done = {}; queue = collections.deque(todo)
     while queue:
-        fva = queue.pop(0)
+        fva = queue.popleft()
         if fva in done: continue
         src, callees = L.lift_function(fva); done[fva] = src
         for t in sorted(callees):                                # call targets the analysis missed become functions
             if t not in L.funcs and not a.only: L.funcs.add(t); queue.append(t); L.discovered.append(t)
             elif a.closure and t not in done: queue.append(t)
-    sccs = find_cycles(L)
+    sccs = [] if L.guest_flow else find_cycles(L)
     if sccs:
         for k, comp in enumerate(sccs):
             for m in comp: L.scc_of[m] = k

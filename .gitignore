@@ -3,6 +3,13 @@ build/
 .DS_Store
 # never commit game files
 *.exe
+*.dll
+*.DLL
+*.asi
+*.m3d
+*.flt
+*.ds2radar
+__pycache__/
 *.dsres
 *.ds2res
 *.ds2map
@@ -15,3 +22,7 @@ recomp/.venv
 recomp/work/
 recomp/out/
 __pycache__/
+
+# Local installation credentials and audio captures
+cdkey-hash.txt
+*.wav

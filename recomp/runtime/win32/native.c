@@ -3,6 +3,7 @@
  * conversion under the current rounding mode); DS2_NATIVE=0 turns them off, DS2_NATIVE_CHECK=1 runs the original as
  * well and reports any difference. */
 #include "w32.h"
+#include "edition.h"
 
 static int native_on(void) { static int on = -1; if (on < 0) { const char *e = getenv("DS2_NATIVE"); on = !(e && !strcmp(e, "0")); } return on; }
 static int native_check(void) { static int on = -1; if (on < 0) on = getenv("DS2_NATIVE_CHECK") != 0; return on; }
@@ -29,18 +30,18 @@ static uint32_t color_add_scaled(uint32_t d, uint32_t src, uint32_t s)
  * [0xa8ec14], and 0x538690 adds the light's colour ([ebp+8]+4) times it to the vertex colour (edx+0xc, 24 bytes
  * apart): 0x538690 converts the factor with fistp of (float)(factor * [0xa8e71c]) and calls 0x5385f0. */
 static struct { int pending; uint32_t dst, n, ebx, esi, edi; uint32_t col[4096]; float last; int have_last; } chk;
-#include <mach/mach_time.h>
+#include "platform.h"
 static void light_dir_loop_(Ctx *c);
 static void light_dir_loop(Ctx *c)
 {
     static int prof = -1; if (prof < 0) prof = getenv("DS2_NATIVE_PROF") != 0;
     if (!prof) { light_dir_loop_(c); return; }
-    static uint64_t t_sum, calls, verts, last; uint64_t t0 = mach_absolute_time(); uint32_t n = c->ecx;
+    static uint64_t t_sum, calls, verts, last; uint64_t t0 = ds_clock_ns(); uint32_t n = c->ecx;
     light_dir_loop_(c);
-    uint64_t t1 = mach_absolute_time(); t_sum += t1 - t0; calls++; verts += n;
+    uint64_t t1 = ds_clock_ns(); t_sum += t1 - t0; calls++; verts += n;
     if (!last) last = t1;
-    if (t1 - last > 24000000ull * 5) {   /* every ~5 s (24 MHz timebase) */
-        fprintf(stderr, "native: light loop %llu calls, %llu vertices, %.2f ms in 5 s\n", calls, verts, t_sum / 24000.0);
+    if (t1 - last > 1000000000ull * 5) {   /* every ~5 s (nanosecond timebase) */
+        fprintf(stderr, "native: light loop %llu calls, %llu vertices, %.2f ms in 5 s\n", (unsigned long long)calls, (unsigned long long)verts, t_sum / 1000000.0);
         t_sum = calls = verts = 0; last = t1;
     }
 }
@@ -49,7 +50,7 @@ static void light_dir_loop_(Ctx *c)
     uint32_t n = c->ecx, ebp = c->ebp, fcw = c->fcw; if (!n) return;
     const uint8_t *M = G_MEM;
     double lx = rt_rf32(M, ebp - 0x30), ly = rt_rf32(M, ebp - 0x2c), lz = rt_rf32(M, ebp - 0x28), in = rt_rf32(M, ebp - 0xc);
-    double k0 = rt_rf32(M, 0xa8f338u), k1 = rt_rf32(M, 0xa8ec14u), k2 = rt_rf32(M, 0xa8e71cu);
+    double k0 = rt_rf32(M, DS2_LIGHT_ZERO), k1 = rt_rf32(M, DS2_LIGHT_ONE), k2 = rt_rf32(M, DS2_LIGHT_SCALE);
     uint32_t src = rt_r32(M, rt_r32(M, ebp + 8) + 4);                                       /* the light's colour */
     uint32_t nrm = c->esi + 8, dst = c->edx + 0xc, end_esi = nrm + 12 * n, end_edi = dst + 0x18 * n;
     int check = native_check() && n <= 4096; float last = 0; int have_last = 0;
@@ -114,7 +115,11 @@ static void light_dir_check(Ctx *c)
  * transform of the terrain's vertices (about a seventh of the game thread, called for every vertex). The x87 order:
  * out0 = (v1 m1 + v0 m0) + v2 m2, out1 = (v1 m4 + v0 m3) + v2 m5, out2 = v2 m8 + (v1 m7 + v0 m6), each product and sum
  * rounded by precision control, then stored as floats. */
-void f_0067aeb6(Ctx *c);                                 /* the recompiled original (check mode) */
+#ifdef FNV_EDITION
+static void fnv_no_mat3(Ctx *c) { (void)c; }                 /* no native hot loops for Fallout NV (yet) */
+#else
+void DS2_MAT3_FN(Ctx *c);                                 /* the recompiled original (check mode) */
+#endif
 static int mat3_bypass; static long mat3_runs, mat3_bad;
 static int mat3_apply(Ctx *c)
 {
@@ -141,7 +146,7 @@ static int mat3_apply(Ctx *c)
         #undef P
     }
     if (native_check()) {                               /* run the original here and compare with its result */
-        mat3_bypass = 1; f_0067aeb6(c); mat3_bypass = 0; mat3_runs++;
+        mat3_bypass = 1; DS2_MAT3_FN(c); mat3_bypass = 0; mat3_runs++;
         if (rt_rf32(M, out) != r[0] || rt_rf32(M, out + 4) != r[1] || rt_rf32(M, out + 8) != r[2]) {
             if (mat3_bad++ < 20) fprintf(stderr, "native: matrix differs: original %.9g %.9g %.9g, native %.9g %.9g %.9g\n",
                                          rt_rf32(M, out), rt_rf32(M, out + 4), rt_rf32(M, out + 8), r[0], r[1], r[2]);
@@ -159,7 +164,7 @@ int native_override(Ctx *c, uint32_t addr)
 {
     if (!native_on()) return 0;
     switch (addr) {
-    case 0x0067aeb6u: return mat3_apply(c);
+    case DS2_MAT3: return mat3_apply(c);
     }
     return 0;
 }
@@ -168,8 +173,8 @@ int native_hook(Ctx *c, uint32_t addr)
 {
     if (!native_on()) return 0;
     switch (addr) {
-    case 0x00544df0u: light_dir_loop(c); return 1;
-    case 0x00544ee5u: if (native_check()) light_dir_check(c); return 1;
+    case DS2_LIGHT_LOOP: light_dir_loop(c); return 1;
+    case DS2_LIGHT_AFTER: if (native_check()) light_dir_check(c); return 1;
     }
     return 0;
 }

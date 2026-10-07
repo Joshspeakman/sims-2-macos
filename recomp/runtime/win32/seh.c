@@ -10,6 +10,7 @@
 #include <sys/ucontext.h>
 #include <setjmp.h>
 #include <dlfcn.h>
+#include "platform.h"
 
 __thread Ctx *w32_cur_ctx;                     /* the guest context of this thread (set by thread entry points) */
 static __thread uint32_t exc_stack;            /* per-thread guest stack for running exception handlers */
@@ -113,11 +114,32 @@ static void on_fault(int sig, siginfo_t *si, void *uc)
     uint8_t *a = (uint8_t *)si->si_addr; Ctx *c = w32_cur_ctx;
     if (c && G_MEM && a >= G_MEM && a < G_MEM + (1ull << 32)) {
         uint32_t ga = (uint32_t)(a - G_MEM);
+        #if defined(__linux__) && defined(__x86_64__)
+        ucontext_t *u = uc;
+        uint32_t write = (u->uc_mcontext.gregs[REG_ERR] >> 1) & 1;
+        void *host_pc = (void *)u->uc_mcontext.gregs[REG_RIP];
+        /* On x86-64 the return address is on the stack, not in a link register. */
+        void *host_lr = 0;
+        /* glibc's IFUNC-selected memory routines have no exported symbol name.
+         * They are leaf routines: accept the stack return address only when the
+         * fault is in libc, then require that return address to be lifted code. */
+        Dl_info lib = {0}, memlib = {0};
+        if (dladdr(host_pc, &lib) && dladdr((void *)memmove, &memlib) &&
+            lib.dli_fbase == memlib.dli_fbase &&
+            (!lib.dli_sname || !strncmp(lib.dli_sname, "mem", 3) || !strncmp(lib.dli_sname, "__mem", 5)))
+            host_lr = *(void **)u->uc_mcontext.gregs[REG_RSP];
+#elif defined(__APPLE__) && defined(__aarch64__)
         struct __darwin_ucontext *u = uc; uint32_t esr = (uint32_t)u->uc_mcontext->__es.__esr;
-        uint32_t write = (esr >> 6) & 1;                                         /* data abort: WnR */
+        uint32_t write = (esr >> 6) & 1;
+        void *host_pc = (void *)u->uc_mcontext->__ss.__pc;
+        void *host_lr = (void *)u->uc_mcontext->__ss.__lr;
+#else
+#error Unsupported host fault context
+#endif
+        /* data abort: WnR */
         uint32_t info[2] = {write, ga};
         {   /* only faults raised by recompiled game code are the game's; anything else is a runtime bug */
-            Dl_info di = {0}; void *pc = (void *)u->uc_mcontext->__ss.__pc, *lr = (void *)u->uc_mcontext->__ss.__lr;
+            Dl_info di = {0}; void *pc = host_pc, *lr = host_lr;
             int ours = lifted_code(pc) || lifted_code(lr);                      /* lr: memmove/memset called by recompiled code (rep movs/stos) */
             /* a Windows function the runtime implements reading a game buffer that lies in a reserved archive view
              * (D3DX loading a texture straight from the archive): on Windows that fault reaches the game's exception
@@ -133,15 +155,15 @@ static void on_fault(int sig, siginfo_t *si, void *uc)
             }
         }
         if (getenv("W32_SEHLOG")) {                    /* which recompiled function faulted (f_<guest address>) */
-            Dl_info di; void *pc = (void *)u->uc_mcontext->__ss.__pc;
+            Dl_info di = {0}; void *pc = host_pc;
             fprintf(stderr, "recomp: fault %s %08x in %s+%#lx host pc %p (thread %x)\n", write ? "write" : "read", ga,
                     dladdr(pc, &di) && di.dli_sname ? di.dli_sname : "?", dladdr(pc, &di) ? (long)((char *)pc - (char *)di.dli_saddr) : 0L, pc, w32_tid(c));
         }
         if (w32_dispatch(c, EXCEPTION_ACCESS_VIOLATION, 0, 0, 2, info)) {
-            /* The host page (16 KB) is now accessible as a whole, so the game will never fault on the other guest pages
+            /* The host page (16 KB on Apple Silicon, 4 KB on x86 Linux) is now accessible as a whole, so the game will never fault on the other guest pages
              * (4 KB) in it: deliver those faults now, as touches would have, so its handler fills them too. */
             extern int vm_page_state(uint32_t);
-            for (uint32_t p = ga & ~0x3fffu; p < (ga & ~0x3fffu) + 0x4000; p += 0x1000) {
+            for (uint32_t p = ga & ~(ds_page_size() - 1); p < (ga & ~(ds_page_size() - 1)) + ds_page_size(); p += 0x1000) {
                 if (p == (ga & ~0xfffu) || vm_page_state(p) != 1) continue;
                 uint32_t ni[2] = {0, p};
                 w32_dispatch(c, EXCEPTION_ACCESS_VIOLATION, 0, 0, 2, ni);

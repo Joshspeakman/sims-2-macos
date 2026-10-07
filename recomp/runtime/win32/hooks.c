@@ -5,6 +5,7 @@
  *              0 to run the original.
  * The DS1 port's hooks (draw distance, Skrit messages, shadows, paper doll, expansion) are the model for these. */
 #include "w32.h"
+#include "edition.h"
 #include "ext.h"
 
 static float gf(uint32_t a) { float v; uint32_t u = rt_r32(G_MEM, a); memcpy(&v, &u, 4); return v; }
@@ -55,7 +56,7 @@ void rt_hook(Ctx *c, uint32_t addr)
 {
     if (native_hook(c, addr)) return;
     switch (addr) {
-    case 0x0090a076u: mood_read(c); break;
+    case DS2_MOOD_READ: mood_read(c); break;
     default:   /* development trace hooks (tools/lift.py DS_TRACE_HOOKS) */
         if (getenv("DS_HOOKTRACE")) fprintf(stderr, "hook %08x: eax %08x ecx %08x edx %08x ebx %08x esi %08x edi %08x | ret %08x args %08x %08x %08x %08x\n",
                                             addr, c->eax, c->ecx, c->edx, c->ebx, c->esi, c->edi, rt_r32(G_MEM, c->esp), rt_r32(G_MEM, c->esp + 4),
@@ -83,7 +84,20 @@ int rt_override(Ctx *c, uint32_t addr)
 {
     if (native_override(c, addr)) return 1;
     switch (addr) {
+#ifdef DS2_BROKEN_WORLD
+    case 0x0181d35au:
+        /* BW's original allowlist omits the supported GOG base content CRC.
+         * That base profile writes this CRC; without it Convert Hero
+         * reads the save, then silently hides it. Keep all other CRCs on the
+         * original path, as well as the caller's version/format validation.
+         * This function returns bool in AL and uses RET 4. */
+        if (rt_r32(G_MEM, c->esp + 4) != 0xd4ee4a9fu) return 0;
+        c->eax = (c->eax & 0xffffff00u) | 1u;
+        c->esp += 8;
+        return 1;
+#else
     case 0x007663b0u: return keep_multiplayer_button(c);
+#endif
     }
     return 0;
 }

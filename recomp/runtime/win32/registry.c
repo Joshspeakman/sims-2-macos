@@ -1,5 +1,6 @@
 /* ADVAPI32 registry: an in-memory tree (empty at start; the GOG game keeps its settings in INI files). */
 #include "w32.h"
+#include "edition.h"
 
 typedef struct RVal { char name[128]; uint32_t type, size; uint8_t *data; } RVal;
 typedef struct RKey { char path[512]; RVal *v; int nv; } RKey;
@@ -51,6 +52,24 @@ void w32_reg_string(const char *path, const char *name, const char *str)
  *                   CDKey". Only the hash is kept, never the key. */
 void w32_registry_install(const char *data_dir)
 {
+#ifdef FNV_EDITION
+    /* where Fallout NV (and its tools) look for the installation; the virtual game folder is the same for every game */
+    w32_reg_string("hklm\\software\\bethesda softworks\\falloutnv", "Installed Path", "C:\\GOG Games\\Dungeon Siege\\");
+    w32_reg_string("hklm\\software\\wow6432node\\bethesda softworks\\falloutnv", "Installed Path", "C:\\GOG Games\\Dungeon Siege\\");
+#endif
+#ifdef DS2_BROKEN_WORLD
+    /* BW loads the original campaign resources from this installer location.
+     * The native asset view contains both sets of files under the same virtual
+     * game directory. No host registry or Windows installation is required. */
+    const char *install_keys[] = {
+        "hklm\\software\\microsoft\\microsoft games\\dungeonsiege2",
+        "hklm\\software\\2k games\\dungeon siege 2 broken world"
+    };
+    for (unsigned i = 0; i < sizeof install_keys / sizeof install_keys[0]; i++) {
+        w32_reg_string(install_keys[i], "AppPath", "C:\\GOG Games\\Dungeon Siege");
+        w32_reg_string(install_keys[i], "InstallationDirectory", "C:\\GOG Games\\Dungeon Siege");
+    }
+#endif
     char p[1200], hex[64] = ""; snprintf(p, sizeof p, "%s/cdkey-hash.txt", data_dir);
     FILE *f = fopen(p, "r"); if (!f) return;
     if (!fgets(hex, sizeof hex, f)) hex[0] = 0;
@@ -80,17 +99,19 @@ static RKey *rh[256];
 static RKey *key_of(uint32_t h) { uint32_t i = (h - HREG_BASE) / 4; return (h >= HREG_BASE && i < 256) ? rh[i] : 0; }
 static uint32_t new_handle(RKey *k) { for (int i = 1; i < 256; i++) if (!rh[i]) { rh[i] = k; return HREG_BASE + 4 * (uint32_t)i; } return 0; }
 
-IMPL(advapi32, RegOpenKeyExA)
+static uint32_t reg_open(uint32_t parent, uint32_t subkey, uint32_t out)
 {
-    char p[1024]; uint32_t out = ARG(4);
+    char p[1024] = "";
     reg_seed();
     pthread_mutex_lock(&rlock);
-    RKey *k = full_path(ARG(0), ARG(1) ? GS(ARG(1)) : "", p, sizeof p) ? 0 : lookup(p, 0);
+    RKey *k = full_path(parent, subkey ? GS(subkey) : "", p, sizeof p) ? 0 : lookup(p, 0);
     uint32_t h = k ? new_handle(k) : 0;
     pthread_mutex_unlock(&rlock);
-    if (!k) { if (getenv("W32_REGLOG")) fprintf(stderr, "w32: registry key %s not found\n", p); RET(2, 5); }   /* ERROR_FILE_NOT_FOUND */
-    rt_w32(G_MEM, out, h); RET(0, 5);
+    if (!k) { if (getenv("W32_REGLOG")) fprintf(stderr, "w32: registry key %s not found\n", p); return 2; }   /* ERROR_FILE_NOT_FOUND */
+    rt_w32(G_MEM, out, h); return 0;
 }
+IMPL(advapi32, RegOpenKeyExA) { RET(reg_open(ARG(0), ARG(1), ARG(4)), 5); }
+IMPL(advapi32, RegOpenKeyA) { RET(reg_open(ARG(0), ARG(1), ARG(2)), 3); }
 IMPL(advapi32, RegCreateKeyExA)
 {
     char p[1024]; uint32_t out = ARG(7), disp = ARG(8);

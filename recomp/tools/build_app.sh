@@ -3,6 +3,7 @@
 # (run build.sh first). Produces <outdir>/app/DungeonSiegeNative with shaders.metal and dsr_snapshot.bin beside it.
 set -euo pipefail
 HERE="$(cd "$(dirname "$0")/.." && pwd)"; ROOT="$(cd "$HERE/.." && pwd)"; OUT="$1"; APP="$OUT/app"
+if [[ $(uname -s) == Linux ]]; then exec "$HERE/tools/build_linux.sh" "$OUT"; fi
 mkdir -p "$APP" "$OUT/obj/host"
 BUILD="$(git -C "$HERE" describe --always --dirty 2>/dev/null || echo unknown)"
 clang -c -O2 -fobjc-arc -Wall -Wno-unused-function -I "$HERE/runtime" -DDS_BUILD="\"$BUILD\"" -o "$OUT/obj/host/main.o" "$HERE/host/main.m"

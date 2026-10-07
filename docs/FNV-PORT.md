@@ -6,6 +6,55 @@ This branch takes the static recompiler from this repository (x86 → C → clan
 `setup_fallout_new_vegas_1.4.0.525_(12010).exe`). As with Dungeon Siege, nothing from the game is committed. All
 generated code goes under `recomp/work/`, which git ignores.
 
+## Linux port status (2026-10-07, this repository)
+
+The whole executable plus Bink and both Vorbis DLLs link into `FalloutNVLinux` (libvorbisfile is relocated to
+0x11000000, see `tools/rebase_pe.py`); all 280 imports are implemented. Checked against the original game running
+under Proton in headless gamescope (`tests/fnv_ref.py`, `tests/scenario.py`), same inputs, same moments:
+
+- intro movie, main menu and its music, new game, Doc Mitchell's dialogue (voices correlate 0.999 with a reference
+  decode), subtitles, name entry, the Reflectron (face), the DLC messages, saving, loading (Continue)
+- Goodsprings by day, dusk and night, the saloon, Vault 22, the Lucky 38 penthouse (30-50 dB PSNR against the
+  original); the pause menu; the Pip-Boy (35 dB); a gecko next to the player (creature rendering, the combat HUD)
+- the intro movie's sound: correlation 1.0000 with a reference decode of FNVIntro.bik (`tools/audiocmp.py`)
+- a 10-minute tour through 12 interiors (Lucky 38, Gomorrah, the Tops, Hoover Dam, Vaults 11 and 22, Freeside,
+  Novac, Primm, Hidden Valley, Forlorn Hope): no crash; player position and heading after a `coc` read back
+  identical to the original's
+- all 1809 unique shaders in the game's .sdp packages translate (MojoShader, patched) and compile
+  (`tools/sdp_glsl_check.c`)
+
+Fixed while comparing: D3D9 pixel centres (night was rendered as day: the 1x1 adaptation quad never rasterised),
+16 samplers (yellow terrain), occlusion queries (sun glare indoors), blend/scissor/depth-bias/two-sided stencil,
+and relatively addressed constant arrays (skinned meshes thrown across the screen as dark planes: FNV's skinning
+shaders declare 18 bones and index 26+, see `third_party/mojoshader/README.md`), and silence after loading a save
+(the DirectSound mixer waited for the primary buffer to be played, which only the intro movie's player does).
+Also checked: firing a pistol (ammo, recoil, shot sounds), containers and the quantity dialog, mouse hover and
+clicks in menus and message boxes (scripts need `mmove`, the real mouse path: message boxes follow the Windows
+cursor, which `dimove` doesn't move). The launch window (`recomp/host/linux_launcher/fnv_launcher.py`, as the original's launcher does) sets the
+render resolution (any size, ultrawide presets, Custom), full screen or windowed, the frame rate (60 by default;
+any cap, the display's rate with VSync, or unlimited: the host sets Fallout.ini's `[HAVOK] fMaxTime` to 1 / rate so
+physics keep up) and antialiasing (FXAA, MSAA 2/4/8x, MSAA + FXAA; the renderer's own, as a driver override: the
+game's MSAA path draws its scene without a depth buffer here). Environment: `DS_RESOLUTION`, `DS_WINDOW_MODE`,
+`DSR_FPSCAP`, `DSR_VSYNC`, `DSR_MSAA`, `DSR_FXAA`; `FNV_NO_LAUNCHER=1` skips the window.
+
+VATS: the tutorial panel, the targeting camera and body-part highlight with hit chances, and queued attacks firing
+(ten geckos placed with AI off so one is in view; not compared with the original, whose spawn spots differ).
+
+Not yet verified: the VATS kill cam (it fell between screenshots), the end slides, and the third `coc` of `load-cells` (Gomorrah) whose third-person camera faces differently from the
+original's (15 dB; the player's position and heading read back identical, the camera after chained `coc`s does not).
+
+`tests/saves/fnvtest1.fos` is a save made just after character creation; the `load-*` scenarios start from it.
+
+Still to do:
+1. Performance: done for Linux. Vertex and index buffers are kept on the GPU (DSR_VBUF_DATA, only the ranges the game
+   locked are sent again) and shader draws name buffers and D3D element types (DSR_DRAW_PROG_VB): Goodsprings went
+   from 30 to ~100 fps, the interior tour from a median of ~30 to 123. `W32_PROFILE` + `tools/profile.py` is a
+   sampling profiler for the next round. User-pointer draws still take the float4 path.
+2. The Mac side (also needs the three buffer records in `renderer.m`; until then the D3D9 layer uses them on Linux only): MojoShader's Metal profile in place of GLSL; `renderer.m` needs DSR_GLSL_CREATE's MSL equivalent.
+3. The 127 unresolved jump tables, `_except_handler4`, C++ exceptions if the game throws.
+
+The installer note below refers to the macOS repository's `game-installer` release (this repository has none).
+
 ## Status (2026-10-06, done on Linux x86-64)
 
 | Step | State |

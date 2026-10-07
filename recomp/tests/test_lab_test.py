@@ -8,10 +8,10 @@ import unittest
 from unittest.mock import patch
 import zlib
 
-sys.path.insert(0, str(Path(__file__).resolve().parents[1] / 'host/test_lab'))
+sys.path.insert(0, str(Path(__file__).resolve().parents[1] / 'host/linux_launcher'))
 from lab_content import Tank, parse_gas, flatten
 from lab_commands import Bridge, command
-from lab_tool import SAVE_RELATIVE, copy_saves, MacBridge
+from lab_session import SAVE_RELATIVE, copy_saves, launch_environment
 
 
 def archive(path, content, compressed=False, extra=b''):
@@ -128,11 +128,14 @@ class SessionTests(unittest.TestCase):
             self.assertEqual(next((lab/'save-backups').glob('*/Hero/Hero.ds2party')).read_bytes(), b'lab changes')
             self.assertFalse((lab/'cdkey-hash.txt').exists())
 
-    def test_mac_history_names_its_backend(self):
-        with tempfile.TemporaryDirectory() as root:
-            bridge = MacBridge(root); bridge.send('refill')
-            record = json.loads((Path(root)/'lab/history.jsonl').read_text().splitlines()[0])
-            self.assertEqual(record['backend'], 'macos-metal')
+    def test_lab_uses_chosen_graphics_but_removes_input_and_key_overrides(self):
+        with patch.dict('os.environ', {'DS_TEST':'1','DS_SCRIPT':'inherited','DS_EXIT_AFTER':'1','DS2_CDKEY':'synthetic'}):
+            env = launch_environment({'resolution':'3440x1440','frameRate':'244','windowMode':'fullscreen'}, '/tmp/lab')
+        self.assertEqual(env['DS_RESOLUTION'], '3440x1440')
+        self.assertEqual(env['DSR_FPSCAP'], '244')
+        self.assertEqual(env['DS_WINDOW_MODE'], 'windowed')
+        self.assertEqual(env['DS_TEST_LAB'], '1')
+        for name in ('DS_TEST','DS_SCRIPT','DS_EXIT_AFTER','DS2_CDKEY'): self.assertNotIn(name, env)
 
 
 if __name__ == '__main__': unittest.main()

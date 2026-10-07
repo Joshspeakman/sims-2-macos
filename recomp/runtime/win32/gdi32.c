@@ -1,15 +1,23 @@
 /* GDI32: device contexts, memory bitmaps and TrueType text through Core Text (the game rasterises font glyphs
  * with ExtTextOutA and reads them back with GetPixel/GetDIBits to build font textures). */
 #include "w32.h"
+#ifdef __APPLE__
 #include <CoreText/CoreText.h>
 #include <CoreGraphics/CoreGraphics.h>
+typedef CTFontRef HostFont;
+#else
+#include <ft2build.h>
+#include FT_FREETYPE_H
+#include <fontconfig/fontconfig.h>
+typedef FT_Face HostFont;
+#endif
 
 extern int w32_screen_w, w32_screen_h;
 enum { G_DC = 1, G_BITMAP, G_FONT, G_BRUSH, G_PEN, G_STOCK };
 typedef struct GObj {
     int type;
     /* bitmap */ int bw, bh; uint32_t *px;            /* 0x00RRGGBB per pixel, top-down */
-    /* font */   CTFontRef font; int height, weight, italic; char face[64]; int ascent, descent, internal_leading, avg_w, max_w;
+    /* font */   HostFont font; int height, weight, italic; char face[64]; int ascent, descent, internal_leading, avg_w, max_w;
     /* dc */     uint32_t bitmap, fontsel, text_color, bk_color; int bk_mode;
     uint32_t color;
 } GObj;
@@ -47,7 +55,13 @@ IMPL(gdi32, DeleteObject)
     uint32_t h = ARG(0), k = (h - GBASE) / 4; GObj *o = G(h, 0);
     if (!o) RET(1, 1);
     if (o->type == G_BITMAP) free(o->px);
-    if (o->type == G_FONT && o->font) CFRelease(o->font);
+    if (o->type == G_FONT && o->font) {
+#ifdef __APPLE__
+        CFRelease(o->font);
+#else
+        FT_Done_Face(o->font);
+#endif
+    }
     free(o); gtab[k] = 0; RET(1, 1);
 }
 IMPL(gdi32, SelectObject)
@@ -75,6 +89,7 @@ IMPL(gdi32, GetDeviceCaps)
 IMPL(gdi32, DPtoLP) { RET(1, 3); }
 
 /* ---- fonts ---- */
+#ifdef __APPLE__
 static CFStringRef mac_face(const char *face)
 {
     static const char *map[][2] = {{"ms sans serif", "Arial"}, {"ms serif", "Times New Roman"}, {"system", "Arial"},
@@ -103,6 +118,39 @@ static uint32_t make_font(int height, int weight, int italic, const char *face)
     o->avg_w = (int)lround(adv[0].width); o->max_w = (int)lround(adv[1].width);
     return g_new(o);
 }
+#else
+static FT_Library ft_library;
+static pthread_once_t font_once = PTHREAD_ONCE_INIT;
+static void init_fonts(void) { FT_Init_FreeType(&ft_library); FcInit(); }
+static uint32_t make_font(int height, int weight, int italic, const char *face) {
+    pthread_once(&font_once, init_fonts); if (!ft_library) return 0;
+    GObj *o = calloc(1, sizeof *o); if (!o) return 0;
+    o->type = G_FONT; o->height = height; o->weight = weight; o->italic = italic;
+    snprintf(o->face, sizeof o->face, "%s", face);
+    const char *family = *face ? face : "Arial";
+    if (!strcasecmp(face, "ms sans serif") || !strcasecmp(face, "system") || !strcasecmp(face, "ms shell dlg")) family = "sans-serif";
+    if (!strcasecmp(face, "fixedsys") || !strcasecmp(face, "terminal")) family = "monospace";
+    FcPattern *pattern = FcPatternCreate();
+    FcPatternAddString(pattern, FC_FAMILY, (const FcChar8 *)family);
+    FcPatternAddInteger(pattern, FC_WEIGHT, weight >= 600 ? FC_WEIGHT_BOLD : FC_WEIGHT_REGULAR);
+    FcPatternAddInteger(pattern, FC_SLANT, italic ? FC_SLANT_ITALIC : FC_SLANT_ROMAN);
+    FcConfigSubstitute(NULL, pattern, FcMatchPattern); FcDefaultSubstitute(pattern);
+    FcResult result; FcPattern *match = FcFontMatch(NULL, pattern, &result); FcChar8 *file = NULL; int index = 0;
+    int ok = match && FcPatternGetString(match, FC_FILE, 0, &file) == FcResultMatch;
+    if (ok) { FcPatternGetInteger(match, FC_INDEX, 0, &index); ok = !FT_New_Face(ft_library, (const char *)file, index, &o->font); }
+    if (match) FcPatternDestroy(match); FcPatternDestroy(pattern);
+    if (!ok) { free(o); return 0; }
+    double size = height < 0 ? -height : height > 0 ? (double)height * o->font->units_per_EM / (o->font->ascender - o->font->descender) : 12;
+    if (size < 1) size = 1;
+    FT_Set_Char_Size(o->font, 0, (FT_F26Dot6)lround(size * 64), 72, 72);
+    o->ascent = (int)((o->font->size->metrics.ascender + 63) >> 6);
+    o->descent = (int)((-o->font->size->metrics.descender + 63) >> 6);
+    o->internal_leading = o->ascent + o->descent - (int)lround(size); if (o->internal_leading < 0) o->internal_leading = 0;
+    FT_Load_Char(o->font, 'x', FT_LOAD_DEFAULT); o->avg_w = (int)((o->font->glyph->advance.x + 32) >> 6);
+    FT_Load_Char(o->font, 'W', FT_LOAD_DEFAULT); o->max_w = (int)((o->font->glyph->advance.x + 32) >> 6);
+    return g_new(o);
+}
+#endif
 IMPL(gdi32, CreateFontA) { RET(make_font((int)ARG(0), (int)ARG(4), (int)ARG(5), ARG(13) ? GS(ARG(13)) : ""), 14); }
 IMPL(gdi32, CreateFontIndirectA)
 {
@@ -121,12 +169,19 @@ IMPL(gdi32, GetTextMetricsA)
     rt_w8(G_MEM, t + 48, (uint8_t)f->italic); rt_w8(G_MEM, t + 51, 0x06);   /* TMPF_VECTOR | TMPF_TRUETYPE */
     RET(1, 2);
 }
+#ifdef __APPLE__
 static double advance(GObj *f, uint16_t ch)
 {
     UniChar u = ch; CGGlyph g; CGSize a = {0, 0};
     if (CTFontGetGlyphsForCharacters(f->font, &u, &g, 1)) CTFontGetAdvancesForGlyphs(f->font, kCTFontOrientationHorizontal, &g, &a, 1);
     return a.width;
 }
+#else
+static double advance(GObj *f, uint16_t ch) {
+    if (FT_Load_Char(f->font, ch, FT_LOAD_DEFAULT)) return 0;
+    return f->font->glyph->advance.x / 64.0;
+}
+#endif
 IMPL(gdi32, GetCharWidthA)
 {
     GObj *f = dc_font(dc_of(ARG(0))); uint32_t first = ARG(1), last = ARG(2), out = ARG(3); if (!f) RET(0, 4);
@@ -137,6 +192,7 @@ IMPL(gdi32, GetCharWidthA)
     RET(1, 4);
 }
 /* draw UTF-16 text at (x, y) = top-left of the text cell, in the DC's text colour (and background when OPAQUE) */
+#ifdef __APPLE__
 static void draw_text(GObj *d, int x, int y, const uint16_t *s, int n)
 {
     GObj *bm = G(d->bitmap, G_BITMAP), *f = dc_font(d);
@@ -164,6 +220,31 @@ static void draw_text(GObj *d, int x, int y, const uint16_t *s, int n)
     CTLineDraw(line, cg);
     CFRelease(line); CFRelease(as); CFRelease(attrs); CGColorRelease(col); CFRelease(str); CGContextRelease(cg);
 }
+#else
+static uint32_t rgb_from_colorref(uint32_t c) { return ((c & 255) << 16) | (c & 0xff00) | ((c >> 16) & 255); }
+static void draw_text(GObj *d, int x, int y, const uint16_t *s, int n) {
+    GObj *bm = G(d->bitmap, G_BITMAP), *f = dc_font(d); if (!bm || !f || n <= 0) return;
+    double width = 0; for (int i = 0; i < n; ++i) width += advance(f, s[i]);
+    uint32_t fg = rgb_from_colorref(d->text_color), bg = rgb_from_colorref(d->bk_color);
+    if (d->bk_mode == 2) for (int yy = y; yy < y + f->ascent + f->descent; ++yy)
+        for (int xx = x; xx < x + (int)ceil(width); ++xx) if (xx >= 0 && xx < bm->bw && yy >= 0 && yy < bm->bh) bm->px[yy * bm->bw + xx] = bg;
+    double pen = x;
+    for (int i = 0; i < n; ++i) {
+        if (FT_Load_Char(f->font, s[i], FT_LOAD_RENDER | FT_LOAD_TARGET_NORMAL)) continue;
+        FT_GlyphSlot g = f->font->glyph; FT_Bitmap *b = &g->bitmap;
+        for (unsigned row = 0; row < b->rows; ++row) for (unsigned col = 0; col < b->width; ++col) {
+            int xx = (int)lround(pen) + g->bitmap_left + (int)col, yy = y + f->ascent - g->bitmap_top + (int)row;
+            if (xx < 0 || xx >= bm->bw || yy < 0 || yy >= bm->bh) continue;
+            const unsigned char *src = b->buffer + (b->pitch >= 0 ? row : b->rows - 1 - row) * abs(b->pitch);
+            unsigned a = b->pixel_mode == FT_PIXEL_MODE_MONO ? ((src[col / 8] >> (7 - col % 8)) & 1) * 255 : src[col];
+            uint32_t old = bm->px[yy * bm->bw + xx], color = 0;
+            for (int shift = 0; shift <= 16; shift += 8) color |= ((((fg >> shift) & 255) * a + ((old >> shift) & 255) * (255 - a) + 127) / 255) << shift;
+            bm->px[yy * bm->bw + xx] = color;
+        }
+        pen += g->advance.x / 64.0;
+    }
+}
+#endif
 IMPL(gdi32, ExtTextOutA)
 {
     GObj *d = dc_of(ARG(0)); uint32_t s = ARG(5); int n = (int)ARG(6);

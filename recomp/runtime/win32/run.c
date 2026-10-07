@@ -1,5 +1,6 @@
 /* Running the game for real (not the harness): load, main thread context, entry point on a big-stack thread. */
 #include "w32.h"
+#include "edition.h"
 #include <setjmp.h>
 extern __thread jmp_buf *fault_jmp; extern __thread uint32_t fault_pc; extern __thread const char *fault_what;
 extern __thread jmp_buf *w32_exit_jmp;
@@ -12,6 +13,9 @@ int w32_prepare(const char *exe, const char *game_dir, const char *drive_c, cons
     snprintf(w32_drive_c, sizeof w32_drive_c, "%s", drive_c);
     snprintf(w32_game_overlay, sizeof w32_game_overlay, "%s", overlay ? overlay : "");
     w32_deterministic = 0;
+#ifdef FNV_EDITION
+    rt_cpuid_sse2 = 1;                         /* an SSE2 CPU: the code was compiled for one (tools/sse.py lifts it) */
+#endif
     extern int w32_protect_memory; void w32_seh_init(void);
     w32_protect_memory = getenv("W32_NOPROTECT") ? 0 : 1;
     if (w32_load(exe)) return -1;

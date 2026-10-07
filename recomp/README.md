@@ -1,7 +1,8 @@
-# Recompiler: Dungeon Siege II as native arm64 code
+# Recompiler: Dungeon Siege II as native code
 
 Static recompilation of the user's own GOG 2.3 `DungeonSiege2.exe` (and the Miles and Bink DLLs in its folder) into
-C, compiled for Apple Silicon. Nothing derived from the game is committed: `build.sh` regenerates everything locally
+C, compiled for Apple Silicon or Linux x86-64. Linux build status and instructions are in the
+[root README](../README.md); the tables and shader notes below describe the upstream Mac implementation. Nothing derived from the game is committed: `build.sh` regenerates everything locally
 from the user's files. Installing and playing: [README](../README.md); plan and open work: [docs/PLAN.md](../docs/PLAN.md).
 
 ```sh

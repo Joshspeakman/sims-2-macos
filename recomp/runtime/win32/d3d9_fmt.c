@@ -6,6 +6,7 @@
 enum { F_A8R8G8B8 = 21, F_X8R8G8B8 = 22, F_R5G6B5 = 23, F_X1R5G5B5 = 24, F_A1R5G5B5 = 25, F_A4R4G4B4 = 26, F_R3G3B2 = 27, F_A8 = 28,
        F_A8R3G3B2 = 29, F_X4R4G4B4 = 30, F_A8B8G8R8 = 32, F_X8B8G8R8 = 33, F_L8 = 50, F_A8L8 = 51, F_A4L4 = 52, F_V8U8 = 60,
        F_D16 = 80, F_D24S8 = 75, F_D24X8 = 77, F_D32 = 71, F_D15S1 = 73, F_D16_LOCKABLE = 70,
+       F_R16F = 111, F_G16R16F = 112, F_A16B16G16R16F = 113, F_R32F = 114, F_G32R32F = 115, F_A32B32G32R32F = 116,
        F_DXT1 = 0x31545844, F_DXT2 = 0x32545844, F_DXT3 = 0x33545844, F_DXT4 = 0x34545844, F_DXT5 = 0x35545844 };
 
 int d9_fmt_block(uint32_t f) { return f == F_DXT1 ? 8 : (f >= F_DXT2 && f <= F_DXT5 && (f & 0xffffff) == 0x545844) ? 16 : 0; }
@@ -16,9 +17,14 @@ int d9_fmt_bytes(uint32_t f)           /* bytes per pixel (0: block-compressed o
     case F_R5G6B5: case F_X1R5G5B5: case F_A1R5G5B5: case F_A4R4G4B4: case F_X4R4G4B4: case F_A8L8: case F_V8U8: case F_A8R3G3B2:
     case F_D16: case F_D15S1: case F_D16_LOCKABLE: return 2;
     case F_A8: case F_L8: case F_A4L4: case F_R3G3B2: return 1;
+    case F_R16F: return 2;
+    case F_G16R16F: case F_R32F: return 4;
+    case F_A16B16G16R16F: case F_G32R32F: return 8;
+    case F_A32B32G32R32F: return 16;
     }
     return 0;
 }
+int d9_fmt_float(uint32_t f) { return f >= F_R16F && f <= F_A32B32G32R32F; }   /* render targets only: no CPU conversion */
 int d9_fmt_known(uint32_t f) { return d9_fmt_bytes(f) || d9_fmt_block(f); }
 int d9_fmt_depth(uint32_t f) { return f == F_D16 || f == F_D24S8 || f == F_D24X8 || f == F_D32 || f == F_D15S1 || f == F_D16_LOCKABLE; }
 int d9_fmt_alpha(uint32_t f)           /* does the format carry alpha (else the renderer treats it as XRGB) */
