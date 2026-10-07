@@ -33,8 +33,10 @@ clicks in menus and message boxes (scripts need `mmove`, the real mouse path: me
 cursor, which `dimove` doesn't move). The frame rate is capped at 60 by default (`DSR_FPSCAP`): Gamebryo's physics
 and animation misbehave above it, as on Windows without a frame limiter.
 
-Not yet verified: VATS (the scripted runs never got a target in the crosshair; neither did the reference), the
-end slides, and the third `coc` of `load-cells` (Gomorrah) whose third-person camera faces differently from the
+VATS: the tutorial panel, the targeting camera and body-part highlight with hit chances, and queued attacks firing
+(ten geckos placed with AI off so one is in view; not compared with the original, whose spawn spots differ).
+
+Not yet verified: the VATS kill cam (it fell between screenshots), the end slides, and the third `coc` of `load-cells` (Gomorrah) whose third-person camera faces differently from the
 original's (15 dB; the player's position and heading read back identical, the camera after chained `coc`s does not).
 
 `tests/saves/fnvtest1.fos` is a save made just after character creation; the `load-*` scenarios start from it.
