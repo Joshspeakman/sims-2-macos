@@ -77,7 +77,7 @@ static void render(void *u, void *buffer, uint32_t frames)
         static const char *dumpdir; static int dd_init; if (!dd_init) { dd_init = 1; dumpdir = getenv("W32_DSDUMP"); }
         if (dumpdir && !b->dump) {
             static uint32_t serial; char path[1024]; b->serial = ++serial;
-            snprintf(path, sizeof path, "%s/%05u-buf%03d-%dHz-%dch.raw", dumpdir, b->serial, k, b->freq ? (int)b->freq : b->rate, b->ch);
+            snprintf(path, sizeof path, "%s/%05u-buf%03d-src%dHz-%dch-out%dHz.raw", dumpdir, b->serial, k, b->freq ? (int)b->freq : b->rate, b->ch, OUT_RATE);   /* samples at the output rate */
             b->dump = fopen(path, "wb");
         }
         for (uint32_t i = 0; i < frames; i++) {

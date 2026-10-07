@@ -51,8 +51,9 @@ def _():
 def _():
     s, t = world(100, 'set gamehour to 19', 'player.setangle x 0', 'player.setangle z 220'); return s + [(t + 10, 'shot', 'dusk')]
 def travel(t0, *cmds):                 # after loading: commands ending in a coc, then (once it has loaded) menus hidden
-    s, t = console(t0, *cmds); s2, t2 = console(t + 25, 'tm')
-    return LOAD + s + s2, t2
+    s, t = console(t0, *cmds); s = s[:-1]             # the console stays open through the load (its closing key is lost)
+    at = t + 25; s2 = [(at, 'type', 'tm'), (at + 1.5, 'key', 'Return'), (at + 3, 'key', 'grave')]
+    return LOAD + s + s2, at + 4
 @scenario('load-saloon', 150)
 def _():
     s, t = travel(100, 'coc GSProspectorSaloonInterior'); return s + [(t + 4, 'shot', 'saloon')]

@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """audiocmp.py <native.raw> <reference audio file> [rate] : how closely a stream the port played (a W32_DSDUMP
-dump: s16 stereo at the mixer rate) matches a reference decode (anything ffmpeg reads). Finds the reference offset
+dump: s16 stereo at the mixer rate, 44100 Hz) matches a reference decode (anything ffmpeg reads). Finds the reference offset
 of a few windows of the dump by cross-correlation and prints, per window, that offset and the normalised correlation
 (1.0 = identical up to gain), plus the gain ratio. A port that plays the stream right scores > 0.99 everywhere at
 offsets that advance with the window."""
@@ -8,7 +8,7 @@ import sys, subprocess
 import numpy as np
 
 nat_path, ref_path = sys.argv[1], sys.argv[2]
-rate = int(sys.argv[3]) if len(sys.argv) > 3 else 48000
+rate = int(sys.argv[3]) if len(sys.argv) > 3 else 44100
 nat = np.fromfile(nat_path, dtype='<i2').astype(np.float64).reshape(-1, 2).mean(1)
 ref = np.frombuffer(subprocess.run(['ffmpeg', '-v', 'error', '-i', ref_path, '-f', 's16le', '-ac', '2', '-ar', str(rate), '-'],
                                    capture_output=True, check=True).stdout, dtype='<i2').astype(np.float64).reshape(-1, 2).mean(1)
