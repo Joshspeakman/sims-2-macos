@@ -144,6 +144,7 @@ static uint32_t frames;
 /* ---- command encoder: an in-process ring (dsr_shm.h layout); a consumer (the Metal renderer) attaches later ---- */
 #define NULL_RING_SIZE (32u << 20)
 static DsrShmHeader *shm; static uint8_t *shm_ring; static uint32_t wpos;
+volatile uint32_t *dsr_query_results(void) { return shm ? (volatile uint32_t *)((uint8_t *)shm + DSR_QUERY_OFFSET) : 0; }   /* count[], serial[] */
 static uint8_t *ring, *cur; static uint32_t ring_pos, cur_size;
 static pthread_mutex_t cmd_lock = PTHREAD_MUTEX_INITIALIZER;
 static uint32_t dsr_readbacks, dsr_uploads;

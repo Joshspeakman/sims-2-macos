@@ -17,7 +17,8 @@ enum { RT_SURFACE = 1, RT_VOLUME, RT_TEXTURE, RT_VOLUMETEXTURE, RT_CUBETEXTURE, 
 enum { USAGE_RENDERTARGET = 1, USAGE_DEPTHSTENCIL = 2, USAGE_WRITEONLY = 8, USAGE_DYNAMIC = 0x200, USAGE_AUTOGENMIPMAP = 0x400 };
 enum { LOCK_READONLY = 0x10, LOCK_DISCARD = 0x2000, LOCK_NOOVERWRITE = 0x1000 };
 
-int d9_fmt_block(uint32_t f); int d9_fmt_bytes(uint32_t f); int d9_fmt_known(uint32_t f); int d9_fmt_depth(uint32_t f); int d9_fmt_alpha(uint32_t f);
+int d9_fmt_block(uint32_t f); int d9_fmt_bytes(uint32_t f); int d9_fmt_float(uint32_t f);
+int d9_fmt_known(uint32_t f); int d9_fmt_depth(uint32_t f); int d9_fmt_alpha(uint32_t f);
 uint32_t d9_pitch(uint32_t f, uint32_t w); uint32_t d9_rows(uint32_t f, uint32_t h); uint32_t d9_size(uint32_t f, uint32_t w, uint32_t h);
 void d9_to_bgra(uint32_t f, const uint8_t *src, uint32_t pitch, uint32_t w, uint32_t y0, uint32_t y1, uint8_t *dst);
 void d9_from_bgra(uint32_t f, const uint8_t *src, uint32_t w, uint32_t h, uint8_t *dst, uint32_t pitch);
@@ -53,7 +54,7 @@ typedef struct Buf9 { uint32_t g; int ref; Dev9 *dev; int index; uint32_t len, u
 typedef struct DElem { uint8_t stream, type, usage, uidx; uint16_t off, dst, size; } DElem;
 typedef struct Decl9 { uint32_t g; int ref; Dev9 *dev; DElem e[32]; int n; uint32_t raw, nraw, fvf; int ok; } Decl9;
 typedef struct Shader9 { uint32_t g; int ref; Dev9 *dev; int ps; uint32_t mem, len; } Shader9;
-typedef struct Query9 { uint32_t g; int ref; Dev9 *dev; uint32_t type; } Query9;
+typedef struct Query9 { uint32_t g; int ref; Dev9 *dev; uint32_t type, slot, serial, last, polls; } Query9;
 typedef struct RecEnt { uint8_t kind; uint32_t a, b; float m[16]; void *p; } RecEnt;
 enum { REC_RS, REC_TSS, REC_SS, REC_TEX, REC_XF, REC_FVF, REC_DECL, REC_VS, REC_PS, REC_VP, REC_MAT, REC_STREAM, REC_IND };
 typedef struct SB9 { uint32_t g; int ref; Dev9 *dev; RecEnt *e; int n, cap; } SB9;

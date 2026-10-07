@@ -13,6 +13,9 @@
 #define DSR_READBACK_OFFSET (DSR_HEADER_SIZE + DSR_RING_SIZE)
 #define DSR_SHM_SIZE    (DSR_HEADER_SIZE + DSR_RING_SIZE + DSR_READBACK_SIZE)
 #define DSR_WRAP        0xffffu       /* record op: skip to the start of the ring */
+#define DSR_QUERY_SLOTS 1024u         /* occlusion query results, in the header after the struct: u32 count[slots], then
+                                         u32 serial[slots] (the serial of the DSR_QUERY end the count belongs to) */
+#define DSR_QUERY_OFFSET 8192u
 typedef struct {
     uint32_t magic, version;
     volatile uint32_t producer_pid;    /* set by ddraw.dll when it attaches (Windows pid) */

@@ -10,7 +10,7 @@
 #include <png.h>
 #define MAXSURF 65536
 long dsr_stat[8];
-typedef struct { GLuint tex; uint32_t w,h,fmt,level,root,levels; int used; } Surf;
+typedef struct { GLuint tex; uint32_t w,h,fmt,level,root,levels,face; GLenum target; int used; } Surf;   /* target: GL_TEXTURE_2D or GL_TEXTURE_CUBE_MAP (face 0-5) */
 typedef struct {   // must match game.*.glsl (std140) Uniforms
     float wvp[16], wv[16], tex0[16];
     float vp[4], fog[4], fogcolor[4], tfactor[4];
@@ -27,6 +27,7 @@ struct DSRRenderer {
  float xf[32][16],vp[6]; GLuint fbo,vao,vbo,ebo,ubo,game,quad,dummy,scratch,gamma,sampler[8];
  uint16_t ramps[3][256]; void *readback; size_t readback_size; volatile uint32_t *readback_done;
  struct GProg *progs; uint32_t nprogs, cur; GLuint dummy_cube, dummy_3d, pvbo, pebo, svao;
+ volatile uint32_t *qres; GLuint qobj[1024]; uint32_t qserial[1024]; uint16_t qpend[1024]; int nqpend; int qactive;   /* occlusion queries (DSR_QUERY) */
 };
 /* the game's own shader pairs (DSR_GLSL_CREATE, d3d9_shader.c): MojoShader GLSL, attributes bound to the slots of
  * programmable draws, MojoShader's per-type constant arrays */
@@ -40,6 +41,14 @@ static void mat_mul(float *o, const float *a, const float *b)   // D3D row-major
 
 
 static Surf *surf(DSRRenderer *r,uint32_t id) { return id && id<MAXSURF && r->s[id].used ? &r->s[id] : NULL; }
+static GLenum face_target(const Surf *s) { return s->target==GL_TEXTURE_CUBE_MAP?GL_TEXTURE_CUBE_MAP_POSITIVE_X+s->face:GL_TEXTURE_2D; }
+/* d3d9.c's surface formats (DSR_SURFACE_CREATE): 1 ARGB8, 2 XRGB8, 3 depth/stencil, 4-9 float formats */
+static void gl_format(uint32_t fmt,GLint *internal,GLenum *format,GLenum *type) {
+ static const GLint fi[6]={GL_R16F,GL_RG16F,GL_RGBA16F,GL_R32F,GL_RG32F,GL_RGBA32F}; static const GLenum ff[6]={GL_RED,GL_RG,GL_RGBA,GL_RED,GL_RG,GL_RGBA};
+ if(fmt==3) { *internal=GL_DEPTH24_STENCIL8; *format=GL_DEPTH_STENCIL; *type=GL_UNSIGNED_INT_24_8; }
+ else if(fmt>=4 && fmt<=9) { *internal=fi[fmt-4]; *format=ff[fmt-4]; *type=GL_FLOAT; }
+ else { *internal=GL_RGBA8; *format=GL_BGRA; *type=GL_UNSIGNED_BYTE; }
+}
 static char *readfile(const char *dir,const char *name) {
  char path[2048]; snprintf(path,sizeof path,"%s/%s",dir,name); FILE *f=fopen(path,"rb");
  if(!f) { perror(path); return NULL; } fseek(f,0,SEEK_END); long n=ftell(f); rewind(f);
@@ -104,20 +113,28 @@ DSRRenderer *dsr_gl_create(const char *dir) {
 static int target(DSRRenderer *r,uint32_t color,uint32_t depth) {
  Surf *c=surf(r,color), *z=surf(r,depth); if(!c) return 0;
  glBindFramebuffer(GL_FRAMEBUFFER,r->fbo);
- glFramebufferTexture2D(GL_FRAMEBUFFER,GL_COLOR_ATTACHMENT0,GL_TEXTURE_2D,c->tex,c->level);
- glFramebufferTexture2D(GL_FRAMEBUFFER,GL_DEPTH_STENCIL_ATTACHMENT,GL_TEXTURE_2D,z?z->tex:0,z?z->level:0);
+ glFramebufferTexture2D(GL_FRAMEBUFFER,GL_COLOR_ATTACHMENT0,face_target(c),c->tex,c->level);
+ glFramebufferTexture2D(GL_FRAMEBUFFER,GL_DEPTH_STENCIL_ATTACHMENT,z?face_target(z):GL_TEXTURE_2D,z?z->tex:0,z?z->level:0);
  return glCheckFramebufferStatus(GL_FRAMEBUFFER)==GL_FRAMEBUFFER_COMPLETE;
 }
 static void create_surface(DSRRenderer *r,const uint32_t *p,uint32_t size) {
  uint32_t id=p[0],w=p[1],h=p[2],fmt=p[4],parent=p[5],level=p[6]; if(!id || id>=MAXSURF || !w || !h) return;
+ uint32_t face=size>=40?p[8]:0; int cube=size>=40 && (p[9]&1);
  Surf *s=&r->s[id]; if(s->used && s->root==id) glDeleteTextures(1,&s->tex);
- *s=(Surf){.w=w,.h=h,.fmt=fmt,.level=level,.root=id,.used=1,.levels=size>=32 && p[7]?p[7]:1};
- Surf *root=surf(r,parent); if(root) { s->tex=root->tex; s->root=root->root; s->levels=root->levels; return; }
- glGenTextures(1,&s->tex); glActiveTexture(GL_TEXTURE0); glBindTexture(GL_TEXTURE_2D,s->tex);
- glTexParameteri(GL_TEXTURE_2D,GL_TEXTURE_MAX_LEVEL,s->levels-1);
- for(uint32_t l=0;l<s->levels;l++) glTexImage2D(GL_TEXTURE_2D,l,fmt==3?GL_DEPTH24_STENCIL8:GL_RGBA8,w>>l?w>>l:1,h>>l?h>>l:1,0,fmt==3?GL_DEPTH_STENCIL:GL_BGRA,fmt==3?GL_UNSIGNED_INT_24_8:GL_UNSIGNED_BYTE,NULL);
- glTexParameteri(GL_TEXTURE_2D,GL_TEXTURE_MIN_FILTER,GL_LINEAR); glTexParameteri(GL_TEXTURE_2D,GL_TEXTURE_MAG_FILTER,GL_LINEAR);
- glTexParameteri(GL_TEXTURE_2D,GL_TEXTURE_WRAP_S,GL_CLAMP_TO_EDGE); glTexParameteri(GL_TEXTURE_2D,GL_TEXTURE_WRAP_T,GL_CLAMP_TO_EDGE);
+ *s=(Surf){.w=w,.h=h,.fmt=fmt,.level=level,.root=id,.used=1,.levels=size>=32 && p[7]?p[7]:1,.face=face<6?face:0,.target=GL_TEXTURE_2D};
+ Surf *root=surf(r,parent); if(root) { s->tex=root->tex; s->root=root->root; s->levels=root->levels; s->target=root->target; return; }
+ GLint in; GLenum f,t; gl_format(fmt,&in,&f,&t);
+ s->target=cube?GL_TEXTURE_CUBE_MAP:GL_TEXTURE_2D;
+ glGenTextures(1,&s->tex); glActiveTexture(GL_TEXTURE0); glBindTexture(s->target,s->tex);
+ glTexParameteri(s->target,GL_TEXTURE_MAX_LEVEL,s->levels-1);
+ for(int fc=0;fc<(cube?6:1);fc++) for(uint32_t l=0;l<s->levels;l++)
+  glTexImage2D(cube?GL_TEXTURE_CUBE_MAP_POSITIVE_X+fc:GL_TEXTURE_2D,l,in,w>>l?w>>l:1,h>>l?h>>l:1,0,f,t,NULL);
+ if(fmt>=4 && fmt<=9) {                        /* D3D9 reads missing channels of these formats as 1 */
+  int ch=(fmt-4)%3; if(ch<2) glTexParameteri(s->target,GL_TEXTURE_SWIZZLE_B,GL_ONE); if(ch<1) glTexParameteri(s->target,GL_TEXTURE_SWIZZLE_G,GL_ONE);
+  if(ch<2) glTexParameteri(s->target,GL_TEXTURE_SWIZZLE_A,GL_ONE);
+ }
+ glTexParameteri(s->target,GL_TEXTURE_MIN_FILTER,GL_LINEAR); glTexParameteri(s->target,GL_TEXTURE_MAG_FILTER,GL_LINEAR);
+ glTexParameteri(s->target,GL_TEXTURE_WRAP_S,GL_CLAMP_TO_EDGE); glTexParameteri(s->target,GL_TEXTURE_WRAP_T,GL_CLAMP_TO_EDGE);
 }
 static void quad(DSRRenderer *r,GLuint texture,const float *dst,const float *src,uint32_t color,int mode,int present) {
  glBindSampler(0,0); glBindSampler(1,0);
@@ -149,8 +166,9 @@ static void upload(DSRRenderer *r,const uint32_t *p,uint32_t size,int over) {
  Surf *s=surf(r,p[0]); uint32_t w=p[3],h=p[4],pitch=p[5];
  if(!s || s->fmt==3 || !w || !h || (uint64_t)pitch<(uint64_t)w*4 || 24ull+(uint64_t)pitch*h>size || (uint64_t)p[1]+w>s->w || (uint64_t)p[2]+h>s->h) return;
  over=over && w<=256 && h<=256;
- glActiveTexture(GL_TEXTURE0); glBindTexture(GL_TEXTURE_2D,over?r->scratch:s->tex); glPixelStorei(GL_UNPACK_ROW_LENGTH,pitch/4);
- glTexSubImage2D(GL_TEXTURE_2D,over?0:s->level,over?0:p[1],over?0:p[2],w,h,GL_BGRA,GL_UNSIGNED_BYTE,p+6); glPixelStorei(GL_UNPACK_ROW_LENGTH,0);
+ if(!over && s->fmt>=4) return;                 /* float render targets are never uploaded */
+ glActiveTexture(GL_TEXTURE0); glBindTexture(over?GL_TEXTURE_2D:s->target,over?r->scratch:s->tex); glPixelStorei(GL_UNPACK_ROW_LENGTH,pitch/4);
+ glTexSubImage2D(over?GL_TEXTURE_2D:face_target(s),over?0:s->level,over?0:p[1],over?0:p[2],w,h,GL_BGRA,GL_UNSIGNED_BYTE,p+6); glPixelStorei(GL_UNPACK_ROW_LENGTH,0);
  if(over) { int32_t dr[4]={p[1],p[2],p[1]+w,p[2]+h},sr[4]={0,0,w,h}; blit(r,p[0],dr,0,sr,2,0); }
 }
 static GLenum blend(uint32_t b) { static const GLenum v[]={GL_ONE,GL_ZERO,GL_ONE,GL_SRC_COLOR,GL_ONE_MINUS_SRC_COLOR,GL_SRC_ALPHA,GL_ONE_MINUS_SRC_ALPHA,GL_DST_ALPHA,GL_ONE_MINUS_DST_ALPHA,GL_DST_COLOR,GL_ONE_MINUS_DST_COLOR,GL_SRC_ALPHA_SATURATE}; return b<12?v[b]:GL_ONE; }
@@ -161,7 +179,9 @@ static GLenum stencil_op(uint32_t op) {
 }
 static GLenum address(uint32_t a) { return a==2?GL_MIRRORED_REPEAT:a==3?GL_CLAMP_TO_EDGE:a==4?GL_CLAMP_TO_BORDER:GL_REPEAT; }
 static void bind_texture(DSRRenderer *r,int stage,Surf *s) {
- glActiveTexture(GL_TEXTURE0+stage); glBindTexture(GL_TEXTURE_2D,s?s->tex:r->dummy);
+ glActiveTexture(GL_TEXTURE0+stage);
+ if(s && s->target==GL_TEXTURE_CUBE_MAP) s=NULL;  /* a 2D sampler: a cube texture cannot be bound there */
+ glBindTexture(GL_TEXTURE_2D,s?s->tex:r->dummy);
  GLuint sampler=r->sampler[stage]; glBindSampler(stage,sampler);
  uint32_t *t=r->tss[stage]; int linear=t[17]>=2,mip=s && s->levels>1 ? t[18]:0;
  GLenum min=mip==3?(linear?GL_LINEAR_MIPMAP_LINEAR:GL_NEAREST_MIPMAP_LINEAR):mip==2?(linear?GL_LINEAR_MIPMAP_NEAREST:GL_NEAREST_MIPMAP_NEAREST):(linear?GL_LINEAR:GL_NEAREST);
@@ -236,6 +256,25 @@ static void clear(DSRRenderer *r,const uint32_t *p,uint32_t size) {
   glScissor(rc[0],rc[1],rc[2]-rc[0],rc[3]-rc[1]); glClear(mask);
  }
  glDisable(GL_SCISSOR_TEST);
+}
+void dsr_gl_queries(DSRRenderer *r,volatile uint32_t *results) { r->qres=results; }
+static void query(DSRRenderer *r,const uint32_t *p) {             /* DSR_QUERY: slot, begin/end, serial */
+ uint32_t k=p[0]; if(!k || k>=1024) return;
+ if(p[1]) { if(r->qactive) glEndQuery(GL_SAMPLES_PASSED); if(!r->qobj[k]) glGenQueries(1,&r->qobj[k]); glBeginQuery(GL_SAMPLES_PASSED,r->qobj[k]); r->qactive=(int)k; }
+ else if(r->qactive==(int)k) {
+  glEndQuery(GL_SAMPLES_PASSED); r->qactive=0; r->qserial[k]=p[2];
+  int dup=0; for(int i=0;i<r->nqpend;i++) if(r->qpend[i]==k) dup=1;
+  if(!dup && r->nqpend<1024) r->qpend[r->nqpend++]=(uint16_t)k;
+ } else if(r->qres) { r->qres[k]=1000; __atomic_store_n(&r->qres[1024+k],p[2],__ATOMIC_RELEASE); }   /* an End without a Begin */
+}
+void dsr_gl_poll_queries(DSRRenderer *r) {                       /* publish the counts that are ready */
+ for(int i=0;i<r->nqpend;) {
+  uint32_t k=r->qpend[i]; GLuint avail=0; glGetQueryObjectuiv(r->qobj[k],GL_QUERY_RESULT_AVAILABLE,&avail);
+  if(!avail) { i++; continue; }
+  GLuint n=0; glGetQueryObjectuiv(r->qobj[k],GL_QUERY_RESULT,&n);
+  if(r->qres) { r->qres[k]=n; __atomic_store_n(&r->qres[1024+k],r->qserial[k],__ATOMIC_RELEASE); }
+  r->qpend[i]=r->qpend[--r->nqpend];
+ }
 }
 void dsr_gl_readback(DSRRenderer *r,void *data,size_t size,volatile uint32_t *done) { r->readback=data; r->readback_size=size; r->readback_done=done; }
 static void readback(DSRRenderer *r,const uint32_t *p) {
@@ -338,7 +377,16 @@ static void draw_prog(DSRRenderer *r,const uint32_t *p,uint32_t size) {
  for(int k=0;k<g->nsamp && k<8;k++) {
   if(!g->samptype[k]) continue;
   if(g->samptype[k]==GL_SAMPLER_2D || g->samptype[k]==GL_SAMPLER_2D_SHADOW) bind_texture(r,k,surf(r,r->tex[k]));
-  else { glActiveTexture(GL_TEXTURE0+k); glBindSampler(k,0); glBindTexture(g->samptype[k]==GL_SAMPLER_CUBE?GL_TEXTURE_CUBE_MAP:GL_TEXTURE_3D,g->samptype[k]==GL_SAMPLER_CUBE?r->dummy_cube:r->dummy_3d); }
+  else if(g->samptype[k]==GL_SAMPLER_CUBE) {
+   Surf *t=surf(r,r->tex[k]); int ok=t && t->target==GL_TEXTURE_CUBE_MAP;
+   glActiveTexture(GL_TEXTURE0+k); glBindTexture(GL_TEXTURE_CUBE_MAP,ok?t->tex:r->dummy_cube);
+   GLuint sm=r->sampler[k]; glBindSampler(k,sm); uint32_t *ts=r->tss[k];
+   int mip=ok && t->levels>1?ts[18]:0, lin=ts[17]>=2;
+   glSamplerParameteri(sm,GL_TEXTURE_MIN_FILTER,mip==3?(lin?GL_LINEAR_MIPMAP_LINEAR:GL_NEAREST_MIPMAP_LINEAR):mip==2?(lin?GL_LINEAR_MIPMAP_NEAREST:GL_NEAREST_MIPMAP_NEAREST):(lin?GL_LINEAR:GL_NEAREST));
+   glSamplerParameteri(sm,GL_TEXTURE_MAG_FILTER,ts[16]>=2?GL_LINEAR:GL_NEAREST);
+   glSamplerParameteri(sm,GL_TEXTURE_WRAP_S,GL_CLAMP_TO_EDGE); glSamplerParameteri(sm,GL_TEXTURE_WRAP_T,GL_CLAMP_TO_EDGE); glSamplerParameteri(sm,GL_TEXTURE_WRAP_R,GL_CLAMP_TO_EDGE);
+  }
+  else { glActiveTexture(GL_TEXTURE0+k); glBindSampler(k,0); glBindTexture(GL_TEXTURE_3D,r->dummy_3d); }
  }
  GLenum type=prim==1?GL_POINTS:prim==2?GL_LINES:prim==3?GL_LINE_STRIP:prim==5?GL_TRIANGLE_STRIP:prim==6?GL_TRIANGLE_FAN:GL_TRIANGLES;
  if(ni) { glBindBuffer(GL_ELEMENT_ARRAY_BUFFER,r->pebo); glBufferData(GL_ELEMENT_ARRAY_BUFFER,ni*2,(const uint8_t *)(p+5)+(size_t)nv*ns*16,GL_STREAM_DRAW); glDrawElements(type,ni,GL_UNSIGNED_SHORT,0); }
@@ -355,7 +403,7 @@ int dsr_gl_exec(DSRRenderer *r,uint32_t op,const uint8_t *data,uint32_t size) {
  case DSR_CLEAR: need=20; break; case DSR_DRAW: need=16; break;
  case DSR_SURFACE_CREATE: need=28; break; case DSR_SURFACE_DESTROY: case DSR_PRESENT: need=4; break;
  case DSR_BLT: need=48; break; case DSR_GLSL_CREATE: need=16; break; case DSR_PROG_USE: need=4; break;
- case DSR_SHADER_CONST: need=24; break; case DSR_DRAW_PROG: need=20; break; default: break;
+ case DSR_SHADER_CONST: need=24; break; case DSR_DRAW_PROG: need=20; break; case DSR_QUERY: need=12; break; default: break;
  }
  if(size<need) return 0;
  const uint32_t *p=(const uint32_t *)data;
@@ -378,7 +426,8 @@ int dsr_gl_exec(DSRRenderer *r,uint32_t op,const uint8_t *data,uint32_t size) {
  case DSR_PROG_USE: r->cur=p[0]; break;
  case DSR_SHADER_CONST: shader_consts(r,p,size); break;
  case DSR_DRAW_PROG: draw_prog(r,p,size); break;
- case DSR_PRESENT: r->presented=p[0]; return 1;
+ case DSR_QUERY: query(r,p); break;
+ case DSR_PRESENT: r->presented=p[0]; dsr_gl_poll_queries(r); return 1;
  case DSR_GAMMA: if(size>=1536) { memcpy(r->ramps,p,1536); ramp(r);
   if(getenv("DSR_COLORLOG")) fprintf(stderr,"gamma: 64=%u/%u/%u 128=%u/%u/%u 192=%u/%u/%u\n",r->ramps[0][64],r->ramps[1][64],r->ramps[2][64],r->ramps[0][128],r->ramps[1][128],r->ramps[2][128],r->ramps[0][192],r->ramps[1][192],r->ramps[2][192]);
  } break;

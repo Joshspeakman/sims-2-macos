@@ -8,6 +8,8 @@
  * D3D9_LOG=1: every method's first calls; any method not written yet says so once. */
 #include "d3d9_priv.h"
 #include "edition.h"
+#include "../../../src/dsr/dsr_shm.h"
+#include <pthread.h>
 #include "display_modes.h"
 
 static Dev9 *the_dev;
@@ -15,7 +17,8 @@ extern int w32_screen_w, w32_screen_h, w32_screen_hz;
 static void surf_destroy(Surf9 *s);
 
 /* ---- surfaces ---- */
-static int fmt_code(uint32_t fmt) { return d9_fmt_depth(fmt) ? 3 : d9_fmt_alpha(fmt) ? 1 : 2; }
+/* the renderer's surface formats: 1 ARGB8, 2 XRGB8, 3 depth/stencil, 4-9 R16F, G16R16F, A16B16G16R16F, R32F, G32R32F, A32B32G32R32F */
+static int fmt_code(uint32_t fmt) { return d9_fmt_depth(fmt) ? 3 : d9_fmt_float(fmt) ? 4 + (int)(fmt - 111) : d9_fmt_alpha(fmt) ? 1 : 2; }
 static Surf9 *surf_new(Dev9 *d, uint32_t w, uint32_t h, uint32_t fmt, uint32_t usage, uint32_t pool, int kind, Tex9 *tex, uint32_t level, uint32_t face, uint32_t parent_id, uint32_t levels)
 {
     Surf9 *s = calloc(1, sizeof *s); s->ref = 1; s->dev = d; s->tex = tex; s->level = level; s->face = face;
@@ -38,7 +41,7 @@ static void surf_destroy(Surf9 *s)
 /* the CPU copy's rows [y0, y1) to the GPU (converted to BGRA8, in bands that fit the command ring) */
 static void surf_upload(Surf9 *s, uint32_t y0, uint32_t y1)
 {
-    if (s->pool == 2 || s->pool == 3 || s->kind == 2 || !d9_fmt_known(s->fmt)) return;
+    if (s->pool == 2 || s->pool == 3 || s->kind == 2 || !d9_fmt_known(s->fmt) || d9_fmt_float(s->fmt)) return;
     if (d9_fmt_block(s->fmt)) { y0 &= ~3u; y1 = (y1 + 3) & ~3u; }
     if (y1 > s->h) y1 = s->h;
     uint32_t row = s->w * 4, band = (8u << 20) / row; if (band < 4) band = 4; band &= ~3u;
@@ -301,16 +304,38 @@ static uint32_t shader_len(uint32_t p)                  /* bytecode up to and in
 }
 
 /* ---- queries: the GPU is always done ---- */
-static uint32_t query_release(Query9 *q) { uint32_t r = (uint32_t)--q->ref; if (!r) { obj_drop(q->g); free(q); } return r; }
+static uint8_t query_slot_used[DSR_QUERY_SLOTS]; static pthread_mutex_t query_lock = PTHREAD_MUTEX_INITIALIZER;
+static uint32_t query_release(Query9 *q)
+{
+    uint32_t r = (uint32_t)--q->ref;
+    if (!r) { pthread_mutex_lock(&query_lock); if (q->slot) query_slot_used[q->slot] = 0; pthread_mutex_unlock(&query_lock); obj_drop(q->g); free(q); }
+    return r;
+}
 M(qy_QueryInterface, 3) ME(Query9, O9_QUERY) rt_w32(G_MEM, ARG(2), ARG(0)); me->ref++; RET(D3D_OK, 3); END
 M(qy_AddRef, 1) ME(Query9, O9_QUERY) RET((uint32_t)++me->ref, 1); END
 M(qy_Release, 1) ME(Query9, O9_QUERY) RET(query_release(me), 1); END
 M(qy_GetDevice, 2) ME(Query9, O9_QUERY) rt_w32(G_MEM, ARG(1), me->dev->g); me->dev->ref++; RET(D3D_OK, 2); END
 M(qy_GetType, 1) ME(Query9, O9_QUERY) RET(me->type, 1); END
 M(qy_GetDataSize, 1) ME(Query9, O9_QUERY) RET(me->type == 8 ? 4 : me->type == 9 ? 4 : 0, 1); END
-OK_M(qy_Issue, 2)
-M(qy_GetData, 4) ME(Query9, O9_QUERY)                  /* (data, size, flags): event -> TRUE, occlusion -> some pixels */
-    if (ARG(1) && ARG(2) >= 4) rt_w32(G_MEM, ARG(1), me->type == 9 ? 1000 : 1);
+/* occlusion queries (type 9) run on the GPU (DSR_QUERY): GetData is S_FALSE until the renderer has published the count
+ * for the last End; a game that spins on it gets the previous count after a while rather than waiting forever. Events
+ * (type 8) and other types: done at once. */
+volatile uint32_t *dsr_query_results(void);
+M(qy_Issue, 2) ME(Query9, O9_QUERY)                    /* (flags: D3DISSUE_END 1, D3DISSUE_BEGIN 2) */
+    if (me->type == 9 && me->slot) {
+        uint32_t *p = cmd_begin(DSR_QUERY, 12); p[0] = me->slot; p[1] = (ARG(1) & 2) ? 1 : 0;
+        if (!(ARG(1) & 2)) { me->serial++; me->polls = 0; }
+        p[2] = me->serial; cmd_end();
+    }
+    RET(D3D_OK, 2);
+END
+M(qy_GetData, 4) ME(Query9, O9_QUERY)                  /* (data, size, flags) */
+    if (me->type != 9 || !me->slot) { if (ARG(1) && ARG(2) >= 4) rt_w32(G_MEM, ARG(1), me->type == 9 ? 1000 : 1); RET(D3D_OK, 4); }
+    volatile uint32_t *res = dsr_query_results();
+    uint32_t serial = res ? __atomic_load_n(&res[DSR_QUERY_SLOTS + me->slot], __ATOMIC_ACQUIRE) : me->serial;
+    if (serial == me->serial) me->last = res ? res[me->slot] : 1000;
+    else if (++me->polls < 2000) RET(1 /* S_FALSE */, 4);
+    if (ARG(1) && ARG(2) >= 4) rt_w32(G_MEM, ARG(1), me->last);
     RET(D3D_OK, 4);
 END
 
@@ -749,6 +774,8 @@ static void vol_alloc(Tex9 *t)                          /* volume textures: ever
 }
 static uint32_t create_tex(Dev9 *d, int type, uint32_t w, uint32_t h, uint32_t dep, uint32_t levels, uint32_t usage, uint32_t fmt, uint32_t pool, uint32_t out)
 {
+    { static int lg = -1; if (lg < 0) lg = getenv("D3D9_CREATELOG") != 0;
+      if (lg) fprintf(stderr, "d3d9: create %s %ux%ux%u levels %u usage %#x format %#x pool %u\n", type == O9_CUBE ? "cube" : type == O9_VOLTEX ? "volume" : "texture", w, h, dep, levels, usage, fmt, pool); }
     if (!d9_fmt_known(fmt)) { fprintf(stderr, "d3d9: texture format %#x is not supported\n", fmt); return D3DERR_INVALIDCALL; }
     if (!w || !h || w > 8192 || h > 8192) return D3DERR_INVALIDCALL;
     Tex9 *t = tex_new(d, type, w, h, dep, levels, usage, fmt, pool);
@@ -1004,7 +1031,9 @@ TODO_M(dv_DeletePatch, 2, D3DERR_INVALIDCALL)
 M(dv_CreateQuery, 3) DEV_ME                            /* event (8) and occlusion (9) queries; NULL out: "is it supported" */
     uint32_t t = ARG(1); if (t != 8 && t != 9) RET(D3DERR_NOTAVAILABLE, 3);
     if (!ARG(2)) RET(D3D_OK, 3);
-    Query9 *q = calloc(1, sizeof *q); q->ref = 1; q->dev = me; q->type = t; q->g = make_iface(O9_QUERY, q); rt_w32(G_MEM, ARG(2), q->g); RET(D3D_OK, 3);
+    Query9 *q = calloc(1, sizeof *q); q->ref = 1; q->dev = me; q->type = t; q->last = 1000;
+    if (t == 9) { pthread_mutex_lock(&query_lock); for (uint32_t k = 1; k < DSR_QUERY_SLOTS; k++) if (!query_slot_used[k]) { query_slot_used[k] = 1; q->slot = k; break; } pthread_mutex_unlock(&query_lock); }
+    q->g = make_iface(O9_QUERY, q); rt_w32(G_MEM, ARG(2), q->g); RET(D3D_OK, 3);
 END
 
 /* ---- swap chain (the device's one) ---- */
