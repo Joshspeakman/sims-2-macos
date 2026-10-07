@@ -166,7 +166,7 @@ static void parse_script(void)
         if (tok[0] == '@') a->frame = 0xffffffffu;
         if (ok >= 2) {
             snprintf(a->kind, sizeof a->kind, "%s", kind);
-            if (!strcmp(kind, "shot") || !strcmp(kind, "type") || !strcmp(kind, "peek")) snprintf(a->path, sizeof a->path, "%s", rest); else sscanf(rest, "%d,%d", &a->x, &a->y);
+            if (!strcmp(kind, "shot") || !strcmp(kind, "type") || !strcmp(kind, "ditype") || !strcmp(kind, "peek")) snprintf(a->path, sizeof a->path, "%s", rest); else sscanf(rest, "%d,%d", &a->x, &a->y);
             nacts++;
         }
         tok = strtok_r(0, ";", &save);
@@ -201,7 +201,7 @@ static void cmdfile_poll(uint32_t fno)
         Act *a = &acts[nacts]; char kind[8] = "", rest[600] = "";
         if (sscanf(line, "%7[a-z]:%599[^\n]", kind, rest) < 1 || !kind[0]) continue;
         memset(a, 0, sizeof *a); a->frame = fno + 1; snprintf(a->kind, sizeof a->kind, "%s", kind);
-        if (!strcmp(kind, "shot") || !strcmp(kind, "type") || !strcmp(kind, "peek")) snprintf(a->path, sizeof a->path, "%s", rest); else sscanf(rest, "%d,%d", &a->x, &a->y);
+        if (!strcmp(kind, "shot") || !strcmp(kind, "type") || !strcmp(kind, "ditype") || !strcmp(kind, "peek")) snprintf(a->path, sizeof a->path, "%s", rest); else sscanf(rest, "%d,%d", &a->x, &a->y);
         nacts++; fprintf(stderr, "DungeonSiege2Linux: command %s\n", line);
     }
     fclose(f);
@@ -232,13 +232,34 @@ static const char *script_tick(uint32_t fno)       /* returns a screenshot path 
         } else if (!strcmp(a->kind, "hold")) {            /* hold:vk,frames: a key held down (the modifier of a chord) */
             if (fno == a->frame) { w32_keys[a->x & 0xff] = 0x80; post(0x100, (uint32_t)a->x, 1); }
             if (fno == a->frame + (uint32_t)a->y) { w32_keys[a->x & 0xff] = 0; post(0x101, (uint32_t)a->x, 0xc0000001u); }
-        } else if (!strcmp(a->kind, "dik")) {             /* dik:code: a DirectInput key (set-1 scan code, extended +0x80) for 4 frames */
-            if (fno == a->frame) w32_di_key(a->x, 1);
-            if (fno == a->frame + 4) w32_di_key(a->x, 0);
+        } else if (!strcmp(a->kind, "dik")) {             /* dik:code: a key by its DirectInput code (set-1 scan code, extended +0x80) for 15
+                                                              frames, as a real key press: DirectInput and window messages */
+            Key k = {0, 0, 0};
+            for (int sc = 0; sc < SDL_NUM_SCANCODES && !k.vk; sc++) { Key t = keymap((SDL_Scancode)sc); if (t.vk && (t.scan | (t.ext ? 0x80 : 0)) == a->x) k = t; }
+            if (fno == a->frame) { if (k.vk) key_event(k, 1, 0); else w32_di_key(a->x, 1); }
+            if (fno == a->frame + 15) { if (k.vk) key_event(k, 0, 0); else w32_di_key(a->x, 0); }
         } else if (!strcmp(a->kind, "dimove") && fno >= a->frame && fno < a->frame + 10) w32_di_mouse_move(a->x / 10, a->y / 10);   /* mickeys over 10 frames */
         else if (!strcmp(a->kind, "diclick")) {           /* diclick: the left button through DirectInput */
-            if (fno == a->frame) w32_di_mouse_button(0, 1);
-            if (fno == a->frame + 4) w32_di_mouse_button(0, 0);
+            if (fno == a->frame) { w32_di_mouse_button(0, 1); buttons |= 1; w32_keys[1] = 0x80; post(0x201, mk(), pos_lp()); }
+            if (fno == a->frame + 15) { w32_di_mouse_button(0, 0); buttons &= ~1u; w32_keys[1] = 0; post(0x202, mk(), pos_lp()); }   /* held long enough for a game frame to see it */
+        } else if (!strcmp(a->kind, "ditype") && fno >= a->frame) {   /* ditype:text: typed through DirectInput, one key every 3 frames */
+            static const char *row1 = "1234567890-=", *rowq = "qwertyuiop[]", *rowa = "asdfghjkl;'`", *rowz = "zxcvbnm,./";
+            uint32_t i = (fno - a->frame) / 3, ph = (fno - a->frame) % 3; size_t n = strlen(a->path);
+            if (i < n) {
+                char ch = (char)tolower((unsigned char)a->path[i]); const char *q; int dik = 0, shift = 0;
+                if (a->path[i] >= 'A' && a->path[i] <= 'Z') shift = 1;
+                if (ch == '_') { ch = '-'; shift = 1; }
+                if (ch == ' ') dik = 0x39; else if (ch == '\n') dik = 0x1c;
+                else if ((q = strchr(row1, ch))) dik = 2 + (int)(q - row1);
+                else if ((q = strchr(rowq, ch))) dik = 0x10 + (int)(q - rowq);
+                else if ((q = strchr(rowa, ch))) dik = 0x1e + (int)(q - rowa);
+                else if ((q = strchr(rowz, ch))) dik = 0x2c + (int)(q - rowz);
+                if (ch == '`') dik = 0x29;
+                Key k = {0, 0, 0};
+                for (int sc = 0; sc < SDL_NUM_SCANCODES && !k.vk; sc++) { Key t = keymap((SDL_Scancode)sc); if (t.vk && (t.scan | (t.ext ? 0x80 : 0)) == dik) k = t; }
+                if (dik && ph == 0) { if (shift) w32_di_key(0x2a, 1); if (k.vk) key_event(k, 1, 0); else w32_di_key(dik, 1); post(0x102, (uint32_t)(unsigned char)a->path[i], 1); }
+                if (dik && ph == 1) { if (k.vk) key_event(k, 0, 0); else w32_di_key(dik, 0); if (shift) w32_di_key(0x2a, 0); }
+            }
         } else if (!strcmp(a->kind, "shot") && fno == a->frame) shot = a->path;
         else if (!strcmp(a->kind, "peek") && fno == a->frame) {
             extern uint8_t *G_MEM; char *e = a->path; uint32_t at = (uint32_t)strtoul(e, &e, 16), v = 0;

@@ -35,5 +35,6 @@ enum {
                               (bools one u32 each), then float4 alpha test (reference 0-255, D3DCMP function, enabled, 0) */
     DSR_QUERY,             /* u32 slot, u32 begin (1) / end (0), u32 serial: an occlusion query around the draws between; the
                               renderer publishes the samples passed in the header (dsr_shm.h DSR_QUERY_OFFSET) */
+    DSR_SCISSOR,           /* i32 left, top, right, bottom: the scissor rectangle (D3DRS_SCISSORTESTENABLE turns it on) */
 };
 #endif
