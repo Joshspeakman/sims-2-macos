@@ -7,6 +7,7 @@
  * with a vertex shader are skipped; with only a pixel shader they are drawn fixed-function).
  * D3D9_LOG=1: every method's first calls; any method not written yet says so once. */
 #include "d3d9_priv.h"
+#include "edition.h"
 #include "display_modes.h"
 
 static Dev9 *the_dev;
@@ -1139,6 +1140,14 @@ static void fill_caps(uint32_t out)                    /* D3DCAPS9: a Radeon 850
         v[66] = 0; v[67] = 0; v[68] = 12; v[69] = 0; v[70] = 96;  /* PS20Caps */
         v[72] = 65535; v[73] = 96;
     }
+#ifdef FNV_EDITION
+    /* Fallout NV draws with its precompiled vs/ps 1.1-3.0 shaders and picks a shader package from these: a shader model
+     * 3.0 card (GeForce 7-class), one render target */
+    v[49] = 0xfffe0300u; v[50] = 256; v[51] = 0xffff0300u; v[59] = 0x3ff; v[60] = 1;
+    v[62] = 1; v[63] = 24; v[64] = 32; v[65] = 4;                  /* VS20Caps: predication */
+    v[66] = 0x1f; v[67] = 24; v[68] = 32; v[69] = 4; v[70] = 512;  /* PS20Caps: every 2.x feature */
+    v[71] = 0x200 | 0x2000000; v[72] = 65535; v[73] = 65535; v[74] = 32768; v[75] = 32768;
+#endif
     memcpy(GP(out), v, 304);
 }
 M(d9_GetDeviceCaps, 4) fill_caps(ARG(3)); RET(D3D_OK, 4); END

@@ -105,12 +105,12 @@ static uint32_t profile_str(const char *s)
 IMPL(d3dx9_29, D3DXGetVertexShaderProfile) { RET(profile_str("vs_3_0"), 1); }
 IMPL(d3dx9_29, D3DXGetPixelShaderProfile) { RET(profile_str("ps_3_0"), 1); }
 
-#define NOT_YET(name, n) IMPL(d3dx9_29, name) { static int once; if (!once++) fprintf(stderr, "d3dx9: %s is not implemented yet\n", #name); RET(0x80004005u, n); }
-NOT_YET(D3DXAssembleShader, 7)
-NOT_YET(D3DXAssembleShaderFromFileA, 6)
-NOT_YET(D3DXCompileShaderFromFileA, 9)
-NOT_YET(D3DXCreateBuffer, 2)
-NOT_YET(D3DXGetImageInfoFromFileInMemory, 3)
-NOT_YET(D3DXGetShaderConstantTable, 2)
-NOT_YET(D3DXLoadSurfaceFromSurface, 8)
-NOT_YET(D3DXSaveTextureToFileA, 4)
+/* not yet: logged once, E_FAIL */
+#define NOT_YET_BODY(name, n) { static int once; if (!once++) fprintf(stderr, "d3dx9: %s is not implemented yet\n", name); RET(0x80004005u, n); }
+IMPL(d3dx9_29, D3DXAssembleShader) NOT_YET_BODY("D3DXAssembleShader", 7)
+IMPL(d3dx9_29, D3DXAssembleShaderFromFileA) NOT_YET_BODY("D3DXAssembleShaderFromFileA", 6)
+IMPL(d3dx9_29, D3DXCompileShaderFromFileA) NOT_YET_BODY("D3DXCompileShaderFromFileA", 9)
+IMPL(d3dx9_29, D3DXCreateBuffer) NOT_YET_BODY("D3DXCreateBuffer", 2)
+IMPL(d3dx9_29, D3DXGetShaderConstantTable) NOT_YET_BODY("D3DXGetShaderConstantTable", 2)
+IMPL(d3dx9_29, D3DXLoadSurfaceFromSurface) NOT_YET_BODY("D3DXLoadSurfaceFromSurface", 8)
+IMPL(d3dx9_29, D3DXSaveTextureToFileA) NOT_YET_BODY("D3DXSaveTextureToFileA", 4)
