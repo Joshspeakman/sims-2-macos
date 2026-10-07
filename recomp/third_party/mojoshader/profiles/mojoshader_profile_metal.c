@@ -1070,8 +1070,11 @@ void emit_METAL_NOP(Context *ctx)
     // no-op is a no-op.  :)
 } // emit_METAL_NOP
 
+void emit_METAL_MOVA(Context *ctx);
 void emit_METAL_MOV(Context *ctx)
 {
+    // vs_1_1 writes the address register with mov: the same rounding conversion as mova
+    if (ctx->dest_arg.regtype == REG_TYPE_ADDRESS && shader_is_vertex(ctx)) { emit_METAL_MOVA(ctx); return; }
     char src0[64]; make_METAL_srcarg_string_masked(ctx, 0, src0, sizeof (src0));
     char code[128];
     make_METAL_destarg_assign(ctx, code, sizeof (code), "%s", src0);
@@ -1247,7 +1250,8 @@ void emit_METAL_LOG(Context *ctx)
     char src0[64]; make_METAL_srcarg_string_masked(ctx, 0, src0, sizeof (src0));
     char code[128];
     ctx->metal_need_header_math = 1;
-    make_METAL_destarg_assign(ctx, code, sizeof (code), "log2(%s)", src0);
+    // fallout-nv-macos: Direct3D's log is of the absolute value (log2 of a negative is NaN)
+    make_METAL_destarg_assign(ctx, code, sizeof (code), "log2(abs(%s))", src0);
     output_line(ctx, "%s", code);
 } // emit_METAL_LOG
 
@@ -1485,10 +1489,15 @@ void emit_METAL_POW(Context *ctx)
 {
     char src0[64]; make_METAL_srcarg_string_masked(ctx, 0, src0, sizeof (src0));
     char src1[64]; make_METAL_srcarg_string_masked(ctx, 1, src1, sizeof (src1));
-    char code[128];
+    char code[512];
     ctx->metal_need_header_math = 1;
-    make_METAL_destarg_assign(ctx, code, sizeof (code),
-                             "pow(abs(%s), %s)", src0, src1);
+    // fallout-nv-macos: pow(0, 0) is 1 in Direct3D; exp2(0 * log2(0)) is NaN (sparkles on specular highlights)
+    if (vecsize_from_writemask(ctx->dest_arg.writemask) == 1)
+        make_METAL_destarg_assign(ctx, code, sizeof (code),
+                                 "((%s == 0.0) ? 1.0 : pow(abs(%s), %s))", src1, src0, src1);
+    else
+        make_METAL_destarg_assign(ctx, code, sizeof (code),
+                                 "pow(abs(%s), %s)", src0, src1);
     output_line(ctx, "%s", code);
 } // emit_METAL_POW
 
@@ -1526,9 +1535,11 @@ void emit_METAL_ABS(Context *ctx)
 void emit_METAL_NRM(Context *ctx)
 {
     char src0[64]; make_METAL_srcarg_string_masked(ctx, 0, src0, sizeof (src0));
-    char code[128];
+    char code[512];
     ctx->metal_need_header_geometric = 1;
-    make_METAL_destarg_assign(ctx, code, sizeof (code), "normalize(%s)", src0);
+    // fallout-nv-macos: Direct3D normalises a zero vector to zero (x * rsq(0) with 0 * inf = 0); Metal's normalize()
+    //  gives NaN (as GLSL's does: the same fix as the Linux port's GLSL profile)
+    make_METAL_destarg_assign(ctx, code, sizeof (code), "((dot(%s, %s) == 0.0) ? (%s * 0.0) : normalize(%s))", src0, src0, src0, src0);
     output_line(ctx, "%s", code);
 } // emit_METAL_NRM
 

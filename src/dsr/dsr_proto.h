@@ -42,6 +42,9 @@ enum {
     DSR_DRAW_PROG_VB,      /* u32 prim, nverts, nindices, flags (1 pretransformed, 2 32-bit indices), u32 index buffer id,
                               u32 index byte offset, i32 base vertex, u32 first vertex (no indices), u32 nelem,
                               {u32 slot, buffer id, byte offset, stride, D3DDECLTYPE}[nelem]: as DSR_DRAW_PROG, from kept buffers */
+    DSR_MSL_CREATE,        /* u32 id, u32 nattr, u32 vs length, u32 ps length, {u32 slot, u32 input register}[nattr], vertex MSL
+                              (function vsmain), pixel MSL (function psmain), each NUL-terminated and padded to 4: the game's
+                              own shader pair for Metal (d3d9_shader.c); constants as DSR_SHADER_CONST */
 };
 #define DSR_VBUFS 65536
 #endif

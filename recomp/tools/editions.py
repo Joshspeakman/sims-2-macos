@@ -16,8 +16,11 @@ PROFILES = {
 
 
 def digest(path):
+    h = hashlib.sha256()                      # (hashlib.file_digest needs Python 3.11; macOS ships 3.9)
     with Path(path).open('rb') as f:
-        return hashlib.file_digest(f, 'sha256').hexdigest()
+        for chunk in iter(lambda: f.read(1 << 20), b''):
+            h.update(chunk)
+    return h.hexdigest()
 
 
 def identify(path, prepared=False):

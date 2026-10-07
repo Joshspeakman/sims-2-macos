@@ -224,11 +224,7 @@ OK_M(vt_AddDirtyBox, 2)
 /* The Linux renderer keeps a copy of each buffer (DSR_VBUF_DATA) and shader draws name buffers and element types
  * (DSR_DRAW_PROG_VB) instead of copying every vertex as float4: what a Lock covered is sent again before the next draw
  * that reads the buffer. D3D9_GPU_VB=0 turns it off. */
-#ifdef __linux__
-static int gpu_vb(void) { static int on = -1; if (on < 0) { const char *e = getenv("D3D9_GPU_VB"); on = !(e && *e == '0'); } return on; }
-#else
-static int gpu_vb(void) { return 0; }
-#endif
+static int gpu_vb(void) { static int on = -1; if (on < 0) { const char *e = getenv("D3D9_GPU_VB"); on = !(e && *e == '0'); } return on; }   /* (both renderers keep buffers) */
 static pthread_mutex_t vb_lock = PTHREAD_MUTEX_INITIALIZER;    /* buffers are filled on the game's loader threads too */
 static uint32_t vbid_free[DSR_VBUFS], vbid_nfree, vbid_next = 1;
 static uint32_t vbid_alloc(void)
