@@ -361,6 +361,13 @@ IMPL(kernel32, CreateEventA)
     if (name && nnamed < 64) { snprintf(s->name, sizeof s->name, "%s", GS(name)); named[nnamed] = s; named_h[nnamed++] = h; }
     w32_set_last_error(c, 0); RET(h, 4);
 }
+/* an event for runtime components that hand the game a handle to wait on (dshow.c) */
+uint32_t w32_event_new(int manual, int signaled) { return h_new(H_EVENT, sync_new(manual, signaled)); }
+void w32_event_signal(uint32_t h, int on)
+{
+    HObj *o = h_get(h, H_EVENT); if (!o) return;
+    Sync *s = o->p; pthread_mutex_lock(&s->m); s->signaled = on; if (on) pthread_cond_broadcast(&s->cv); pthread_mutex_unlock(&s->m);
+}
 IMPL(kernel32, CreateMutexA)
 {
     uint32_t name = ARG(2);

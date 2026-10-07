@@ -70,6 +70,8 @@ void     w32_set_last_error(Ctx *c, uint32_t e);
 int  w32_mb_to_wide(uint32_t cp, const uint8_t *s, int n, uint16_t *out, int cap);
 int  w32_wide_to_mb(uint32_t cp, const uint16_t *s, int n, uint8_t *out, int cap);
 int  w32_host_path(const char *win, char *out, size_t cap, int for_create);  /* Windows path -> host path */
+uint32_t w32_event_new(int manual, int signaled);     /* a Win32 event the runtime signals (core.c) */
+void w32_event_signal(uint32_t h, int on);
 
 /* guest callbacks from inside an import (window procedures, enumerators, thread starts) */
 uint32_t w32_callback(Ctx *c, uint32_t fn, int nargs, const uint32_t *args);   /* stdcall; returns eax */
