@@ -3,6 +3,11 @@
 #include <dirent.h>
 #include <sys/stat.h>
 #include <errno.h>
+#ifdef __linux__
+#define st_birthtimespec st_ctim
+#define st_atimespec st_atim
+#define st_mtimespec st_mtim
+#endif
 
 char w32_drive_c[1024];                /* host directory for C:\ (other than the game folder) */
 char w32_cwd[1024] = "C:\\GOG Games\\Dungeon Siege";
@@ -322,6 +327,21 @@ IMPL(kernel32, GetFileSize)
     if (getenv("W32_FILELOG")) fprintf(stderr, "w32: GetFileSize(%x) fd %d %s -> %lld\n", ARG(0), ((File *)o->p)->fd, ((File *)o->p)->path, (long long)st.st_size);
     if (ARG(1)) rt_w32(G_MEM, ARG(1), (uint32_t)((uint64_t)st.st_size >> 32));
     RET((uint32_t)st.st_size, 2);
+}
+IMPL(kernel32, GetFileSizeEx)                         /* (handle, LARGE_INTEGER *size) */
+{
+    HObj *o = h_get(ARG(0), H_FILE); struct stat st;
+    if (!o || fstat(((File *)o->p)->fd, &st)) { w32_set_last_error(c, 6); RET(0, 2); }
+    rt_w64(G_MEM, ARG(1), (uint64_t)st.st_size); RET(1, 2);
+}
+IMPL(kernel32, SetFilePointerEx)                      /* (handle, LARGE_INTEGER distance (2 dwords), LARGE_INTEGER *new position, method) */
+{
+    HObj *o = h_get(ARG(0), H_FILE); int64_t off = (int64_t)(((uint64_t)ARG(2) << 32) | ARG(1)); uint32_t np = ARG(3), method = ARG(4);
+    if (!o) { w32_set_last_error(c, 6); RET(0, 5); }
+    off_t r = lseek(((File *)o->p)->fd, off, method == 0 ? SEEK_SET : method == 1 ? SEEK_CUR : SEEK_END);
+    if (r < 0) { w32_set_last_error(c, 131); RET(0, 5); }
+    if (np) rt_w64(G_MEM, np, (uint64_t)r);
+    RET(1, 5);
 }
 IMPL(kernel32, GetFileTime)
 {

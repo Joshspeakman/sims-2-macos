@@ -15,7 +15,9 @@
 #include <time.h>
 #include <strings.h>
 #include <sys/socket.h>
+#ifdef __APPLE__
 #include <sys/sysctl.h>
+#endif
 #include <unistd.h>
 
 static pthread_mutex_t pm_lock = PTHREAD_MUTEX_INITIALIZER;
@@ -25,6 +27,17 @@ static int public_tried;
 /* ---- the default IPv4 gateway, from the routing table ---- */
 static uint32_t gateway(void)
 {
+#ifdef __linux__
+    FILE *f = fopen("/proc/net/route", "r");
+    if (!f) return 0;
+    char line[512], iface[64]; unsigned long dst, gw; unsigned flags, metric, best = ~0u;
+    uint32_t result = 0;
+    while (fgets(line, sizeof line, f)) {
+        if (sscanf(line, "%63s %lx %lx %x %*u %*u %u", iface, &dst, &gw, &flags, &metric) == 5 &&
+            dst == 0 && (flags & 3) == 3 && metric < best) { result = (uint32_t)gw; best = metric; }
+    }
+    fclose(f); return result;
+#else
     int mib[6] = {CTL_NET, PF_ROUTE, 0, AF_INET, NET_RT_FLAGS, RTF_GATEWAY};
     size_t len = 0; if (sysctl(mib, 6, 0, &len, 0, 0) < 0 || !len) return 0;
     char *buf = malloc(len); if (!buf || sysctl(mib, 6, buf, &len, 0, 0) < 0) { free(buf); return 0; }
@@ -43,6 +56,7 @@ static uint32_t gateway(void)
         p += rt->rtm_msglen;
     }
     free(buf); return gw;
+#endif
 }
 /* this Mac's address on the router's network */
 static uint32_t local_ip_toward(uint32_t gw)

@@ -4,8 +4,13 @@
 #include "w32.h"
 #include <unistd.h>
 #include <time.h>
+#include "../platform.h"
+#ifdef __linux__
+#include "display_modes.h"
+#endif
 
 int w32_screen_w = 1920, w32_screen_h = 1080; double w32_screen_scale = 1.0;   /* set by the host from the main screen */
+int w32_screen_hz = 60;
 enum { WM_CREATE = 1, WM_DESTROY = 2, WM_MOVE = 3, WM_SIZE = 5, WM_ACTIVATE = 6, WM_SETFOCUS = 7, WM_KILLFOCUS = 8,
        WM_PAINT = 0xf, WM_CLOSE = 0x10, WM_QUIT = 0x12, WM_ERASEBKGND = 0x14, WM_SHOWWINDOW = 0x18, WM_ACTIVATEAPP = 0x1c,
        WM_SETCURSOR = 0x20, WM_GETMINMAXINFO = 0x24, WM_WINDOWPOSCHANGING = 0x46, WM_WINDOWPOSCHANGED = 0x47,
@@ -64,6 +69,14 @@ IMPL(user32, AdjustWindowRect)
     rt_w32(G_MEM, r, rt_r32(G_MEM, r) - (uint32_t)l); rt_w32(G_MEM, r + 4, rt_r32(G_MEM, r + 4) - (uint32_t)t);
     rt_w32(G_MEM, r + 8, rt_r32(G_MEM, r + 8) + (uint32_t)rr); rt_w32(G_MEM, r + 12, rt_r32(G_MEM, r + 12) + (uint32_t)b);
     RET(1, 3);
+}
+IMPL(user32, AdjustWindowRectEx)                      /* (rect, style, menu, extended style) */
+{
+    uint32_t r = ARG(0); int l, t, rr, b; nc_size(ARG(1), 0, &l, &t, &rr, &b);
+    if (ARG(2)) t += 19;
+    rt_w32(G_MEM, r, rt_r32(G_MEM, r) - (uint32_t)l); rt_w32(G_MEM, r + 4, rt_r32(G_MEM, r + 4) - (uint32_t)t);
+    rt_w32(G_MEM, r + 8, rt_r32(G_MEM, r + 8) + (uint32_t)rr); rt_w32(G_MEM, r + 12, rt_r32(G_MEM, r + 12) + (uint32_t)b);
+    RET(1, 4);
 }
 void (*w32_host_window_created)(uint32_t hwnd, int x, int y, int w, int h, uint32_t style);
 void (*w32_host_window_changed)(uint32_t hwnd, int x, int y, int w, int h, int visible);
@@ -288,13 +301,28 @@ static Queue *Q(uint32_t tid)
     for (int k = 0; k < MAX_THREADS; k++) if (!queues[k].tid) { queues[k].tid = tid; return &queues[k]; }
     return &queues[0];
 }
-static uint32_t msg_time(void) { static uint32_t t = 1000; return w32_deterministic ? (t += 1) : (uint32_t)time(0); }
+static uint32_t msg_time(void) { static uint32_t t = 1000; return w32_deterministic ? (t += 1) : (uint32_t)(ds_clock_ns()/1000000); }
 static int cursor_x, cursor_y;
+static pthread_mutex_t cursor_lock = PTHREAD_MUTEX_INITIALIZER;
+/* The guest reads then warps its virtual pointer. Keep host motion received
+ * between those calls: discarding it makes high-polling mice feel uneven. */
+static int cursor_relative;
+static uint64_t cursor_epoch;
+static _Thread_local struct { int x,y,valid; uint64_t epoch; } cursor_read;
+void w32_relative_cursor(int enabled) {
+    pthread_mutex_lock(&cursor_lock); cursor_relative=enabled; cursor_epoch++; pthread_mutex_unlock(&cursor_lock);
+}
 void w32_post(uint32_t tid, uint32_t hwnd, uint32_t msg, uint32_t wp, uint32_t lp)
 {
     pthread_mutex_lock(&qlock);
     Queue *q = Q(tid);
-    if (q->n < 512) { Msg *m = &q->q[(q->head + q->n++) % 512]; m->hwnd = hwnd; m->msg = msg; m->wp = wp; m->lp = lp; m->time = msg_time(); m->x = (uint32_t)cursor_x; m->y = (uint32_t)cursor_y; }
+    /* Consecutive motion messages describe the latest position. Avoid filling
+     * the queue and losing button/key transitions with 1–8 kHz mice. */
+    Msg *m=NULL;
+    if(msg==0x200 && q->n) { Msg *last=&q->q[(q->head+q->n-1)%512]; if(last->msg==msg && last->hwnd==hwnd && last->wp==wp) m=last; }
+    if(!m && q->n<512) m=&q->q[(q->head+q->n++)%512];
+    if(m) { m->hwnd=hwnd; m->msg=msg; m->wp=wp; m->lp=lp; m->time=msg_time();
+        pthread_mutex_lock(&cursor_lock); m->x=(uint32_t)cursor_x; m->y=(uint32_t)cursor_y; pthread_mutex_unlock(&cursor_lock); }
     pthread_mutex_unlock(&qlock);
 }
 void (*w32_host_pump)(void);           /* backend: turn host events into posted messages */
@@ -399,20 +427,25 @@ uint8_t w32_keys[256];                 /* bit 7: down, bit 0: toggled */
 int w32_cursor_visible_count = 0;
 IMPL(user32, GetAsyncKeyState) { RET((w32_keys[ARG(0) & 0xff] & 0x80) ? 0x8000 : 0, 1); }
 IMPL(user32, GetKeyState) { uint8_t k = w32_keys[ARG(0) & 0xff]; RET(((k & 0x80) ? 0xff80u : 0) | (k & 1), 1); }
-static pthread_mutex_t cursor_lock = PTHREAD_MUTEX_INITIALIZER;
 IMPL(user32, GetCursorPos)
 {
-    pthread_mutex_lock(&cursor_lock); int x = cursor_x, y = cursor_y; pthread_mutex_unlock(&cursor_lock);
+    pthread_mutex_lock(&cursor_lock); int x = cursor_x, y = cursor_y;
+    cursor_read.x=x; cursor_read.y=y; cursor_read.epoch=cursor_epoch; cursor_read.valid=1;
+    pthread_mutex_unlock(&cursor_lock);
     rt_w32(G_MEM, ARG(0), (uint32_t)x); rt_w32(G_MEM, ARG(0) + 4, (uint32_t)y); RET(1, 1);
 }
 void (*w32_host_set_cursor_pos)(int x, int y);
 IMPL(user32, SetCursorPos)
 {
-    pthread_mutex_lock(&cursor_lock); cursor_x = (int)ARG(0); cursor_y = (int)ARG(1); pthread_mutex_unlock(&cursor_lock);
+    pthread_mutex_lock(&cursor_lock);
+    int dx=0,dy=0;
+    if(cursor_relative && cursor_read.valid && cursor_read.epoch==cursor_epoch) { dx=cursor_x-cursor_read.x; dy=cursor_y-cursor_read.y; }
+    cursor_x=(int)ARG(0)+dx; cursor_y=(int)ARG(1)+dy; cursor_read.valid=0; cursor_epoch++;
+    pthread_mutex_unlock(&cursor_lock);
     if (w32_host_set_cursor_pos) w32_host_set_cursor_pos((int)ARG(0), (int)ARG(1));
     RET(1, 2);
 }
-void w32_set_cursor(int x, int y) { pthread_mutex_lock(&cursor_lock); cursor_x = x; cursor_y = y; pthread_mutex_unlock(&cursor_lock); }
+void w32_set_cursor(int x, int y) { pthread_mutex_lock(&cursor_lock); cursor_x = x; cursor_y = y; cursor_epoch++; pthread_mutex_unlock(&cursor_lock); }
 /* relative motion from the host, applied to the cursor the game last read or set (it re-centres it every frame) */
 void w32_move_cursor(int dx, int dy, int w, int h, int *ox, int *oy)
 {
@@ -521,6 +554,16 @@ IMPL(user32, SystemParametersInfoA)
 }
 IMPL(user32, EnumDisplaySettingsA)
 {
+#ifdef __linux__
+    uint32_t modes[DS_DISPLAY_MODE_CAP][2];
+    int n = ds_display_modes(modes, w32_screen_w, w32_screen_h, getenv("DS_RESOLUTION"));
+    uint32_t mode = ARG(1), dm = ARG(2); int w, h, bpp;
+    if (mode == 0xffffffffu || mode == 0xfffffffeu) { w = w32_screen_w; h = w32_screen_h; bpp = 32; }
+    else {
+        if (mode >= (uint32_t)n * 2) RET(0, 3);
+        w = modes[mode / 2][0]; h = modes[mode / 2][1]; bpp = (mode & 1) ? 32 : 16;
+    }
+#else
     static const int modes[][2] = {{640, 480}, {800, 600}, {1024, 768}, {1152, 864}, {1280, 720}, {1280, 800}, {1280, 1024}, {1440, 900}, {1600, 1200}, {1680, 1050}, {1920, 1080}, {0, 0}};
     uint32_t mode = ARG(1), dm = ARG(2); int w, h, bpp;
     if (mode == 0xffffffffu || mode == 0xfffffffeu) { w = w32_screen_w; h = w32_screen_h; bpp = 32; }
@@ -530,8 +573,9 @@ IMPL(user32, EnumDisplaySettingsA)
         int k = (int)mode / 2; bpp = (mode & 1) ? 32 : 16;
         if (k < n) { w = modes[k][0]; h = modes[k][1]; } else { w = w32_screen_w; h = w32_screen_h; }
     }
+#endif
     memset(GP(dm + 32), 0, 124); rt_w16(G_MEM, dm + 36, 156); rt_w32(G_MEM, dm + 40, 0x5c0000);
-    rt_w32(G_MEM, dm + 104, (uint32_t)bpp); rt_w32(G_MEM, dm + 108, (uint32_t)w); rt_w32(G_MEM, dm + 112, (uint32_t)h); rt_w32(G_MEM, dm + 120, 60);
+    rt_w32(G_MEM, dm + 104, (uint32_t)bpp); rt_w32(G_MEM, dm + 108, (uint32_t)w); rt_w32(G_MEM, dm + 112, (uint32_t)h); rt_w32(G_MEM, dm + 120, (uint32_t)w32_screen_hz);
     RET(1, 3);
 }
 IMPL(user32, GetSysColor) { RET(0xc0c0c0, 1); }

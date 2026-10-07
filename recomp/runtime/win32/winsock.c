@@ -11,6 +11,18 @@
 #include <sys/ioctl.h>
 #include <sys/socket.h>
 #include <unistd.h>
+#ifndef MSG_NOSIGNAL
+#define MSG_NOSIGNAL 0
+#endif
+
+static void socket_no_sigpipe(int fd)
+{
+#ifdef SO_NOSIGPIPE
+    int one = 1; setsockopt(fd, SOL_SOCKET, SO_NOSIGPIPE, &one, sizeof one);
+#else
+    (void)fd; /* Linux suppresses SIGPIPE on each send with MSG_NOSIGNAL. */
+#endif
+}
 
 #define INVALID_SOCKET_ 0xffffffffu
 #define SOCKET_ERROR_ 0xffffffffu
@@ -55,7 +67,11 @@ static int sfd(uint32_t s)
 static int to_host(uint32_t g, uint32_t len, struct sockaddr_in *a)
 {
     if (!g || len < 8 || rt_r16(G_MEM, g) != 2) return 0;
-    memset(a, 0, sizeof *a); a->sin_len = sizeof *a; a->sin_family = AF_INET;
+    memset(a, 0, sizeof *a);
+#ifdef __APPLE__
+    a->sin_len = sizeof *a;
+#endif
+    a->sin_family = AF_INET;
     memcpy(&a->sin_port, GP(g + 2), 2); memcpy(&a->sin_addr, GP(g + 4), 4);
     return 1;
 }
@@ -74,7 +90,7 @@ IMPL(wsock32, ord23)                                    /* socket(af, type, prot
     if (type != 1 && type != 2) { w32_set_last_error(c, 10044); RET(INVALID_SOCKET_, 3); }
     int fd = socket(AF_INET, type == 1 ? SOCK_STREAM : SOCK_DGRAM, (int)proto);
     if (fd < 0) { w32_set_last_error(c, wsa_err(errno)); RET(INVALID_SOCKET_, 3); }
-    int one = 1; setsockopt(fd, SOL_SOCKET, SO_NOSIGPIPE, &one, sizeof one);
+    socket_no_sigpipe(fd);
     fcntl(fd, F_SETFD, FD_CLOEXEC);
     pthread_mutex_lock(&s_lock); int k = 0; while (k < MAXS && S[k].fd) k++;
     if (k < MAXS) { S[k].fd = fd + 1; S[k].nb = 0; }
@@ -107,7 +123,7 @@ IMPL(wsock32, ord1)                                     /* accept(s, addr, len*)
     SOCK(ARG(0), 3); struct sockaddr_in a; socklen_t l = sizeof a;
     int n = accept(fd, (struct sockaddr *)&a, &l);
     if (n < 0) { w32_set_last_error(c, wsa_err(errno)); RET(INVALID_SOCKET_, 3); }
-    int one = 1; setsockopt(n, SOL_SOCKET, SO_NOSIGPIPE, &one, sizeof one); fcntl(n, F_SETFD, FD_CLOEXEC);
+    socket_no_sigpipe(n); fcntl(n, F_SETFD, FD_CLOEXEC);
     pthread_mutex_lock(&s_lock); int k = 0; while (k < MAXS && S[k].fd) k++;
     if (k < MAXS) { S[k].fd = n + 1; S[k].nb = 0; }
     pthread_mutex_unlock(&s_lock);
@@ -118,7 +134,7 @@ IMPL(wsock32, ord1)                                     /* accept(s, addr, len*)
 }
 IMPL(wsock32, ord19)                                    /* send(s, buf, len, flags) */
 {
-    SOCK(ARG(0), 4); ssize_t n = send(fd, GP(ARG(1)), ARG(2), (int)(ARG(3) & 1));
+    SOCK(ARG(0), 4); ssize_t n = send(fd, GP(ARG(1)), ARG(2), (int)(ARG(3) & 1) | MSG_NOSIGNAL);
     if (n < 0) RET(fail_errno(c), 4);
     netlog("send", ARG(0), GP(ARG(1)), n);
     RET((uint32_t)n, 4);
@@ -133,8 +149,8 @@ IMPL(wsock32, ord16)                                    /* recv(s, buf, len, fla
 IMPL(wsock32, ord20)                                    /* sendto(s, buf, len, flags, to, tolen) */
 {
     SOCK(ARG(0), 6); struct sockaddr_in a; ssize_t n;
-    if (ARG(4)) { if (!to_host(ARG(4), ARG(5), &a)) RET(fail(c, 10014), 6); n = sendto(fd, GP(ARG(1)), ARG(2), (int)(ARG(3) & 1), (struct sockaddr *)&a, sizeof a); }
-    else n = send(fd, GP(ARG(1)), ARG(2), (int)(ARG(3) & 1));
+    if (ARG(4)) { if (!to_host(ARG(4), ARG(5), &a)) RET(fail(c, 10014), 6); n = sendto(fd, GP(ARG(1)), ARG(2), (int)(ARG(3) & 1) | MSG_NOSIGNAL, (struct sockaddr *)&a, sizeof a); }
+    else n = send(fd, GP(ARG(1)), ARG(2), (int)(ARG(3) & 1) | MSG_NOSIGNAL);
     if (n < 0) RET(fail_errno(c), 6);
     RET((uint32_t)n, 6);
 }
@@ -159,30 +175,61 @@ IMPL(wsock32, ord5)                                     /* getpeername(s, addr, 
     if (getpeername(fd, (struct sockaddr *)&a, &l)) RET(fail_errno(c), 3);
     to_guest(&a, ARG(1), ARG(2)); RET(0, 3);
 }
-/* option levels and names: SOL_SOCKET (0xffff) and its options have the same numbers on both; IPPROTO_TCP's
- * TCP_NODELAY is 1 on both. Windows takes BOOL options as 4 bytes, linger as two u16s. */
+/* WinSock option numbers follow Windows/BSD, not Linux. Translate explicitly;
+ * linger uses two u16s and timeouts use milliseconds on the guest side. */
+static int socket_option(uint32_t level, uint32_t name, int *host_level)
+{
+    if (level == 6 && name == 1) { *host_level = IPPROTO_TCP; return TCP_NODELAY; }
+    if (level != 0xffff) return -1;
+    *host_level = SOL_SOCKET;
+    switch (name) {
+    case 1: return SO_DEBUG; case 2: return SO_ACCEPTCONN;
+    case 4: return SO_REUSEADDR; case 8: return SO_KEEPALIVE;
+    case 0x10: return SO_DONTROUTE; case 0x20: return SO_BROADCAST;
+    case 0x80: case 0xff7f: return SO_LINGER; case 0x100: return SO_OOBINLINE;
+    case 0x1001: return SO_SNDBUF; case 0x1002: return SO_RCVBUF;
+    case 0x1003: return SO_SNDLOWAT; case 0x1004: return SO_RCVLOWAT;
+    case 0x1005: return SO_SNDTIMEO; case 0x1006: return SO_RCVTIMEO;
+    case 0x1007: return SO_ERROR; case 0x1008: return SO_TYPE;
+    default: return -1;
+    }
+}
 IMPL(wsock32, ord21)                                    /* setsockopt(s, level, name, value, len) */
 {
     SOCK(ARG(0), 5); uint32_t lvl = ARG(1), nm = ARG(2), v = ARG(3), len = ARG(4);
-    if (!v) RET(fail(c, 10014), 5);
-    if (lvl == 0xffff && nm == 0x80) {                  /* SO_LINGER: {u_short onoff, u_short seconds} */
-        struct linger lg = {rt_r16(G_MEM, v), rt_r16(G_MEM, v + 2)};
-        if (setsockopt(fd, SOL_SOCKET, SO_LINGER, &lg, sizeof lg)) RET(fail_errno(c), 5);
-        RET(0, 5);
-    }
-    if (lvl == 0xffff && nm == 0xff7f) RET(0, 5);       /* SO_DONTLINGER */
-    int iv = len >= 4 ? (int)rt_r32(G_MEM, v) : len >= 1 ? G_MEM[v] : 0;
-    int hl = lvl == 0xffff ? SOL_SOCKET : (int)lvl;
-    if (setsockopt(fd, hl, (int)nm, &iv, sizeof iv)) RET(fail_errno(c), 5);
+    if (!v || len < 4) RET(fail(c, 10014), 5);
+    int hl = 0, opt = socket_option(lvl, nm, &hl);
+    if (opt < 0) RET(fail(c, 10042), 5);
+    int iv = (int)rt_r32(G_MEM, v), rc;
+    if (hl == SOL_SOCKET && opt == SO_LINGER) {
+        struct linger lg = nm == 0xff7f ? (struct linger){!iv, 0} : (struct linger){rt_r16(G_MEM, v), rt_r16(G_MEM, v + 2)};
+        rc = setsockopt(fd, hl, opt, &lg, sizeof lg);
+    } else if (hl == SOL_SOCKET && (opt == SO_SNDTIMEO || opt == SO_RCVTIMEO)) {
+        if (iv < 0) RET(fail(c, 10022), 5);
+        struct timeval tv = {iv / 1000, (iv % 1000) * 1000};
+        rc = setsockopt(fd, hl, opt, &tv, sizeof tv);
+    } else rc = setsockopt(fd, hl, opt, &iv, sizeof iv);
+    if (rc) RET(fail_errno(c), 5);
     RET(0, 5);
 }
 IMPL(wsock32, ord7)                                     /* getsockopt(s, level, name, value, len*) */
 {
     SOCK(ARG(0), 5); uint32_t lvl = ARG(1), nm = ARG(2), v = ARG(3), lp = ARG(4);
-    if (!v || !lp) RET(fail(c, 10014), 5);
-    int iv = 0; socklen_t l = sizeof iv;
-    if (getsockopt(fd, lvl == 0xffff ? SOL_SOCKET : (int)lvl, (int)nm, &iv, &l)) RET(fail_errno(c), 5);
-    if (lvl == 0xffff && nm == 0x1007) iv = iv ? (int)wsa_err(iv) : 0;   /* SO_ERROR: as a Winsock code */
+    if (!v || !lp || rt_r32(G_MEM, lp) < 4) RET(fail(c, 10014), 5);
+    int hl = 0, opt = socket_option(lvl, nm, &hl), iv = 0, rc;
+    if (opt < 0) RET(fail(c, 10042), 5);
+    socklen_t l;
+    if (hl == SOL_SOCKET && opt == SO_LINGER) {
+        struct linger lg = {0}; l = sizeof lg;
+        rc = getsockopt(fd, hl, opt, &lg, &l);
+        iv = nm == 0xff7f ? !lg.l_onoff : (lg.l_onoff & 65535) | ((uint32_t)lg.l_linger << 16);
+    } else if (hl == SOL_SOCKET && (opt == SO_SNDTIMEO || opt == SO_RCVTIMEO)) {
+        struct timeval tv = {0}; l = sizeof tv;
+        rc = getsockopt(fd, hl, opt, &tv, &l);
+        iv = (int)(tv.tv_sec * 1000 + tv.tv_usec / 1000);
+    } else { l = sizeof iv; rc = getsockopt(fd, hl, opt, &iv, &l); }
+    if (rc) RET(fail_errno(c), 5);
+    if (hl == SOL_SOCKET && opt == SO_ERROR) iv = iv ? (int)wsa_err(iv) : 0;
     rt_w32(G_MEM, v, (uint32_t)iv); rt_w32(G_MEM, lp, 4);
     RET(0, 5);
 }

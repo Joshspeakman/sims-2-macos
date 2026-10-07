@@ -1,10 +1,10 @@
 /* KERNEL32 core: version, modules, environment, TLS, heaps, virtual memory, critical sections, interlocked, time,
  * synchronisation objects, handles, process control. */
 #include "w32.h"
-#include <sys/sysctl.h>
+
 #include <unistd.h>
 #include <time.h>
-#include <mach/mach_time.h>
+#include "platform.h"
 #include <sys/stat.h>
 
 extern uint32_t w32_cmdline_a, w32_cmdline_w, w32_modname_a, w32_env_a, w32_env_w;
@@ -37,6 +37,13 @@ int h_close(uint32_t h)
 
 /* ---- version / modules ---- */
 IMPL(kernel32, GetVersion) { RET(0x0a280105u, 0); }          /* Windows XP, build 2600 */
+IMPL(kernel32, IsProcessorFeaturePresent)
+{
+    /* Match rt_cpuid's guest CPU: CMPXCHG8B and RDTSC, without MMX/SSE.
+     * Reporting the host CPU's SIMD support would select unlifted guest code.
+     * Feature IDs: https://learn.microsoft.com/windows/win32/api/processthreadsapi/nf-processthreadsapi-isprocessorfeaturepresent */
+    RET(ARG(0) == 2 || ARG(0) == 8, 1);
+}
 IMPL(kernel32, GetVersionExA)
 {
     uint32_t p = ARG(0), sz = rt_r32(G_MEM, p);
@@ -47,7 +54,7 @@ IMPL(kernel32, GetVersionExA)
     RET(1, 1);
 }
 static const char *known_dlls[] = {"kernel32", "user32", "gdi32", "advapi32", "ddraw", "dsound", "dinput", "dinput8",
-    "winmm", "ole32", "oleaut32", "version", "wsock32", "ws2_32", "mss32", "binkw32", "ntdll", "shell32", "comctl32", "imm32", "shfolder", "dbghelp", 0};
+    "winmm", "ole32", "oleaut32", "version", "wsock32", "ws2_32", "mss32", "binkw32", "ntdll", "shell32", "comctl32", "imm32", "shfolder", "dbghelp", "d3d9", 0};
 #define MODULE_BASE 0x70000000u
 static int dll_index(const char *name)
 {
@@ -110,6 +117,7 @@ IMPL(kernel32, GetModuleFileNameA)
     RET(n, 3);
 }
 IMPL(kernel32, GetCommandLineA) { RET(w32_cmdline_a, 0); }
+IMPL(kernel32, GetCommandLineW) { RET(w32_cmdline_w, 0); }
 IMPL(kernel32, GetStartupInfoA) { uint32_t p = ARG(0); memset(GP(p), 0, 68); rt_w32(G_MEM, p, 68); RET(0, 1); }
 IMPL(kernel32, GetEnvironmentStrings) { RET(w32_env_a, 0); }
 IMPL(kernel32, GetEnvironmentStringsW) { RET(w32_env_w, 0); }
@@ -192,10 +200,15 @@ IMPL(kernel32, GetSystemInfo)
     /* The real core count, as Windows and Wine report it: the game picks its locks by it (0x43ec79: one CPU -> plain
      * inc/dec, which is only safe when threads never run at the same time; ours do). The harness keeps 1. */
     uint32_t ncpu = 1;
-    if (!w32_deterministic) { int n = 0; size_t sz = sizeof n; if (!sysctlbyname("hw.activecpu", &n, &sz, 0, 0) && n > 1) ncpu = n > 32 ? 32 : (uint32_t)n; }
+    if (!w32_deterministic) ncpu = ds_cpu_count();
     rt_w32(G_MEM, p + 16, ncpu >= 32 ? 0xffffffffu : (1u << ncpu) - 1); rt_w32(G_MEM, p + 20, ncpu); rt_w32(G_MEM, p + 24, 586); rt_w32(G_MEM, p + 28, 0x10000);
     rt_w16(G_MEM, p + 32, 6); rt_w16(G_MEM, p + 34, 0x0f01);
     RET(0, 1);
+}
+IMPL(kernel32, GlobalMemoryStatusEx)                   /* MEMORYSTATUSEX: 2 GB of physical memory free for a 32-bit process */
+{
+    uint32_t p = ARG(0); uint64_t v[7] = {8ull << 30, 6ull << 30, 16ull << 30, 14ull << 30, 0x7ffe0000ull, 0x70000000ull, 0};
+    rt_w32(G_MEM, p, 64); rt_w32(G_MEM, p + 4, 25); memcpy(GP(p + 8), v, 56); RET(1, 1);
 }
 IMPL(kernel32, GlobalMemoryStatus)
 {
@@ -210,15 +223,22 @@ static CS cstab[NCS]; static pthread_mutex_t cs_lock = PTHREAD_MUTEX_INITIALIZER
 static CS *cs_find(uint32_t a, int create)
 {
     uint32_t k = (a * 2654435761u) % NCS;
+    CS *free_slot = 0;
     pthread_mutex_lock(&cs_lock);
     for (int n = 0; n < NCS; n++, k = (k + 1) % NCS) {
         if (cstab[k].addr == a) { pthread_mutex_unlock(&cs_lock); return &cstab[k]; }
         if (!cstab[k].addr || cstab[k].addr == 1) {
-            if (!create) break;
-            pthread_mutexattr_t at; pthread_mutexattr_init(&at); pthread_mutexattr_settype(&at, PTHREAD_MUTEX_RECURSIVE);
-            pthread_mutex_init(&cstab[k].m, &at); cstab[k].addr = a;
-            pthread_mutex_unlock(&cs_lock); return &cstab[k];
+            if (!free_slot) free_slot = &cstab[k];
+            /* A deleted entry is not the end of a probe chain. Reusing it
+             * before checking later entries can create two mutexes for one
+             * live guest critical section, defeating mutual exclusion. */
+            if (!cstab[k].addr) break;
         }
+    }
+    if (create && free_slot) {
+        pthread_mutexattr_t at; pthread_mutexattr_init(&at); pthread_mutexattr_settype(&at, PTHREAD_MUTEX_RECURSIVE);
+        pthread_mutex_init(&free_slot->m, &at); pthread_mutexattr_destroy(&at); free_slot->addr = a;
+        pthread_mutex_unlock(&cs_lock); return free_slot;
     }
     pthread_mutex_unlock(&cs_lock); return 0;
 }
@@ -230,7 +250,7 @@ IMPL(kernel32, InitializeCriticalSection)
 IMPL(kernel32, DeleteCriticalSection)
 {
     CS *s = cs_find(ARG(0), 0);
-    if (s) { pthread_mutex_destroy(&s->m); s->addr = 1; }
+    if (s) { pthread_mutex_lock(&cs_lock); pthread_mutex_destroy(&s->m); s->addr = 1; pthread_mutex_unlock(&cs_lock); }
     RET(0, 1);
 }
 IMPL(kernel32, EnterCriticalSection)
@@ -248,17 +268,35 @@ IMPL(kernel32, LeaveCriticalSection)
     pthread_mutex_unlock(&s->m);
     RET(0, 1);
 }
+IMPL(kernel32, InitializeCriticalSectionAndSpinCount)
+{
+    uint32_t p = ARG(0); memset(GP(p), 0, 24); rt_w32(G_MEM, p + 4, 0xffffffffu); cs_find(p, 1); RET(1, 2);
+}
+IMPL(kernel32, TryEnterCriticalSection)
+{
+    uint32_t p = ARG(0); CS *s = cs_find(p, 1);
+    if (pthread_mutex_trylock(&s->m)) RET(0, 1);
+    rt_w32(G_MEM, p + 8, rt_r32(G_MEM, p + 8) + 1); rt_w32(G_MEM, p + 12, w32_tid(c));
+    RET(1, 1);
+}
+IMPL(kernel32, InterlockedExchangeAdd) { RET(__atomic_fetch_add((uint32_t *)GP(ARG(0)), ARG(1), __ATOMIC_SEQ_CST), 2); }
 IMPL(kernel32, InterlockedIncrement) { RET(__atomic_add_fetch((uint32_t *)GP(ARG(0)), 1u, __ATOMIC_SEQ_CST), 1); }
 IMPL(kernel32, InterlockedDecrement) { RET(__atomic_sub_fetch((uint32_t *)GP(ARG(0)), 1u, __ATOMIC_SEQ_CST), 1); }
 IMPL(kernel32, InterlockedExchange) { RET(__atomic_exchange_n((uint32_t *)GP(ARG(0)), ARG(1), __ATOMIC_SEQ_CST), 2); }
+IMPL(kernel32, InterlockedCompareExchange)
+{
+    uint32_t previous = ARG(2);
+    __atomic_compare_exchange_n((uint32_t *)GP(ARG(0)), &previous, ARG(1), 0,
+                                __ATOMIC_SEQ_CST, __ATOMIC_SEQ_CST);
+    RET(previous, 3);
+}
 
 /* ---- time: real, or a deterministic clock for the harness (1 ms per query) ---- */
 static uint64_t fake_us = 1000000;
 static uint64_t now_us(void)
 {
     if (w32_deterministic) return fake_us += 1000;
-    static mach_timebase_info_data_t tb; if (!tb.denom) mach_timebase_info(&tb);
-    return mach_absolute_time() * tb.numer / tb.denom / 1000;
+    return ds_clock_ns() / 1000;
 }
 static uint64_t filetime_now(void)          /* 100 ns units since 1601 */
 {
@@ -308,7 +346,7 @@ IMPL(kernel32, Sleep)
 }
 
 /* ---- synchronisation objects ---- */
-typedef struct Sync { pthread_mutex_t m; pthread_cond_t cv; int manual, signaled, count; uint32_t owner; char name[64]; } Sync;
+typedef struct Sync { pthread_mutex_t m; pthread_cond_t cv; int manual, signaled, count; uint32_t owner; char name[64]; int waiters, closed; } Sync;   /* same in core.c and threads.c */
 static Sync *sync_new(int manual, int signaled)
 {
     Sync *s = calloc(1, sizeof *s); pthread_mutex_init(&s->m, 0); pthread_cond_init(&s->cv, 0);
@@ -323,6 +361,13 @@ IMPL(kernel32, CreateEventA)
     if (name && nnamed < 64) { snprintf(s->name, sizeof s->name, "%s", GS(name)); named[nnamed] = s; named_h[nnamed++] = h; }
     w32_set_last_error(c, 0); RET(h, 4);
 }
+/* an event for runtime components that hand the game a handle to wait on (dshow.c) */
+uint32_t w32_event_new(int manual, int signaled) { return h_new(H_EVENT, sync_new(manual, signaled)); }
+void w32_event_signal(uint32_t h, int on)
+{
+    HObj *o = h_get(h, H_EVENT); if (!o) return;
+    Sync *s = o->p; pthread_mutex_lock(&s->m); s->signaled = on; if (on) pthread_cond_broadcast(&s->cv); pthread_mutex_unlock(&s->m);
+}
 IMPL(kernel32, CreateMutexA)
 {
     uint32_t name = ARG(2);
@@ -331,6 +376,26 @@ IMPL(kernel32, CreateMutexA)
     uint32_t h = h_new(H_MUTEX, s);
     if (name && nnamed < 64) { snprintf(s->name, sizeof s->name, "%s", GS(name)); named[nnamed] = s; named_h[nnamed++] = h; }
     w32_set_last_error(c, 0); RET(h, 3);
+}
+IMPL(kernel32, CreateSemaphoreA)                       /* (attributes, initial, maximum, name) */
+{
+    uint32_t name = ARG(3);
+    if (name) for (int k = 0; k < nnamed; k++) if (!strcmp(named[k]->name, GS(name))) { w32_set_last_error(c, 183); htab[(named_h[k] - 0x100) / 4].refs++; RET(named_h[k], 4); }
+    Sync *s = sync_new(0, 0); s->count = (int)ARG(1); s->owner = ARG(2);          /* owner: the maximum count */
+    uint32_t h = h_new(H_SEMAPHORE, s);
+    if (name && nnamed < 64) { snprintf(s->name, sizeof s->name, "%s", GS(name)); named[nnamed] = s; named_h[nnamed++] = h; }
+    w32_set_last_error(c, 0); RET(h, 4);
+}
+IMPL(kernel32, ReleaseSemaphore)                       /* (handle, release count, previous count out) */
+{
+    HObj *o = h_get(ARG(0), H_SEMAPHORE); if (!o) { w32_set_last_error(c, 6); RET(0, 3); }
+    Sync *s = o->p; pthread_mutex_lock(&s->m);
+    int prev = s->count, ok = (uint32_t)prev + ARG(1) <= s->owner;
+    if (ok) { s->count += (int)ARG(1); pthread_cond_broadcast(&s->cv); }
+    pthread_mutex_unlock(&s->m);
+    if (ARG(2)) rt_w32(G_MEM, ARG(2), (uint32_t)prev);
+    if (!ok) w32_set_last_error(c, 298);                   /* ERROR_TOO_MANY_POSTS */
+    RET(ok, 3);
 }
 IMPL(kernel32, OpenMutexA)
 {
@@ -364,23 +429,26 @@ int w32_wait_one(Ctx *c, uint32_t h, uint32_t ms)
 {
     HObj *o = h_get(h, 0); if (!o) return -1;
     if (o->type != H_EVENT && o->type != H_MUTEX && o->type != H_THREAD && o->type != H_SEMAPHORE) return -1;
-    Sync *s = o->p; uint32_t tid = w32_tid(c);
+    Sync *s = o->p; uint32_t tid = w32_tid(c); int type = o->type;   /* o may be closed (and its slot reused) while we wait */
     struct timespec dl; clock_gettime(CLOCK_REALTIME, &dl);
     dl.tv_sec += ms / 1000; dl.tv_nsec += (long)(ms % 1000) * 1000000; if (dl.tv_nsec >= 1000000000) { dl.tv_sec++; dl.tv_nsec -= 1000000000; }
     void w32_crash_wait_begin(int, uint32_t, uint32_t), w32_crash_wait_end(void);
     if (ms) w32_crash_wait_begin(1, h, ms);
-    pthread_mutex_lock(&s->m);
+    pthread_mutex_lock(&s->m); s->waiters++;
+    int r = 0;
     for (;;) {
-        if (o->type == H_MUTEX && (s->count == 0 || s->owner == tid)) { s->owner = tid; s->count++; break; }
-        if (o->type == H_SEMAPHORE && s->count > 0) { s->count--; break; }
-        if ((o->type == H_EVENT || o->type == H_THREAD) && s->signaled) { if (o->type == H_EVENT && !s->manual) s->signaled = 0; break; }
-        if (w32_deterministic && ms != 0) { pthread_mutex_unlock(&s->m); rt_unhandled(c, rt_r32(G_MEM, c->esp), "wait would block on another thread (harness)"); }
-        if (ms == 0 || (ms != 0xffffffffu && pthread_cond_timedwait(&s->cv, &s->m, &dl))) { pthread_mutex_unlock(&s->m); if (ms) w32_crash_wait_end(); return 0x102; }
+        if (type == H_MUTEX && (s->count == 0 || s->owner == tid)) { s->owner = tid; s->count++; break; }
+        if (type == H_SEMAPHORE && s->count > 0) { s->count--; break; }
+        if ((type == H_EVENT || type == H_THREAD) && s->signaled) { if (type == H_EVENT && !s->manual) s->signaled = 0; break; }
+        if (w32_deterministic && ms != 0) { s->waiters--; pthread_mutex_unlock(&s->m); rt_unhandled(c, rt_r32(G_MEM, c->esp), "wait would block on another thread (harness)"); }
+        if (ms == 0 || (ms != 0xffffffffu && pthread_cond_timedwait(&s->cv, &s->m, &dl))) { r = 0x102; break; }
         if (ms == 0xffffffffu) pthread_cond_wait(&s->cv, &s->m);
     }
+    int last = --s->waiters == 0 && s->closed;
     pthread_mutex_unlock(&s->m);
+    if (last) { pthread_mutex_destroy(&s->m); pthread_cond_destroy(&s->cv); free(s); }
     if (ms) w32_crash_wait_end();
-    return 0;
+    return r;
 }
 IMPL(kernel32, WaitForSingleObject)
 {
@@ -403,9 +471,12 @@ __attribute__((weak)) void w32_file_closed(HObj *o) { (void)o; }
 void w32_handle_closed(HObj *o)
 {
     if (o->type == H_THREAD || o->type == H_PROCESS) return;       /* thread objects live as long as the process */
-    if (o->type == H_EVENT || o->type == H_MUTEX) {
+    if (o->type == H_EVENT || o->type == H_MUTEX || o->type == H_SEMAPHORE) {
         Sync *s = o->p; for (int k = 0; k < nnamed; k++) if (named[k] == s) { named[k] = named[--nnamed]; named_h[k] = named_h[nnamed]; }
-        pthread_mutex_destroy(&s->m); pthread_cond_destroy(&s->cv); free(s);
+        /* Windows keeps an object alive while threads wait on it (they go on waiting); destroying a condition variable
+         * with waiters blocks forever in glibc (Fallout NV closes its worker threads' event on quit): the last waiter frees */
+        pthread_mutex_lock(&s->m); int busy = s->waiters > 0; s->closed = 1; pthread_mutex_unlock(&s->m);
+        if (!busy) { pthread_mutex_destroy(&s->m); pthread_cond_destroy(&s->cv); free(s); }
     } else w32_file_closed(o);
 }
 

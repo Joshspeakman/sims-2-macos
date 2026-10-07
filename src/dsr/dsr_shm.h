@@ -13,6 +13,9 @@
 #define DSR_READBACK_OFFSET (DSR_HEADER_SIZE + DSR_RING_SIZE)
 #define DSR_SHM_SIZE    (DSR_HEADER_SIZE + DSR_RING_SIZE + DSR_READBACK_SIZE)
 #define DSR_WRAP        0xffffu       /* record op: skip to the start of the ring */
+#define DSR_QUERY_SLOTS 1024u         /* occlusion query results, in the header after the struct: u32 count[slots], then
+                                         u32 serial[slots] (the serial of the DSR_QUERY end the count belongs to) */
+#define DSR_QUERY_OFFSET 8192u
 typedef struct {
     uint32_t magic, version;
     volatile uint32_t producer_pid;    /* set by ddraw.dll when it attaches (Windows pid) */
@@ -36,5 +39,19 @@ typedef struct {
     volatile uint32_t cursor_hide;     /* injector: Wine has hidden the pointer and the game is the active app. macOS only
                                           hides the pointer over surfaces of the process that hid it, and the game's pixels
                                           come from the renderer's layer, so the renderer mirrors this (see the renderer.m). */
+    volatile uint32_t consumer_waiting; /* Linux: wake the renderer on new commands */
 } DsrShmHeader;
+#ifdef __linux__
+#include <linux/futex.h>
+#include <sys/syscall.h>
+#include <unistd.h>
+#include <time.h>
+static inline void dsr_wake(volatile uint32_t *p) {
+    syscall(SYS_futex,p,FUTEX_WAKE_PRIVATE,1,0,0,0);
+}
+static inline void dsr_wait(volatile uint32_t *p,uint32_t expected,long ns) {
+    struct timespec timeout={ns/1000000000,ns%1000000000};
+    syscall(SYS_futex,p,FUTEX_WAIT_PRIVATE,expected,&timeout,0,0);
+}
+#endif
 #endif

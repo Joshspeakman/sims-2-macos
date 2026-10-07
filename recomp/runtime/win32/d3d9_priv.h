@@ -17,7 +17,8 @@ enum { RT_SURFACE = 1, RT_VOLUME, RT_TEXTURE, RT_VOLUMETEXTURE, RT_CUBETEXTURE, 
 enum { USAGE_RENDERTARGET = 1, USAGE_DEPTHSTENCIL = 2, USAGE_WRITEONLY = 8, USAGE_DYNAMIC = 0x200, USAGE_AUTOGENMIPMAP = 0x400 };
 enum { LOCK_READONLY = 0x10, LOCK_DISCARD = 0x2000, LOCK_NOOVERWRITE = 0x1000 };
 
-int d9_fmt_block(uint32_t f); int d9_fmt_bytes(uint32_t f); int d9_fmt_known(uint32_t f); int d9_fmt_depth(uint32_t f); int d9_fmt_alpha(uint32_t f);
+int d9_fmt_block(uint32_t f); int d9_fmt_bytes(uint32_t f); int d9_fmt_float(uint32_t f);
+int d9_fmt_known(uint32_t f); int d9_fmt_depth(uint32_t f); int d9_fmt_alpha(uint32_t f);
 uint32_t d9_pitch(uint32_t f, uint32_t w); uint32_t d9_rows(uint32_t f, uint32_t h); uint32_t d9_size(uint32_t f, uint32_t w, uint32_t h);
 void d9_to_bgra(uint32_t f, const uint8_t *src, uint32_t pitch, uint32_t w, uint32_t y0, uint32_t y1, uint8_t *dst);
 void d9_from_bgra(uint32_t f, const uint8_t *src, uint32_t w, uint32_t h, uint8_t *dst, uint32_t pitch);
@@ -42,18 +43,18 @@ typedef struct Surf9 {
     uint32_t g; int ref; Dev9 *dev; Tex9 *tex; uint32_t level, face;
     uint32_t id, w, h, fmt, usage, pool; int kind;     /* renderer kind: 1 render target, 2 depth, 3 texture, 4 offscreen */
     uint32_t mem, pitch, size;                          /* CPU copy in the game's format */
-    int locked; uint32_t lflags, ly0, ly1; int gpu_newer;
+    int locked; uint32_t lflags, ly0, ly1; int gpu_newer; uint32_t samples;
 } Surf9;
 struct Tex9 {
     uint32_t g; int ref; Dev9 *dev; int type;          /* O9_TEX, O9_CUBE, O9_VOLTEX */
     uint32_t w, h, d, levels, fmt, usage, pool, lod;
     Surf9 *lv[6][16];                                   /* [face][level] (volume textures: slice 0 only, for now) */
 };
-typedef struct Buf9 { uint32_t g; int ref; Dev9 *dev; int index; uint32_t len, usage, fmt, pool, mem; } Buf9;
+typedef struct Buf9 { uint32_t g; int ref; Dev9 *dev; int index; uint32_t len, usage, fmt, pool, mem; uint32_t gid, dlo, dhi, llo, lhi; } Buf9;   /* gid: the renderer's copy (0 none); [dlo, dhi): written since it was sent; [llo, lhi): locked now */
 typedef struct DElem { uint8_t stream, type, usage, uidx; uint16_t off, dst, size; } DElem;
 typedef struct Decl9 { uint32_t g; int ref; Dev9 *dev; DElem e[32]; int n; uint32_t raw, nraw, fvf; int ok; } Decl9;
 typedef struct Shader9 { uint32_t g; int ref; Dev9 *dev; int ps; uint32_t mem, len; } Shader9;
-typedef struct Query9 { uint32_t g; int ref; Dev9 *dev; uint32_t type; } Query9;
+typedef struct Query9 { uint32_t g; int ref; Dev9 *dev; uint32_t type, slot, serial, last, polls; } Query9;
 typedef struct RecEnt { uint8_t kind; uint32_t a, b; float m[16]; void *p; } RecEnt;
 enum { REC_RS, REC_TSS, REC_SS, REC_TEX, REC_XF, REC_FVF, REC_DECL, REC_VS, REC_PS, REC_VP, REC_MAT, REC_STREAM, REC_IND };
 typedef struct SB9 { uint32_t g; int ref; Dev9 *dev; RecEnt *e; int n, cap; } SB9;
@@ -68,7 +69,7 @@ struct Dev9 {
     Tex9 *tex[16]; uint32_t fvf; Decl9 *decl;
     Buf9 *vb[16]; uint32_t vb_off[16], vb_stride[16]; Buf9 *ib;
     uint32_t vp[6]; uint8_t material[68]; uint8_t light[8][104]; int light_on[8];
-    Shader9 *vs, *ps; float vsc[256][4], psc[224][4];
+    Shader9 *vs, *ps; float vsc[256][4], psc[224][4]; int32_t vsi[16][4], psi[16][4]; uint32_t vsb[16], psb[16];
     float clip[6][4]; int32_t scissor[4];
     SB9 *rec;                                           /* recording a state block (BeginStateBlock) */
     Surf9 *cursor; int cursor_x, cursor_y, cursor_hx, cursor_hy, cursor_show;
@@ -83,6 +84,10 @@ void d9_tex_addref(uint32_t g); void d9_tex_release(uint32_t g);   /* a texture 
 uint32_t d9_surf_lock(Surf9 *s, uint32_t locked, uint32_t rect, uint32_t flags);
 uint32_t d9_surf_unlock(Surf9 *s);
 void d9_surf_upload(Surf9 *s, uint32_t y0, uint32_t y1);
+/* the game's own shaders (d3d9_shader.c) */
+uint32_t d9_shader_program(Dev9 *d);
+void d9_shader_consts(Dev9 *d, uint32_t id);
+void d9_shader_forget(Shader9 *s);
 /* for the effect framework (d3dx9_fx.c) */
 void d9_set_rs(Dev9 *d, uint32_t s, uint32_t v);
 void d9_set_tss(Dev9 *d, uint32_t stage, uint32_t t, uint32_t v);
