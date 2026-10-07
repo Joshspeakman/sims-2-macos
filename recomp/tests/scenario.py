@@ -50,12 +50,15 @@ def _():
 @scenario('load-dusk', 130)
 def _():
     s, t = world(100, 'set gamehour to 19', 'player.setangle x 0', 'player.setangle z 220'); return s + [(t + 10, 'shot', 'dusk')]
-@scenario('load-saloon', 140)
+def travel(t0, *cmds):                 # after loading: commands ending in a coc, then (once it has loaded) menus hidden
+    s, t = console(t0, *cmds); s2, t2 = console(t + 25, 'tm')
+    return LOAD + s + s2, t2
+@scenario('load-saloon', 150)
 def _():
-    s, t = world(100, 'coc GSProspectorSaloonInterior'); return s + [(t + 15, 'shot', 'saloon')]
-@scenario('load-strip', 150)
+    s, t = travel(100, 'coc GSProspectorSaloonInterior'); return s + [(t + 4, 'shot', 'saloon')]
+@scenario('load-strip', 160)
 def _():
-    s, t = world(100, 'set gamehour to 21', 'coc TheStrip'); return s + [(t + 25, 'shot', 'strip')]
+    s, t = travel(100, 'set gamehour to 21', 'coc TheStrip'); return s + [(t + 4, 'shot', 'strip')]
 @scenario('saloon', 170)
 def _():
     s, t = console(125, 'coc GSProspectorSaloonInterior')
@@ -83,7 +86,7 @@ def ref_script(steps):
     return ';'.join(parts)
 if __name__ == '__main__':
     name, which = sys.argv[1], sys.argv[2] if len(sys.argv) > 2 else 'both'
-    secs, fn = SCENARIOS[name]; steps = sorted(fn(), key=lambda s: s[0])
+    secs, fn = SCENARIOS[name]; steps = sorted(fn(), key=lambda s: s[0]); secs = max(secs, int(steps[-1][0]) + 8)   # room for the last step
     base = os.path.join(HERE, 'work', 'scen-' + name); nat, ref = os.path.join(base, 'native'), os.path.join(base, 'ref')
     os.makedirs(nat, exist_ok=True); os.makedirs(ref, exist_ok=True)
     procs = []
