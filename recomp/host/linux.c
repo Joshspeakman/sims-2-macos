@@ -93,7 +93,36 @@ static void fnv_prefs(const char *drive,const char *game) {
 }
 #endif
 #ifdef FNV_EDITION
-#define ENSURE_PREFS(drive,game) fnv_prefs(drive,game)
+#include <dirent.h>
+/* Havok steps at most fMaxTime seconds per frame (Fallout_default.ini: 0.016, made for 60 fps). Above that physics
+ * jitters and objects fly; the usual fix is fMaxTime = 1 / frame rate. Fallout.ini (the engine's copy of
+ * Fallout_default.ini, made on first run; any case) gets the value for the frame cap (unlimited: the display's rate). */
+static void fnv_havok(const char *drive,const char *game) {
+ const char *cap=getenv("DSR_FPSCAP"); double fps=cap?atof(cap):60; if(fps<=0) fps=w32_screen_hz>0?w32_screen_hz:60;
+ if(fps<60) fps=60;
+ char dir[1400],path[1700]={0},src[1500];
+ snprintf(dir,sizeof dir,"%s/Users/player/Documents/My Games/FalloutNV",drive); mkdirs(dir);
+ DIR *d=opendir(dir); struct dirent *e;
+ while(d && (e=readdir(d))) if(!strcasecmp(e->d_name,"Fallout.ini")) { snprintf(path,sizeof path,"%s/%s",dir,e->d_name); break; }
+ if(d) closedir(d);
+ FILE *in;
+ if(path[0]) in=fopen(path,"r");
+ else { snprintf(src,sizeof src,"%s/Fallout_default.ini",game); in=fopen(src,"r"); snprintf(path,sizeof path,"%s/FALLOUT.INI",dir); }
+ if(!in) return;
+ char temp[1800]; snprintf(temp,sizeof temp,"%s.tmp",path); FILE *out=fopen(temp,"w"); if(!out) { fclose(in); return; }
+ char line[2048],key[80]; int havok=0,done=0;
+ while(fgets(line,sizeof line,in)) {
+  if(line[0]=='[') { if(havok && !done) { fprintf(out,"fMaxTime=%.6f\r\n",1.0/fps); done=1; } havok=!strncasecmp(line,"[HAVOK]",7); }
+  key[0]=0; sscanf(line,"%79[^=]",key);
+  if(havok && !strcasecmp(key,"fMaxTime")) { if(!done) fprintf(out,"fMaxTime=%.6f\r\n",1.0/fps); done=1; continue; }
+  fputs(line,out);
+ }
+ if(!done && havok) fprintf(out,"fMaxTime=%.6f\r\n",1.0/fps);                 /* [HAVOK] was the last section */
+ else if(!done) fprintf(out,"\r\n[HAVOK]\r\nfMaxTime=%.6f\r\n",1.0/fps);
+ fclose(in); fclose(out); rename(temp,path);
+ fprintf(stderr,"host: Havok step for %.0f fps (fMaxTime %.6f)\n",fps,1.0/fps);
+}
+#define ENSURE_PREFS(drive,game) do { fnv_prefs(drive,game); fnv_havok(drive,game); } while(0)
 #else
 #define ENSURE_PREFS(drive,game) ensure_resolution(drive)
 #endif
