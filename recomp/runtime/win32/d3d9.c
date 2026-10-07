@@ -95,6 +95,8 @@ static uint32_t surf_lock(Surf9 *s, uint32_t locked, uint32_t rect, uint32_t fla
 {
     int32_t r[4] = {0, 0, (int32_t)s->w, (int32_t)s->h};
     if (rect) { memcpy(r, GP(rect), 16); if (r[0] < 0 || r[1] < 0 || r[2] > (int32_t)s->w || r[3] > (int32_t)s->h || r[2] <= r[0] || r[3] <= r[1]) return D3DERR_INVALIDCALL; }
+    { static int lg = -1; if (lg < 0) lg = getenv("D3D9_LOCKLOG") ? 200 : 0;
+      if (lg > 0 && (s->usage & USAGE_RENDERTARGET)) { lg--; fprintf(stderr, "d3d9: lock render target %u %ux%u format %#x flags %#x (gpu newer %d)\n", s->id, s->w, s->h, s->fmt, flags, s->gpu_newer); } }
     if (!(flags & LOCK_DISCARD)) surf_readback(s);
     uint32_t off = d9_fmt_block(s->fmt) ? (uint32_t)(r[1] / 4) * s->pitch + (uint32_t)(r[0] / 4) * (uint32_t)d9_fmt_block(s->fmt)
                                         : (uint32_t)r[1] * s->pitch + (uint32_t)r[0] * (uint32_t)(d9_fmt_bytes(s->fmt) ? d9_fmt_bytes(s->fmt) : 4);
@@ -386,7 +388,7 @@ static void set_ss(Dev9 *d, uint32_t sm, uint32_t t, uint32_t v)   /* sampler st
     if (d->rec) { RecEnt e = {REC_SS, sm << 8 | t, v}; rec_put(d->rec, e); return; }
     d->ss[sm][t] = v;
     static const uint8_t map[14] = {0, 13, 14, 0, 15, 16, 17, 18, 19, 20, 21, 0, 0, 0};
-    if (sm < 8 && map[t]) { uint32_t *p = cmd_begin(DSR_TSS, 12); p[0] = sm; p[1] = map[t]; p[2] = t == 7 ? v + 1 : v; cmd_end(); }   /* mip filter: D3D9 0-2, D3D7 1-3 */
+    if (sm < 16 && map[t]) { uint32_t *p = cmd_begin(DSR_TSS, 12); p[0] = sm; p[1] = map[t]; p[2] = t == 7 ? v + 1 : v; cmd_end(); }   /* mip filter: D3D9 0-2, D3D7 1-3; all 16 pixel samplers */
 }
 static uint32_t tex_id(Tex9 *t) { return t && t->lv[0][0] ? t->lv[0][0]->id : 0; }
 static void set_tex(Dev9 *d, uint32_t st, Tex9 *t)
@@ -398,7 +400,7 @@ static void set_tex(Dev9 *d, uint32_t st, Tex9 *t)
       if (n > 0 && d->prog) { n--; fprintf(stderr, "d3d9: program %u: stage %u texture %08x (from %08x)\n", d->prog, st, t ? t->g : 0, (uint32_t)(uintptr_t)__builtin_return_address(0)); } }
     if (d->tex[st]) tex_release(d->tex[st]);
     d->tex[st] = t;
-    if (st < 8) { uint32_t *p = cmd_begin(DSR_TEXTURE, 8); p[0] = st; p[1] = tex_id(t); cmd_end(); }
+    if (st < 16) { uint32_t *p = cmd_begin(DSR_TEXTURE, 8); p[0] = st; p[1] = tex_id(t); cmd_end(); }   /* shader model 2/3: 16 samplers */
 }
 static int xf_slot(uint32_t t) { return t == 256 ? 1 : (t == 2 || t == 3) ? (int)t : (t >= 16 && t <= 23) ? (int)t : -1; }
 static void set_xf(Dev9 *d, uint32_t t, const float *m)
@@ -896,7 +898,7 @@ OK_M(dv_SetPaletteEntries, 3)
 TODO_M(dv_GetPaletteEntries, 3, D3DERR_INVALIDCALL)
 OK_M(dv_SetCurrentTexturePalette, 2)
 M(dv_GetCurrentTexturePalette, 2) rt_w32(G_MEM, ARG(1), 0); RET(D3D_OK, 2); END
-M(dv_SetScissorRect, 2) DEV_ME memcpy(me->scissor, GP(ARG(1)), 16); RET(D3D_OK, 2); END
+M(dv_SetScissorRect, 2) DEV_ME memcpy(me->scissor, GP(ARG(1)), 16); { uint32_t *p = cmd_begin(DSR_SCISSOR, 16); memcpy(p, me->scissor, 16); cmd_end(); } RET(D3D_OK, 2); END
 M(dv_GetScissorRect, 2) DEV_ME memcpy(GP(ARG(1)), me->scissor, 16); RET(D3D_OK, 2); END
 OK_M(dv_SetSoftwareVertexProcessing, 2)
 M(dv_GetSoftwareVertexProcessing, 1) RET(0, 1); END

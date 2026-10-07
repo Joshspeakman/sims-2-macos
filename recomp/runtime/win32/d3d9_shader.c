@@ -64,6 +64,22 @@ static char *wrap_ps(const char *src, size_t n, size_t *outlen)
         "\t\tif (!pass) discard;\n\t}\n}\n", out);
     o = append(o, &len, &cap, tail, (size_t)k); *outlen = len; return o;
 }
+/* the vertex shader with D3D9's pixel centres: D3D9 puts them on integer coordinates, GL half a pixel further, so
+ * positions move by half a pixel (d3d_pixfix = 1/viewport width, -1/viewport height, before the render-target flip).
+ * Games correct for D3D9 themselves (a 1x1 target's quad is shifted by half the target: without this, no pixel centre
+ * is inside it at all, as FNV's eye-adaptation pass found) */
+static char *wrap_vs(const char *src, size_t n, size_t *outlen)
+{
+    size_t len = 0, cap = n + 256; char *o = malloc(cap); o[0] = 0;
+    const char *ver = strstr(src, "\n"), *flip = strstr(src, "\tgl_Position.y = gl_Position.y * vpFlip;");
+    if (!ver || !flip) { o = append(o, &len, &cap, src, n); *outlen = len; return o; }
+    o = append(o, &len, &cap, src, (size_t)(ver + 1 - src));
+    o = append(o, &len, &cap, "uniform vec4 d3d_pixfix;\n", 25);
+    o = append(o, &len, &cap, ver + 1, (size_t)(flip - ver - 1));
+    o = append(o, &len, &cap, "\tgl_Position.xy += d3d_pixfix.xy * gl_Position.w;\n", 50);
+    o = append(o, &len, &cap, flip, n - (size_t)(flip - src));
+    *outlen = len; return o;
+}
 static const char *FF_PS = "#version 120\nvoid main()\n{\n\tgl_FragColor = gl_Color;\n}\n";   /* a vertex shader without a pixel shader */
 
 static int slot_of(int usage, int index)               /* d3d9.c sem_slot(): the attribute slots of programmable draws */
@@ -86,23 +102,24 @@ static void create(Prog *p)
     if (!v || (p->ps && !f)) { p->bad = 1; if (v) MOJOSHADER_freeParseData(v); if (f) MOJOSHADER_freeParseData(f); return; }
     packs(p, 0, v); if (f) packs(p, 1, f);
     size_t pslen; char *ps = f ? wrap_ps(f->output, (size_t)f->output_len, &pslen) : wrap_ps(FF_PS, strlen(FF_PS), &pslen);
+    size_t vslen; char *vs = wrap_vs(v->output, (size_t)v->output_len, &vslen);
     int na = 0; struct { uint32_t slot; char name[28]; } at[16];
     for (int k = 0; k < v->attribute_count && na < 16; k++) {
         int sl = slot_of(v->attributes[k].usage, v->attributes[k].index);
         if (sl < 0 || !v->attributes[k].name) { if (shlog()) fprintf(stderr, "d3d9: vertex shader %08x: input usage %d/%d has no slot\n", p->vs->g, v->attributes[k].usage, v->attributes[k].index); continue; }
         at[na].slot = (uint32_t)sl; memset(at[na].name, 0, 28); snprintf(at[na].name, 28, "%s", v->attributes[k].name); na++;
     }
-    uint32_t vl = (uint32_t)v->output_len, pl = (uint32_t)pslen, size = 16 + 32 * (uint32_t)na + ((vl + 4) & ~3u) + ((pl + 4) & ~3u);
+    uint32_t vl = (uint32_t)vslen, pl = (uint32_t)pslen, size = 16 + 32 * (uint32_t)na + ((vl + 4) & ~3u) + ((pl + 4) & ~3u);
     p->id = next_id++;
     uint32_t *c = cmd_begin(DSR_GLSL_CREATE, size);
     c[0] = p->id; c[1] = (uint32_t)na; c[2] = vl; c[3] = pl;
     memcpy(c + 4, at, 32 * (size_t)na);
-    char *s = (char *)(c + 4 + 8 * na); memcpy(s, v->output, vl); s[vl] = 0;
+    char *s = (char *)(c + 4 + 8 * na); memcpy(s, vs, vl); s[vl] = 0;
     s += (vl + 4) & ~3u; memcpy(s, ps, pl); s[pl] = 0;
     cmd_end();
     if (shlog()) fprintf(stderr, "d3d9: program %u: vs %08x + ps %08x, %d attributes, constants vs %d/%d/%d ps %d/%d/%d\n", p->id, p->vs->g,
                          p->ps ? p->ps->g : 0, na, p->tf[0], p->ti[0], p->tb[0], p->tf[1], p->ti[1], p->tb[1]);
-    free(ps); MOJOSHADER_freeParseData(v); if (f) MOJOSHADER_freeParseData(f);
+    free(ps); free(vs); MOJOSHADER_freeParseData(v); if (f) MOJOSHADER_freeParseData(f);
 }
 /* the bound shaders' program, created on first use; 0 if they could not be translated */
 uint32_t d9_shader_program(Dev9 *d)

@@ -8,6 +8,7 @@
 #include <stdlib.h>
 #include <string.h>
 #include <png.h>
+#include <time.h>
 #define MAXSURF 65536
 long dsr_stat[8];
 typedef struct { GLuint tex; uint32_t w,h,fmt,level,root,levels,face; GLenum target; int used; } Surf;   /* target: GL_TEXTURE_2D or GL_TEXTURE_CUBE_MAP (face 0-5) */
@@ -23,15 +24,15 @@ typedef struct {   // must match game.*.glsl (std140) Uniforms
 } Uniforms;
 
 struct DSRRenderer {
- Surf s[MAXSURF]; uint32_t rs[256],tss[8][32],tex[8],rt,ds,presented;
- float xf[32][16],vp[6]; GLuint fbo,vao,vbo,ebo,ubo,game,quad,dummy,scratch,gamma,sampler[8];
+ Surf s[MAXSURF]; uint32_t rs[256],tss[16][32],tex[16],rt,ds,presented;
+ float xf[32][16],vp[6]; GLuint fbo,vao,vbo,ebo,ubo,game,quad,dummy,scratch,gamma,sampler[16];
  uint16_t ramps[3][256]; void *readback; size_t readback_size; volatile uint32_t *readback_done;
  struct GProg *progs; uint32_t nprogs, cur; GLuint dummy_cube, dummy_3d, pvbo, pebo, svao;
- volatile uint32_t *qres; GLuint qobj[1024]; uint32_t qserial[1024]; uint16_t qpend[1024]; int nqpend; int qactive;   /* occlusion queries (DSR_QUERY) */
+ int32_t scissor[4]; int framelog; uint32_t nframes; double t0; volatile uint32_t *qres; GLuint qobj[1024]; uint32_t qserial[1024]; uint16_t qpend[1024]; int nqpend; int qactive;   /* occlusion queries (DSR_QUERY) */
 };
 /* the game's own shader pairs (DSR_GLSL_CREATE, d3d9_shader.c): MojoShader GLSL, attributes bound to the slots of
  * programmable draws, MojoShader's per-type constant arrays */
-typedef struct GProg { uint32_t id; GLuint prog; GLint vf, pf, vi, pi, vb, pb, flip, at; GLenum samptype[16]; int nsamp; } GProg;
+typedef struct GProg { uint32_t id, hash; GLuint prog; GLint vf, pf, vi, pi, vb, pb, flip, at, pixfix; GLenum samptype[16]; int nsamp; } GProg;
 static void mat_ident(float *m) { memset(m, 0, 64); m[0] = m[5] = m[10] = m[15] = 1; }
 static void mat_mul(float *o, const float *a, const float *b)   // D3D row-major: o = a * b
 {
@@ -95,12 +96,13 @@ DSRRenderer *dsr_gl_create(const char *dir) {
     for (int k = 0; k < 32; k++) mat_ident(r->xf[k]);
     for (int k = 0; k < 256; k++) r->rs[k] = 0;
     r->rs[7] = 1; r->rs[14] = 1; r->rs[23] = 4; r->rs[22] = 3; r->rs[19] = 2; r->rs[20] = 1; r->rs[25] = 8;   // ZENABLE, ZWRITE, ZFUNC LEQUAL, CULL CCW, SRC ONE, DST ZERO, AFUNC ALWAYS
-    for (int st = 0; st < 8; st++) { r->tss[st][1] = st ? 1 : 4; r->tss[st][2] = 2; r->tss[st][3] = 1; r->tss[st][4] = st ? 1 : 2; r->tss[st][5] = 2; r->tss[st][6] = 1;
+    for (int st = 0; st < 16; st++) { r->tss[st][1] = st ? 1 : 4; r->tss[st][2] = 2; r->tss[st][3] = 1; r->tss[st][4] = st ? 1 : 2; r->tss[st][5] = 2; r->tss[st][6] = 1;
                                      r->tss[st][11] = st; r->tss[st][13] = r->tss[st][14] = 1; r->tss[st][16] = r->tss[st][17] = 2; r->tss[st][18] = 1; }
 
  for(int k=0;k<3;k++) for(int i=0;i<256;i++) r->ramps[k][i]=i*257;
  r->rs[53]=r->rs[54]=r->rs[55]=1; r->rs[56]=8; r->rs[58]=r->rs[59]=255; r->rs[168]=15;
- glGenSamplers(8,r->sampler);
+ r->rs[171]=1; r->rs[193]=0xffffffffu; r->rs[186]=r->rs[187]=r->rs[188]=1; r->rs[189]=8; r->rs[207]=2; r->rs[208]=1; r->rs[209]=1;   /* D3D9 defaults */
+ glGenSamplers(16,r->sampler);
  glGenVertexArrays(1,&r->svao); glGenBuffers(1,&r->pvbo); glGenBuffers(1,&r->pebo);
  glGenTextures(1,&r->dummy_cube); glBindTexture(GL_TEXTURE_CUBE_MAP,r->dummy_cube);
  for(int f=0;f<6;f++) glTexImage2D(GL_TEXTURE_CUBE_MAP_POSITIVE_X+f,0,GL_RGBA8,1,1,0,GL_BGRA,GL_UNSIGNED_BYTE,&white);
@@ -171,7 +173,13 @@ static void upload(DSRRenderer *r,const uint32_t *p,uint32_t size,int over) {
  glTexSubImage2D(over?GL_TEXTURE_2D:face_target(s),over?0:s->level,over?0:p[1],over?0:p[2],w,h,GL_BGRA,GL_UNSIGNED_BYTE,p+6); glPixelStorei(GL_UNPACK_ROW_LENGTH,0);
  if(over) { int32_t dr[4]={p[1],p[2],p[1]+w,p[2]+h},sr[4]={0,0,w,h}; blit(r,p[0],dr,0,sr,2,0); }
 }
-static GLenum blend(uint32_t b) { static const GLenum v[]={GL_ONE,GL_ZERO,GL_ONE,GL_SRC_COLOR,GL_ONE_MINUS_SRC_COLOR,GL_SRC_ALPHA,GL_ONE_MINUS_SRC_ALPHA,GL_DST_ALPHA,GL_ONE_MINUS_DST_ALPHA,GL_DST_COLOR,GL_ONE_MINUS_DST_COLOR,GL_SRC_ALPHA_SATURATE}; return b<12?v[b]:GL_ONE; }
+static GLenum blend(uint32_t b) {   /* D3DBLEND: 12/13 (BOTHSRCALPHA) are handled by the caller */
+ static const GLenum v[]={GL_ONE,GL_ZERO,GL_ONE,GL_SRC_COLOR,GL_ONE_MINUS_SRC_COLOR,GL_SRC_ALPHA,GL_ONE_MINUS_SRC_ALPHA,GL_DST_ALPHA,GL_ONE_MINUS_DST_ALPHA,GL_DST_COLOR,GL_ONE_MINUS_DST_COLOR,GL_SRC_ALPHA_SATURATE,
+                          GL_SRC_ALPHA,GL_ONE_MINUS_SRC_ALPHA,GL_CONSTANT_COLOR,GL_ONE_MINUS_CONSTANT_COLOR};
+ return b<16?v[b]:GL_ONE;
+}
+static int flog(DSRRenderer *r); static void log_draw(DSRRenderer *r,const char *kind,uint32_t prog,uint32_t prim,uint32_t n);
+static GLenum blend_op(uint32_t o) { return o==2?GL_FUNC_SUBTRACT:o==3?GL_FUNC_REVERSE_SUBTRACT:o==4?GL_MIN:o==5?GL_MAX:GL_FUNC_ADD; }
 static GLenum compare(uint32_t f) { static const GLenum v[]={GL_ALWAYS,GL_NEVER,GL_LESS,GL_EQUAL,GL_LEQUAL,GL_GREATER,GL_NOTEQUAL,GL_GEQUAL,GL_ALWAYS}; return f<9?v[f]:GL_ALWAYS; }
 static GLenum stencil_op(uint32_t op) {
  static const GLenum ops[]={GL_KEEP,GL_KEEP,GL_ZERO,GL_REPLACE,GL_INCR,GL_DECR,GL_INVERT,GL_INCR_WRAP,GL_DECR_WRAP};
@@ -189,17 +197,36 @@ static void bind_texture(DSRRenderer *r,int stage,Surf *s) {
  glSamplerParameteri(sampler,GL_TEXTURE_WRAP_S,address(t[13])); glSamplerParameteri(sampler,GL_TEXTURE_WRAP_T,address(t[14]));
 }
 /* depth, stencil, colour mask, blending, culling and viewport from the D3D render states */
+static float rsf(const DSRRenderer *r,int k) { float f; memcpy(&f,&r->rs[k],4); return f; }
 static void apply_state(DSRRenderer *r,Surf *ds,float vpw,float vph) {
- if(ds && r->rs[7]) glEnable(GL_DEPTH_TEST); else glDisable(GL_DEPTH_TEST);
- glDepthMask(ds && r->rs[7] && r->rs[14]); glDepthFunc(compare(r->rs[23]));
- if(ds && r->rs[52]) {
-  glEnable(GL_STENCIL_TEST); glStencilFunc(compare(r->rs[56]),r->rs[57]&255,r->rs[58]&255);
-  glStencilMask(r->rs[59]&255); glStencilOp(stencil_op(r->rs[53]),stencil_op(r->rs[54]),stencil_op(r->rs[55]));
+ uint32_t *rs=r->rs;
+ if(ds && rs[7]) glEnable(GL_DEPTH_TEST); else glDisable(GL_DEPTH_TEST);
+ glDepthMask(ds && rs[7] && rs[14]); glDepthFunc(compare(rs[23]));
+ /* depth bias (195 DEPTHBIAS in depth-buffer units, 175 SLOPESCALEDEPTHBIAS): a 24-bit buffer's unit is 2^-24 */
+ { float bias=rsf(r,195), slope=rsf(r,175);
+   if(bias!=0 || slope!=0) { glEnable(GL_POLYGON_OFFSET_FILL); glPolygonOffset(slope,bias*16777216.0f); } else glDisable(GL_POLYGON_OFFSET_FILL); }
+ if(ds && rs[52]) {
+  glEnable(GL_STENCIL_TEST);
+  if(rs[185]) {                                  /* TWOSIDEDSTENCILMODE: counter-clockwise faces use 186-189 */
+   glStencilFuncSeparate(GL_FRONT,compare(rs[56]),rs[57]&255,rs[58]&255); glStencilOpSeparate(GL_FRONT,stencil_op(rs[53]),stencil_op(rs[54]),stencil_op(rs[55]));
+   glStencilFuncSeparate(GL_BACK,compare(rs[189]),rs[57]&255,rs[58]&255); glStencilOpSeparate(GL_BACK,stencil_op(rs[186]),stencil_op(rs[187]),stencil_op(rs[188]));
+  } else { glStencilFunc(compare(rs[56]),rs[57]&255,rs[58]&255); glStencilOp(stencil_op(rs[53]),stencil_op(rs[54]),stencil_op(rs[55])); }
+  glStencilMask(rs[59]&255);
  } else glDisable(GL_STENCIL_TEST);
- glColorMask((r->rs[168]&1)!=0,(r->rs[168]&2)!=0,(r->rs[168]&4)!=0,(r->rs[168]&8)!=0);
- if(r->rs[27]) { glEnable(GL_BLEND); glBlendFunc(blend(r->rs[19]),blend(r->rs[20])); } else glDisable(GL_BLEND);
- glDisable(GL_SCISSOR_TEST); glFrontFace(GL_CCW);
- if(r->rs[22]==2 || r->rs[22]==3) { glEnable(GL_CULL_FACE); glCullFace(r->rs[22]==2?GL_FRONT:GL_BACK); } else glDisable(GL_CULL_FACE);
+ glColorMask((rs[168]&1)!=0,(rs[168]&2)!=0,(rs[168]&4)!=0,(rs[168]&8)!=0);
+ if(rs[27]) {                                    /* blend: op (171), separate alpha (206-209), factor (193) */
+  glEnable(GL_BLEND);
+  uint32_t src=rs[19],dst=rs[20],sa=rs[206]?rs[207]:src,da=rs[206]?rs[208]:dst,op=rs[171],opa=rs[206]?rs[209]:op;
+  if(src==12) { src=5; dst=6; } if(src==13) { src=6; dst=5; } if(sa==12) { sa=5; da=6; } if(sa==13) { sa=6; da=5; }
+  glBlendFuncSeparate(blend(src),blend(dst),blend(sa),blend(da)); glBlendEquationSeparate(blend_op(op),blend_op(opa));
+  uint32_t f=rs[193]; glBlendColor(((f>>16)&255)/255.f,((f>>8)&255)/255.f,(f&255)/255.f,(f>>24)/255.f);
+ } else glDisable(GL_BLEND);
+ if(rs[174]) {                                   /* SCISSORTESTENABLE: the rectangle in render-target pixels (top row first) */
+  Surf *rt=surf(r,r->rt); int h=rt?(int)rt->h:0;
+  glEnable(GL_SCISSOR_TEST); glScissor(r->scissor[0],r->scissor[1],r->scissor[2]-r->scissor[0],r->scissor[3]-r->scissor[1]); (void)h;
+ } else glDisable(GL_SCISSOR_TEST);
+ glFrontFace(GL_CCW);
+ if(rs[22]==2 || rs[22]==3) { glEnable(GL_CULL_FACE); glCullFace(rs[22]==2?GL_FRONT:GL_BACK); } else glDisable(GL_CULL_FACE);
  glViewport(r->vp[0],r->vp[1],vpw,vph); glDepthRange(r->vp[4],r->vp[5]?r->vp[5]:1);
 }
 static void draw(DSRRenderer *r,const uint32_t *p,uint32_t size) {
@@ -209,7 +236,7 @@ static void draw(DSRRenderer *r,const uint32_t *p,uint32_t size) {
  for(uint32_t k=0;k<((fvf>>8)&15);k++) { uint32_t f=(fvf>>(16+2*k))&3; stride+=f==0?8:f==1?12:f==2?16:4; }
  dsr_stat[0]++; if(!nv || 16ull+(uint64_t)nv*stride+(uint64_t)ni*2>size) { dsr_stat[1]++; return; }
  Surf *rt=surf(r,r->rt), *ds=surf(r,r->ds); if(!rt || !target(r,r->rt,r->ds)) { dsr_stat[2]++; return; }
- glBindVertexArray(r->vao);
+ glBindVertexArray(r->vao); if(flog(r)) log_draw(r,"ff",0,prim,nv);
     Uniforms u; memset(&u, 0, sizeof u);
     float wv[16]; mat_mul(wv, r->xf[1], r->xf[2]); mat_mul(u.wvp, wv, r->xf[3]); memcpy(u.wv, wv, 64); memcpy(u.tex0, r->xf[16], 64); memcpy(u.tex1, r->xf[17], 64);
     u.s1[0] = r->tss[1][11]; u.s1[1] = r->tss[1][24];
@@ -293,7 +320,8 @@ void dsr_gl_present(DSRRenderer *r,int width,int height) {
  const float rect[4]={0,0,1,1}; quad(r,s->tex,rect,rect,0,0,1); glFlush();
 }
 int dsr_gl_screenshot(DSRRenderer *r,const char *path) {
- Surf *s=surf(r,r->presented); if(!s || !target(r,r->presented,0)) return -1;
+ Surf *s=surf(r,r->presented);
+ if(!s || !target(r,r->presented,0)) { fprintf(stderr,"screenshot: presented surface %u %s (status %#x)\n",r->presented,s?"is not renderable":"is unknown",s?glCheckFramebufferStatus(GL_FRAMEBUFFER):0); return -1; }
  uint8_t *pixels=malloc((size_t)s->w*s->h*4); if(!pixels) return -1;
  glReadPixels(0,0,s->w,s->h,GL_RGBA,GL_UNSIGNED_BYTE,pixels);
  png_image image={0}; image.version=PNG_IMAGE_VERSION; image.width=s->w; image.height=s->h; image.format=PNG_FORMAT_RGBA;
@@ -313,6 +341,16 @@ int dsr_gl_display_screenshot(const char *path,int width,int height) {
  png_image_free(&image); free(pixels); free(topdown); return ok?0:-1;
 }
 
+/* DSR_FRAMELOG_SEC=<seconds>: every draw of the first frame after that time, with its program, target, textures
+ * and blending, to stderr; DSR_FRAMELOG_GLSL=<dir> also writes the programs' sources there */
+static int flog(DSRRenderer *r) { return r->framelog == 1; }
+static void log_draw(DSRRenderer *r,const char *kind,uint32_t prog,uint32_t prim,uint32_t n) {
+ Surf *rt=surf(r,r->rt); uint32_t *rs=r->rs;
+ fprintf(stderr,"frame: %s prog %08x prim %u n %u | rt %u %ux%u f%u ds %u | blend %u %u:%u op %u sep %u %u:%u | z %u w %u f %u | at %u ref %u | cw %x | tex",
+         kind,prog,prim,n,r->rt,rt?rt->w:0,rt?rt->h:0,rt?rt->fmt:0,r->ds,rs[27],rs[19],rs[20],rs[171],rs[206],rs[207],rs[208],rs[7],rs[14],rs[23],rs[15],rs[24],rs[168]);
+ for(int k=0;k<16;k++) if(r->tex[k]) { Surf *t=surf(r,r->tex[k]); fprintf(stderr," [%d]%u:%ux%u f%u%s",k,r->tex[k],t?t->w:0,t?t->h:0,t?t->fmt:0,t&&t->target==GL_TEXTURE_CUBE_MAP?"c":""); }
+ fprintf(stderr,"\n");
+}
 /* ---- the game's own shaders ---- */
 static GProg *gprog(DSRRenderer *r,uint32_t id) { for(uint32_t k=0;k<r->nprogs;k++) if(r->progs[k].id==id) return &r->progs[k]; return NULL; }
 static GLuint compile(GLenum type,const char *src,uint32_t id) {
@@ -324,8 +362,10 @@ static void glsl_create(DSRRenderer *r,const uint32_t *p,uint32_t size) {
  uint32_t id=p[0],na=p[1],vl=p[2],pl=p[3];
  if(na>16 || 16ull+32ull*na+((vl+4)&~3u)+((pl+4)&~3u)>size || gprog(r,id)) return;
  const char *vs=(const char *)(p+4+8*na), *ps=vs+((vl+4)&~3u);
+ { const char *dir=getenv("DSR_FRAMELOG_GLSL"); if(dir) { char path[1024]; { uint32_t h=2166136261u; for(const char *c=vs;*c;c++) h=(h^(uint8_t)*c)*16777619u; for(const char *c=ps;*c;c++) h=(h^(uint8_t)*c)*16777619u; snprintf(path,sizeof path,"%s/%08x.glsl",dir,h); } FILE *o=fopen(path,"w"); if(o) { fprintf(o,"%s\n//---- pixel ----\n%s",vs,ps); fclose(o); } } }
  GLuint v=compile(GL_VERTEX_SHADER,vs,id), f=v?compile(GL_FRAGMENT_SHADER,ps,id):0;
  GProg g={0}; g.id=id;
+ { uint32_t h=2166136261u; for(const char *c=vs;*c;c++) h=(h^(uint8_t)*c)*16777619u; for(const char *c=ps;*c;c++) h=(h^(uint8_t)*c)*16777619u; g.hash=h; }   /* stable across runs */
  if(v && f) {
   g.prog=glCreateProgram(); glAttachShader(g.prog,v); glAttachShader(g.prog,f);
   for(uint32_t k=0;k<na;k++) { char name[29]; memcpy(name,p+4+8*k+1,28); name[28]=0; glBindAttribLocation(g.prog,p[4+8*k],name); }
@@ -337,7 +377,7 @@ static void glsl_create(DSRRenderer *r,const uint32_t *p,uint32_t size) {
   g.vf=glGetUniformLocation(g.prog,"vs_uniforms_vec4"); g.pf=glGetUniformLocation(g.prog,"ps_uniforms_vec4");
   g.vi=glGetUniformLocation(g.prog,"vs_uniforms_ivec4"); g.pi=glGetUniformLocation(g.prog,"ps_uniforms_ivec4");
   g.vb=glGetUniformLocation(g.prog,"vs_uniforms_bool"); g.pb=glGetUniformLocation(g.prog,"ps_uniforms_bool");
-  g.flip=glGetUniformLocation(g.prog,"vpFlip"); g.at=glGetUniformLocation(g.prog,"d3d_alphatest");
+  g.flip=glGetUniformLocation(g.prog,"vpFlip"); g.at=glGetUniformLocation(g.prog,"d3d_alphatest"); g.pixfix=glGetUniformLocation(g.prog,"d3d_pixfix");
   glUseProgram(g.prog);
   for(int k=0;k<16;k++) {                     /* sampler register k -> texture unit k; its type for the stand-in texture */
    char n[16]; snprintf(n,sizeof n,"ps_s%d",k); GLint loc=glGetUniformLocation(g.prog,n); if(loc<0) continue;
@@ -353,6 +393,10 @@ static void shader_consts(DSRRenderer *r,const uint32_t *p,uint32_t size) {
  uint32_t vf=p[0],pf=p[1],vi=p[2],pi=p[3],vb=p[4],pb=p[5];
  if(24ull+16ull*(vf+pf+vi+pi)+4ull*(vb+pb)+16>size) return;
  const uint32_t *w=p+6; glUseProgram(g->prog);
+ { static uint32_t want; static int init; static int left=40; if(!init) { init=1; const char *e=getenv("DSR_PEEK_PROG"); want=e?(uint32_t)strtoul(e,0,16):0; }
+   if(want==g->hash && left>0) { left--; const float *f=(const float *)w; fprintf(stderr,"consts %u: vs",g->id);
+     for(uint32_t k=0;k<vf;k++) fprintf(stderr," c%u(%g %g %g %g)",k,f[4*k],f[4*k+1],f[4*k+2],f[4*k+3]); f+=4*vf; fprintf(stderr," | ps");
+     for(uint32_t k=0;k<pf;k++) fprintf(stderr," c%u(%g %g %g %g)",k,f[4*k],f[4*k+1],f[4*k+2],f[4*k+3]); fprintf(stderr,"\n"); } }
  if(vf && g->vf>=0) glUniform4fv(g->vf,vf,(const float *)w); w+=4*vf;
  if(pf && g->pf>=0) glUniform4fv(g->pf,pf,(const float *)w); w+=4*pf;
  if(vi && g->vi>=0) glUniform4iv(g->vi,vi,(const GLint *)w); w+=4*vi;
@@ -367,14 +411,17 @@ static void draw_prog(DSRRenderer *r,const uint32_t *p,uint32_t size) {
  GProg *g=gprog(r,r->cur); dsr_stat[0]++;
  if(!g || !g->prog || !nv || 20ull+16ull*nv*ns+2ull*ni>size) { dsr_stat[1]++; return; }
  Surf *rt=surf(r,r->rt), *ds=surf(r,r->ds); if(!rt || !target(r,r->rt,r->ds)) { dsr_stat[2]++; return; }
+ if(flog(r)) log_draw(r,p[4]&1?"sh-pretransformed":"sh",g->hash,prim,ni?ni:nv);
  glUseProgram(g->prog); glBindVertexArray(r->svao);
- apply_state(r,ds,r->vp[2]?r->vp[2]:rt->w,r->vp[3]?r->vp[3]:rt->h);
+ float vpw=r->vp[2]?r->vp[2]:rt->w, vph=r->vp[3]?r->vp[3]:rt->h;
+ apply_state(r,ds,vpw,vph);
+ if(g->pixfix>=0) glUniform4f(g->pixfix,1.0f/vpw,-1.0f/vph,0,0);   /* D3D9 pixel centres (d3d9_shader.c wrap_vs) */
  glBindBuffer(GL_ARRAY_BUFFER,r->pvbo); glBufferData(GL_ARRAY_BUFFER,(GLsizeiptr)nv*ns*16,p+5,GL_STREAM_DRAW);
  for(uint32_t sl=0,c=0;sl<16;sl++) {
   if(mask>>sl&1) { glEnableVertexAttribArray(sl); glVertexAttribPointer(sl,4,GL_FLOAT,GL_FALSE,ns*16,(void *)(uintptr_t)(c*16)); c++; }
   else { glDisableVertexAttribArray(sl); glVertexAttrib4f(sl,0,0,0,1); }
  }
- for(int k=0;k<g->nsamp && k<8;k++) {
+ for(int k=0;k<g->nsamp && k<16;k++) {
   if(!g->samptype[k]) continue;
   if(g->samptype[k]==GL_SAMPLER_2D || g->samptype[k]==GL_SAMPLER_2D_SHADOW) bind_texture(r,k,surf(r,r->tex[k]));
   else if(g->samptype[k]==GL_SAMPLER_CUBE) {
@@ -392,6 +439,10 @@ static void draw_prog(DSRRenderer *r,const uint32_t *p,uint32_t size) {
  if(ni) { glBindBuffer(GL_ELEMENT_ARRAY_BUFFER,r->pebo); glBufferData(GL_ELEMENT_ARRAY_BUFFER,ni*2,(const uint8_t *)(p+5)+(size_t)nv*ns*16,GL_STREAM_DRAW); glDrawElements(type,ni,GL_UNSIGNED_SHORT,0); }
  else glDrawArrays(type,0,nv);
  glActiveTexture(GL_TEXTURE0);
+ { static uint32_t want; static int init, left=40; if(!init) { init=1; const char *e=getenv("DSR_PEEK_PROG"); want=e?(uint32_t)strtoul(e,0,16):0; }
+   static uint32_t cnt; if(want==g->hash && left>0 && cnt++%150==0) { left--; float v[4]={0}; glReadPixels(0,0,1,1,GL_RGBA,GL_FLOAT,v);
+     fprintf(stderr,"after %u: rt %u %ux%u vp %g %g %g %g texel0 %g %g %g %g err %#x | s0 addr %u %u border %#x filter %u %u %u | s1 addr %u %u\n",g->id,r->rt,rt->w,rt->h,r->vp[0],r->vp[1],r->vp[2],r->vp[3],v[0],v[1],v[2],v[3],glGetError(),
+             r->tss[0][13],r->tss[0][14],r->tss[0][15],r->tss[0][16],r->tss[0][17],r->tss[0][18],r->tss[1][13],r->tss[1][14]); } }
 }
 int dsr_gl_exec(DSRRenderer *r,uint32_t op,const uint8_t *data,uint32_t size) {
  /* Explicit checks avoid assuming enum numbering for protocol extensions. */
@@ -403,14 +454,14 @@ int dsr_gl_exec(DSRRenderer *r,uint32_t op,const uint8_t *data,uint32_t size) {
  case DSR_CLEAR: need=20; break; case DSR_DRAW: need=16; break;
  case DSR_SURFACE_CREATE: need=28; break; case DSR_SURFACE_DESTROY: case DSR_PRESENT: need=4; break;
  case DSR_BLT: need=48; break; case DSR_GLSL_CREATE: need=16; break; case DSR_PROG_USE: need=4; break;
- case DSR_SHADER_CONST: need=24; break; case DSR_DRAW_PROG: need=20; break; case DSR_QUERY: need=12; break; default: break;
+ case DSR_SHADER_CONST: need=24; break; case DSR_DRAW_PROG: need=20; break; case DSR_QUERY: need=12; break; case DSR_SCISSOR: need=16; break; default: break;
  }
  if(size<need) return 0;
  const uint32_t *p=(const uint32_t *)data;
  switch(op) {
  case DSR_RENDER_STATE: if(p[0]<256) r->rs[p[0]]=p[1]; break;
- case DSR_TSS: if(p[0]<8 && p[1]<32) { r->tss[p[0]][p[1]]=p[2]; if(p[1]==12) r->tss[p[0]][13]=r->tss[p[0]][14]=p[2]; } break;
- case DSR_TEXTURE: if(p[0]<8) r->tex[p[0]]=p[1]; break;
+ case DSR_TSS: if(p[0]<16 && p[1]<32) { r->tss[p[0]][p[1]]=p[2]; if(p[1]==12) r->tss[p[0]][13]=r->tss[p[0]][14]=p[2]; } break;
+ case DSR_TEXTURE: if(p[0]<16) r->tex[p[0]]=p[1]; break;
  case DSR_TRANSFORM: if(p[0]<32) memcpy(r->xf[p[0]],p+1,64); break;
  case DSR_VIEWPORT: for(int k=0;k<4;k++) r->vp[k]=p[k]; memcpy(r->vp+4,p+4,8); break;
  case DSR_CLEAR: clear(r,p,size); break;
@@ -427,7 +478,19 @@ int dsr_gl_exec(DSRRenderer *r,uint32_t op,const uint8_t *data,uint32_t size) {
  case DSR_SHADER_CONST: shader_consts(r,p,size); break;
  case DSR_DRAW_PROG: draw_prog(r,p,size); break;
  case DSR_QUERY: query(r,p); break;
- case DSR_PRESENT: r->presented=p[0]; dsr_gl_poll_queries(r); return 1;
+ case DSR_SCISSOR: memcpy(r->scissor,p,16); break;
+ case DSR_PRESENT: r->presented=p[0]; dsr_gl_poll_queries(r);
+  { static const char *pk; static int pk_init; if(!pk_init) { pk_init=1; pk=getenv("DSR_PEEK"); }   /* DSR_PEEK=id,id: those surfaces' first texel each present */
+    if(pk) { static uint32_t n; if(n++%30==0) { const char *q=pk; fprintf(stderr,"peek %u:",n);
+      while(*q) { uint32_t id=(uint32_t)strtoul(q,(char **)&q,10); Surf *t=surf(r,id); float v[4]={0};
+        if(t && target(r,id,0)) glReadPixels(0,0,1,1,GL_RGBA,GL_FLOAT,v); fprintf(stderr," [%u] %g %g %g %g",id,v[0],v[1],v[2],v[3]); if(*q==',') q++; else break; }
+      fprintf(stderr,"\n"); } } }
+  { static double at=-1; if(at<0) { const char *e=getenv("DSR_FRAMELOG_SEC"); at=e?atof(e):0; }
+    struct timespec ts; clock_gettime(CLOCK_MONOTONIC,&ts); double now=ts.tv_sec+ts.tv_nsec/1e9; if(!r->t0) r->t0=now;
+    static int left=-1; if(left<0) { const char *e=getenv("DSR_FRAMELOG_N"); left=e?atoi(e):1; }
+    if(r->framelog==1) { fprintf(stderr,"frame: end\n"); if(--left<=0) r->framelog=2; else fprintf(stderr,"frame: begin (%.3f s)\n",now-r->t0); }
+    else if(at>0 && !r->framelog && now-r->t0>=at) { r->framelog=1; fprintf(stderr,"frame: begin (%.3f s)\n",now-r->t0); } }
+  return 1;
  case DSR_GAMMA: if(size>=1536) { memcpy(r->ramps,p,1536); ramp(r);
   if(getenv("DSR_COLORLOG")) fprintf(stderr,"gamma: 64=%u/%u/%u 128=%u/%u/%u 192=%u/%u/%u\n",r->ramps[0][64],r->ramps[1][64],r->ramps[2][64],r->ramps[0][128],r->ramps[1][128],r->ramps[2][128],r->ramps[0][192],r->ramps[1][192],r->ramps[2][192]);
  } break;
@@ -438,6 +501,6 @@ int dsr_gl_exec(DSRRenderer *r,uint32_t op,const uint8_t *data,uint32_t size) {
 void dsr_gl_destroy(DSRRenderer *r) {
  if(!r) return; for(uint32_t i=1;i<MAXSURF;i++) if(r->s[i].used && r->s[i].root==i) glDeleteTextures(1,&r->s[i].tex);
  glDeleteProgram(r->game); glDeleteProgram(r->quad); glDeleteFramebuffers(1,&r->fbo); glDeleteVertexArrays(1,&r->vao);
- glDeleteSamplers(8,r->sampler);
+ glDeleteSamplers(16,r->sampler);
  GLuint b[]={r->vbo,r->ebo,r->ubo}; glDeleteBuffers(3,b); GLuint t[]={r->dummy,r->scratch,r->gamma}; glDeleteTextures(3,t); free(r);
 }
