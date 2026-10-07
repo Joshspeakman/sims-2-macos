@@ -43,7 +43,7 @@ IMPL(kernel32, CreateThread)
     ThreadObj *t = w32_thread_obj(teb);
     t->suspended = (flags & 4) || w32_deterministic;            /* CREATE_SUSPENDED; harness: never runs */
     Start *st = calloc(1, sizeof *st); st->fn = fn; st->t = t;
-    st->c.fs_base = teb; st->c.fcw = 0x027f; st->c.f.eflags = 0x202;
+    st->c.fs_base = teb; st->c.fcw = 0x027f; st->c.mxcsr = 0x1f80; st->c.f.eflags = 0x202;
     st->c.esp = lo + size - 16;
     st->c.esp -= 4; rt_w32(G_MEM, st->c.esp, param);
     st->c.esp -= 4; rt_w32(G_MEM, st->c.esp, 0xffeff000u);      /* the start routine returns here (host return) */
@@ -97,7 +97,7 @@ int w32_spawn_service(void (*fn)(Ctx *, void *), void *arg)
     uint32_t teb = lo ? w32_new_thread_teb(lo, lo + size) : 0;
     if (!teb) return -1;
     Svc *s = calloc(1, sizeof *s); s->fn = fn; s->arg = arg;
-    s->c.fs_base = teb; s->c.fcw = 0x027f; s->c.f.eflags = 0x202; s->c.esp = lo + size - 64;
+    s->c.fs_base = teb; s->c.fcw = 0x027f; s->c.mxcsr = 0x1f80; s->c.f.eflags = 0x202; s->c.esp = lo + size - 64;
     pthread_attr_t a; pthread_attr_init(&a); pthread_attr_setstacksize(&a, 64u << 20);
     pthread_t t; pthread_create(&t, &a, svc_main, s); pthread_detach(t);
     return 0;

@@ -11,7 +11,8 @@ UREG = {'eax': UC_X86_REG_EAX, 'ecx': UC_X86_REG_ECX, 'edx': UC_X86_REG_EDX, 'eb
 class LFs(ctypes.Structure): _fields_ = [(n, ctypes.c_uint32) for n in ('op', 'a', 'b', 'r', 'cin', 'eflags', 'df')]
 class Ctx(ctypes.Structure):
     _fields_ = [(r, ctypes.c_uint32) for r in REGS] + [('f', LFs), ('st', ctypes.c_double * 8), ('top', ctypes.c_uint32),
-                ('fcw', ctypes.c_uint32), ('fsw', ctypes.c_uint32), ('fs_base', ctypes.c_uint32), ('tc', ctypes.c_uint32)]
+                ('fcw', ctypes.c_uint32), ('fsw', ctypes.c_uint32), ('fs_base', ctypes.c_uint32), ('tc', ctypes.c_uint32),
+                ('mxcsr', ctypes.c_uint32), ('xmm', (ctypes.c_uint8 * 16) * 8), ('mm', ctypes.c_uint64 * 8)]
 
 SENTINEL = 0x00100000            # return address: a mapped page of int3
 STACK, STACK_SZ = 0x00200000, 0x00100000
