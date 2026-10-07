@@ -76,11 +76,19 @@ void w32_crash_record_call(uint32_t index);
 void rt_import(Ctx *c, uint32_t index)
 {
     w32_crash_record_call(index);
-    if (index < MAX_THUNKS && thunk_target[index]) { rt_call(c, thunk_target[index]); return; }
-    w32_trace_import(c, index);
     if (!text_trace_init) { text_trace_init = 1; const char *p = getenv("W32_TRACE"); if (p && (text_trace = fopen(p, "w"))) setvbuf(text_trace, 0, _IOLBF, 0); }   /* lines survive an abrupt exit */
     static const char *tfilter; static int tf_init;                       /* W32_TRACE_ONLY=wsock32,kernel32!CreateFile: only those */
     if (!tf_init) { tf_init = 1; tfilter = getenv("W32_TRACE_ONLY"); }
+    if (index < MAX_THUNKS && thunk_target[index]) {                     /* served by a recompiled DLL (traced by name, no result) */
+        if (text_trace && tfilter && thunk_name[index] && strstr(tfilter, "dll:")) {
+            const char *nm = thunk_name[index], *bang = strchr(nm, '!'); size_t dl = bang ? (size_t)(bang - nm) : strlen(nm);
+            const char *f = strstr(tfilter, "dll:"); if (f && !strncasecmp(f + 4, nm, dl)) {
+                pthread_mutex_lock(&tt_lock); fprintf(text_trace, "%x %08x %s(%x, %x, %x) [recompiled]\n", rt_r32(G_MEM, c->fs_base + 0x24), rt_r32(G_MEM, c->esp),
+                    nm, rt_r32(G_MEM, c->esp + 4), rt_r32(G_MEM, c->esp + 8), rt_r32(G_MEM, c->esp + 12)); pthread_mutex_unlock(&tt_lock); }
+        }
+        rt_call(c, thunk_target[index]); return;
+    }
+    w32_trace_import(c, index);
     int traced = text_trace && index < nthunks && thunk_fn[index];
     if (traced && tfilter) {
         const char *nm = thunk_name[index], *bang = strchr(nm, '!'); size_t dl = bang ? (size_t)(bang - nm) : strlen(nm); traced = 0;
