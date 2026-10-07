@@ -15,3 +15,7 @@ shaders, c223 in pixel shaders) instead of stopping where the constant table's d
 addressing outside every declared array gets such an array of its own instead of failing. Direct3D reads the whole
 register file; Fallout NV's skinning shaders declare 18 bones and index 26 or more, and reading past a GLSL array is
 undefined (on NVIDIA: whatever an earlier draw left there, which threw skinned meshes across the screen).
+
+`profiles/mojoshader_profile_glsl.c`: `nrm`, `pow` and `log` follow Direct3D where GLSL gives NaN: a zero vector
+normalises to zero, `pow(0, 0)` is 1, and `log` is of the absolute value. The NaNs showed as flashing specks on
+skinned characters' specular (Doc Mitchell's gloves in the opening).

@@ -1404,8 +1404,9 @@ void emit_GLSL_EXP(Context *ctx)
 void emit_GLSL_LOG(Context *ctx)
 {
     char src0[64]; make_GLSL_srcarg_string_masked(ctx, 0, src0, sizeof (src0));
-    char code[128];
-    make_GLSL_destarg_assign(ctx, code, sizeof (code), "log2(%s)", src0);
+    char code[256];
+    // fallout-nv-linux: Direct3D's log is of the absolute value (log2 of a negative is NaN in GLSL)
+    make_GLSL_destarg_assign(ctx, code, sizeof (code), "log2(abs(%s))", src0);
     output_line(ctx, "%s", code);
 } // emit_GLSL_LOG
 
@@ -1632,9 +1633,15 @@ void emit_GLSL_POW(Context *ctx)
 {
     char src0[64]; make_GLSL_srcarg_string_masked(ctx, 0, src0, sizeof (src0));
     char src1[64]; make_GLSL_srcarg_string_masked(ctx, 1, src1, sizeof (src1));
-    char code[128];
-    make_GLSL_destarg_assign(ctx, code, sizeof (code),
-                             "pow(abs(%s), %s)", src0, src1);
+    char code[512];
+    // fallout-nv-linux: pow(0, 0) is 1 in Direct3D; GLSL leaves it undefined (NaN on NVIDIA:
+    //  exp2(0 * log2(0))), which sparkles on specular highlights
+    if (vecsize_from_writemask(ctx->dest_arg.writemask) == 1)
+        make_GLSL_destarg_assign(ctx, code, sizeof (code),
+                                 "((%s == 0.0) ? 1.0 : pow(abs(%s), %s))", src1, src0, src1);
+    else
+        make_GLSL_destarg_assign(ctx, code, sizeof (code),
+                                 "pow(abs(%s), %s)", src0, src1);
     output_line(ctx, "%s", code);
 } // emit_GLSL_POW
 
@@ -1669,8 +1676,10 @@ void emit_GLSL_ABS(Context *ctx)
 void emit_GLSL_NRM(Context *ctx)
 {
     char src0[64]; make_GLSL_srcarg_string_masked(ctx, 0, src0, sizeof (src0));
-    char code[128];
-    make_GLSL_destarg_assign(ctx, code, sizeof (code), "normalize(%s)", src0);
+    char code[512];
+    // fallout-nv-linux: Direct3D normalises a zero vector to zero (x * rsq(0) with 0 * inf = 0);
+    //  GLSL's normalize() gives NaN
+    make_GLSL_destarg_assign(ctx, code, sizeof (code), "((dot(%s, %s) == 0.0) ? (%s * 0.0) : normalize(%s))", src0, src0, src0, src0);
     output_line(ctx, "%s", code);
 } // emit_GLSL_NRM
 
