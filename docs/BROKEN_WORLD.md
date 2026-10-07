@@ -1,10 +1,18 @@
 # Broken World on Linux
 
-Experimental preview on the `broken-world` branch. This is a separate recompilation of
+Experimental preview on the `nightly` branch. Rendering issues remain, including
+large black polygons around transparent effects. This is a separate recompilation of
 the expansion engine; loading its archives into the base-game executable is not
 sufficient. The original Steam/game directory is never patched.
 
 ## Input and build
+
+Check out the Linux nightly source before building:
+
+```sh
+git fetch origin
+git switch nightly
+```
 
 The currently mapped input is Broken World 2.30.0.4277, SHA-256
 `5e82a52aac1bc23bd174bf837a7181af7a7d84dcc76aae7c27ab4bb08df37ba7`.
