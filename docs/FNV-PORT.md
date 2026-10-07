@@ -26,7 +26,9 @@ under Proton in headless gamescope (`tests/fnv_ref.py`, `tests/scenario.py`), sa
 Fixed while comparing: D3D9 pixel centres (night was rendered as day: the 1x1 adaptation quad never rasterised),
 16 samplers (yellow terrain), occlusion queries (sun glare indoors), blend/scissor/depth-bias/two-sided stencil,
 and relatively addressed constant arrays (skinned meshes thrown across the screen as dark planes: FNV's skinning
-shaders declare 18 bones and index 26+, see `third_party/mojoshader/README.md`).
+shaders declare 18 bones and index 26+, see `third_party/mojoshader/README.md`), and silence after loading a save
+(the DirectSound mixer waited for the primary buffer to be played, which only the intro movie's player does).
+Also checked: firing a pistol (ammo, recoil, shot sounds), containers and the quantity dialog.
 
 `tests/saves/fnvtest1.fos` is a save made just after character creation; the `load-*` scenarios start from it.
 
