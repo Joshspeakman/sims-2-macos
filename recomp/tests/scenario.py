@@ -95,6 +95,9 @@ def _():                               # the player's angles after a coc, printe
     steps = LOAD + [(100, 'key', 'grave'), (102, 'type', 'coc Gomorrah00'), (106, 'key', 'Return')]
     c, t = console(136, 'player.getangle z', 'player.getangle x', 'player.getpos x', 'player.getpos y')
     return steps + c[:-1] + [(t, 'shot', 'angles')]
+@scenario('doc-burst', 150)
+def _():                               # Doc Mitchell during the opening, a burst of frames (flicker shows as frame-to-frame change)
+    return OPENING + [(128 + k * 0.25, 'shot', 'b%02d' % k) for k in range(12)]
 @scenario('saloon', 170)
 def _():
     s, t = console(125, 'coc GSProspectorSaloonInterior')
