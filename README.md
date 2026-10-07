@@ -7,9 +7,13 @@ into native code. The Linux host uses SDL2, OpenGL, FreeType/fontconfig and nati
 **This is an early development build, not feature parity with the Mac release.** The first supported executable is
 GOG 2.3 (installer 37617). Steam base-game **data files** can be used with that build; the GOG executable remains
 required for the base-game profiles. A separate [Broken World preview](docs/BROKEN_WORLD.md) is available on
-the `broken-world` branch. Its opening area, saving and ultrawide reloading have been exercised;
+the `nightly` branch. Its opening area, saving and ultrawide reloading have been exercised;
 effects rendering and broader campaign/multiplayer validation remain unfinished.
 No game executable, archive, generated game code, save, product key or proprietary DLL is distributed here.
+
+**Nightly preview:** known rendering problems include large black polygons around transparent effects.
+Startup and world loading can also be slow. Build this preview locally from your own game files;
+see the [Broken World setup and known limitations](docs/BROKEN_WORLD.md).
 
 ## Current Linux status
 
