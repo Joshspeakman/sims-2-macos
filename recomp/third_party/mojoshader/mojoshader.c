@@ -768,7 +768,21 @@ static int parse_source_token(Context *ctx, SourceArgInfo *info)
                             break;  // match!
                     } // for
 
-                    if (var == NULL)
+                    if (var == NULL)  // fallout-nv-linux: an array of the registers from here to the last
+                    {
+                        var = (VariableList *) Malloc(ctx, sizeof (VariableList));
+                        if (var != NULL)
+                        {
+                            var->type = MOJOSHADER_UNIFORM_FLOAT;
+                            var->index = reltarget;
+                            var->count = (shader_is_vertex(ctx) ? 256 : 224) - reltarget;
+                            var->constant = NULL;
+                            var->emit_position = -1;
+                            var->next = ctx->variables;
+                            ctx->variables = var;
+                        } // if
+                    } // if
+                    if (var == NULL || var->count <= 0)
                         fail(ctx, "relative addressing of indeterminate array");
                     else
                     {
@@ -3668,6 +3682,18 @@ static void process_definitions(Context *ctx)
     {
         if (var->used)
         {
+            // fallout-nv-linux: Direct3D's relative addressing reads the whole
+            //  register file, not just the array the constant table declares
+            //  (FNV's skinning shaders declare 18 bones and index 26+). Past
+            //  the end of a GLSL array is undefined, so the array runs to the
+            //  last register; its uniforms are filled from the device's
+            //  registers like any other.
+            if (!var->constant && var->type == MOJOSHADER_UNIFORM_FLOAT)
+            {
+                const int last = shader_is_vertex(ctx) ? 256 : 224;
+                if (var->index < last)
+                    var->count = last - var->index;
+            } // if
             if (var->constant)
             {
                 ctx->profile->const_array_emitter(ctx, var->constant,

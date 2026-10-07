@@ -9,3 +9,9 @@ shader inputs `[[centroid_perspective]]` instead of failing (Fallout NV's shader
 built-in varyings this profile uses cannot take the qualifier; the difference is only at multisampled edges).
 `mov a0, ...` in vertex shaders (shader model 1.1) converts like `mova` instead of assigning a float to the integer
 address register (which GLSL rejects).
+
+`mojoshader.c`: a relatively addressed float constant array runs to the end of the register file (c255 in vertex
+shaders, c223 in pixel shaders) instead of stopping where the constant table's declaration ends, and relative
+addressing outside every declared array gets such an array of its own instead of failing. Direct3D reads the whole
+register file; Fallout NV's skinning shaders declare 18 bones and index 26 or more, and reading past a GLSL array is
+undefined (on NVIDIA: whatever an earlier draw left there, which threw skinned meshes across the screen).

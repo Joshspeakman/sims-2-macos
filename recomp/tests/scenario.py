@@ -11,6 +11,9 @@ DIK = {'Down': 208, 'Up': 200, 'Left': 203, 'Right': 205, 'Return': 28, 'Escape'
 OPENING = [(62, 'key', 'Down'), (64, 'key', 'Down'), (66, 'key', 'Return'), (69, 'key', 'Left'), (70, 'key', 'Return'),
            (78, 'key', 'Escape'), (80, 'key', 'space'), (82, 'key', 'Escape')] + \
           [(t, 'key', 'Return') for t in range(96, 117, 2)] + [(120, 'key', 'Return')]
+# loading tests/saves/fnvtest1.fos (made after character creation, Goodsprings at noon) with Continue: ready ~95 s
+LOAD = [(62, 'key', 'Down'), (64, 'key', 'Return'), (67, 'key', 'Return')]
+SAVE = os.path.join(HERE, 'tests', 'saves', 'fnvtest1.fos')
 def console(t, *cmds):                 # open the console, run each command, close it
     steps, at = [(t, 'key', 'grave')], t + 2
     for c in cmds: steps += [(at, 'type', c), (at + 1 + len(c) * 0.15, 'key', 'Return')]; at += 3 + len(c) * 0.15
@@ -35,6 +38,24 @@ def _():
 @scenario('goodsprings-dusk', 185)
 def _():
     s, t = outdoor(19, 200); return OPENING + s + [(t + 6, 'shot', 'dusk'), (t + 12, 'shot', 'dusk2')]
+def world(t0, *cmds):                  # after loading: console commands, menus hidden
+    s, t = console(t0, *(list(cmds) + ['tm']))
+    return LOAD + s, t
+@scenario('load-noon', 140)
+def _():
+    s, t = world(100, 'player.setangle x 0', 'player.setangle z 90'); return s + [(t + 5, 'shot', 'view1'), (t + 12, 'shot', 'view1b')]
+@scenario('load-night', 130)
+def _():
+    s, t = world(100, 'set gamehour to 23', 'player.setangle x 0', 'player.setangle z 90'); return s + [(t + 10, 'shot', 'night')]
+@scenario('load-dusk', 130)
+def _():
+    s, t = world(100, 'set gamehour to 19', 'player.setangle x 0', 'player.setangle z 220'); return s + [(t + 10, 'shot', 'dusk')]
+@scenario('load-saloon', 140)
+def _():
+    s, t = world(100, 'coc GSProspectorSaloonInterior'); return s + [(t + 15, 'shot', 'saloon')]
+@scenario('load-strip', 150)
+def _():
+    s, t = world(100, 'set gamehour to 21', 'coc TheStrip'); return s + [(t + 25, 'shot', 'strip')]
 @scenario('saloon', 170)
 def _():
     s, t = console(125, 'coc GSProspectorSaloonInterior')
@@ -66,11 +87,17 @@ if __name__ == '__main__':
     base = os.path.join(HERE, 'work', 'scen-' + name); nat, ref = os.path.join(base, 'native'), os.path.join(base, 'ref')
     os.makedirs(nat, exist_ok=True); os.makedirs(ref, exist_ok=True)
     procs = []
+    uses_save = any(st[0] == 67 and st[2] == 'Return' for st in steps)
     if which in ('native', 'both'):
         env = dict(os.environ, SESSION_ENV='DS_SHOT_RAW=1 ' + os.environ.get('SESSION_ENV', ''), SHOT='1000')
+        if uses_save: env['SAVE'] = SAVE
         procs.append(subprocess.Popen([os.path.join(HERE, 'tools', 'fnv_session.sh'), 'scen-' + name, str(secs), native_script(steps, nat)], env=env,
                                       stdout=open(os.path.join(base, 'native.out'), 'w'), stderr=subprocess.STDOUT))
     if which in ('ref', 'both'):
+        saves = os.path.expanduser('~/Games/fnv-ref-prefix/pfx/drive_c/users/steamuser/Documents/My Games/FalloutNV/Saves')
+        os.makedirs(saves, exist_ok=True)
+        for f in os.listdir(saves): os.remove(os.path.join(saves, f))
+        if uses_save: import shutil; shutil.copy(SAVE, saves)
         procs.append(subprocess.Popen(['timeout', str(secs + 80), 'gamescope', '--backend', 'headless', '-W', '1280', '-H', '720', '-w', '1280', '-h', '720', '--',
                                        os.path.join(HERE, 'tests', 'fnv_ref.py'), ref, str(secs), ref_script(steps)],
                                       stdout=open(os.path.join(base, 'ref.out'), 'w'), stderr=subprocess.STDOUT))

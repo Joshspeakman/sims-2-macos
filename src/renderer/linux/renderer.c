@@ -287,6 +287,7 @@ static void clear(DSRRenderer *r,const uint32_t *p,uint32_t size) {
 void dsr_gl_queries(DSRRenderer *r,volatile uint32_t *results) { r->qres=results; }
 static void query(DSRRenderer *r,const uint32_t *p) {             /* DSR_QUERY: slot, begin/end, serial */
  uint32_t k=p[0]; if(!k || k>=1024) return;
+ if(r->framelog==1) fprintf(stderr,"frame: query %u %s serial %u (active %d)\n",k,p[1]?"begin":"end",p[2],r->qactive);
  if(p[1]) { if(r->qactive) glEndQuery(GL_SAMPLES_PASSED); if(!r->qobj[k]) glGenQueries(1,&r->qobj[k]); glBeginQuery(GL_SAMPLES_PASSED,r->qobj[k]); r->qactive=(int)k; }
  else if(r->qactive==(int)k) {
   glEndQuery(GL_SAMPLES_PASSED); r->qactive=0; r->qserial[k]=p[2];
@@ -299,6 +300,7 @@ void dsr_gl_poll_queries(DSRRenderer *r) {                       /* publish the 
   uint32_t k=r->qpend[i]; GLuint avail=0; glGetQueryObjectuiv(r->qobj[k],GL_QUERY_RESULT_AVAILABLE,&avail);
   if(!avail) { i++; continue; }
   GLuint n=0; glGetQueryObjectuiv(r->qobj[k],GL_QUERY_RESULT,&n);
+  if(getenv("DSR_QUERYLOG")) fprintf(stderr,"query %u serial %u -> %u\n",k,r->qserial[k],n);
   if(r->qres) { r->qres[k]=n; __atomic_store_n(&r->qres[1024+k],r->qserial[k],__ATOMIC_RELEASE); }
   r->qpend[i]=r->qpend[--r->nqpend];
  }
@@ -346,8 +348,8 @@ int dsr_gl_display_screenshot(const char *path,int width,int height) {
 static int flog(DSRRenderer *r) { return r->framelog == 1; }
 static void log_draw(DSRRenderer *r,const char *kind,uint32_t prog,uint32_t prim,uint32_t n) {
  Surf *rt=surf(r,r->rt); uint32_t *rs=r->rs;
- fprintf(stderr,"frame: %s prog %08x prim %u n %u | rt %u %ux%u f%u ds %u | blend %u %u:%u op %u sep %u %u:%u | z %u w %u f %u | at %u ref %u | cw %x | tex",
-         kind,prog,prim,n,r->rt,rt?rt->w:0,rt?rt->h:0,rt?rt->fmt:0,r->ds,rs[27],rs[19],rs[20],rs[171],rs[206],rs[207],rs[208],rs[7],rs[14],rs[23],rs[15],rs[24],rs[168]);
+ fprintf(stderr,"frame: %s prog %08x prim %u n %u | rt %u %ux%u f%u ds %u | blend %u %u:%u op %u sep %u %u:%u | z %u w %u f %u | at %u ref %u func %u | cw %x | tex",
+         kind,prog,prim,n,r->rt,rt?rt->w:0,rt?rt->h:0,rt?rt->fmt:0,r->ds,rs[27],rs[19],rs[20],rs[171],rs[206],rs[207],rs[208],rs[7],rs[14],rs[23],rs[15],rs[24],rs[25],rs[168]);
  for(int k=0;k<16;k++) if(r->tex[k]) { Surf *t=surf(r,r->tex[k]); fprintf(stderr," [%d]%u:%ux%u f%u%s",k,r->tex[k],t?t->w:0,t?t->h:0,t?t->fmt:0,t&&t->target==GL_TEXTURE_CUBE_MAP?"c":""); }
  fprintf(stderr,"\n");
 }
@@ -365,7 +367,7 @@ static void glsl_create(DSRRenderer *r,const uint32_t *p,uint32_t size) {
  { const char *dir=getenv("DSR_FRAMELOG_GLSL"); if(dir) { char path[1024]; { uint32_t h=2166136261u; for(const char *c=vs;*c;c++) h=(h^(uint8_t)*c)*16777619u; for(const char *c=ps;*c;c++) h=(h^(uint8_t)*c)*16777619u; snprintf(path,sizeof path,"%s/%08x.glsl",dir,h); } FILE *o=fopen(path,"w"); if(o) { fprintf(o,"%s\n//---- pixel ----\n%s",vs,ps); fclose(o); } } }
  GLuint v=compile(GL_VERTEX_SHADER,vs,id), f=v?compile(GL_FRAGMENT_SHADER,ps,id):0;
  GProg g={0}; g.id=id;
- { uint32_t h=2166136261u; for(const char *c=vs;*c;c++) h=(h^(uint8_t)*c)*16777619u; for(const char *c=ps;*c;c++) h=(h^(uint8_t)*c)*16777619u; g.hash=h; }   /* stable across runs */
+ { uint32_t h=2166136261u; for(const char *c=vs;*c;c++) h=(h^(uint8_t)*c)*16777619u; for(const char *c=ps;*c;c++) h=(h^(uint8_t)*c)*16777619u; g.hash=h; if(getenv("DSR_PROGLOG")) fprintf(stderr,"renderer: program %u is %08x\n",g.id,h); }   /* stable across runs */
  if(v && f) {
   g.prog=glCreateProgram(); glAttachShader(g.prog,v); glAttachShader(g.prog,f);
   for(uint32_t k=0;k<na;k++) { char name[29]; memcpy(name,p+4+8*k+1,28); name[28]=0; glBindAttribLocation(g.prog,p[4+8*k],name); }
@@ -404,6 +406,7 @@ static void shader_consts(DSRRenderer *r,const uint32_t *p,uint32_t size) {
  if(vb && g->vb>=0) glUniform1iv(g->vb,vb,(const GLint *)w); w+=vb;
  if(pb && g->pb>=0) glUniform1iv(g->pb,pb,(const GLint *)w); w+=pb;
  if(g->at>=0) glUniform4fv(g->at,1,(const float *)w);
+ if(getenv("DSR_ATLOG") && flog(r)) fprintf(stderr,"atlog %08x loc %d: %g %g %g %g\n",g->hash,g->at,((float *)w)[0],((float *)w)[1],((float *)w)[2],((float *)w)[3]);
  if(g->flip>=0) glUniform1f(g->flip,-1.0f);        /* render targets are stored top row first: y is inverted */
 }
 static void draw_prog(DSRRenderer *r,const uint32_t *p,uint32_t size) {
@@ -412,10 +415,28 @@ static void draw_prog(DSRRenderer *r,const uint32_t *p,uint32_t size) {
  if(!g || !g->prog || !nv || 20ull+16ull*nv*ns+2ull*ni>size) { dsr_stat[1]++; return; }
  Surf *rt=surf(r,r->rt), *ds=surf(r,r->ds); if(!rt || !target(r,r->rt,r->ds)) { dsr_stat[2]++; return; }
  if(flog(r)) log_draw(r,p[4]&1?"sh-pretransformed":"sh",g->hash,prim,ni?ni:nv);
+ { static int ql=-1; if(ql<0) ql=getenv("DSR_QUERYLOG")!=0; if(ql && r->qactive) fprintf(stderr,"inquery %d prog %08x n %u\n",r->qactive,g->hash,ni?ni:nv); }
+ { static const char *skip; static int init; if(!init) { init=1; skip=getenv("DSR_SKIP_PROG"); }   /* DSR_SKIP_PROG=hash,hash: those programs' draws left out */
+   if(skip) { char h[16]; snprintf(h,sizeof h,"%08x",g->hash); if(strstr(skip,h)) return; } }
+ if(flog(r)) { static const char *td; static int td_init, done; if(!td_init) { td_init=1; td=getenv("DSR_TEXDUMP_PROG"); }   /* DSR_TEXDUMP_PROG=hash: in the logged frame, that program's samplers 0-1 (level 0) as /tmp/dsr-tex-<hash>-<k>.pam */
+   char h[16]; snprintf(h,sizeof h,"%08x",g->hash);
+   if(td && !done && strstr(td,h)) { done=1; for(int k=0;k<2;k++) { Surf *t=surf(r,r->tex[k]); if(!t || t->target!=GL_TEXTURE_2D) continue;
+       glBindTexture(GL_TEXTURE_2D,t->tex);
+       for(int lv=1;lv<12;lv++) { GLint lw=0,lh=0; glGetTexLevelParameteriv(GL_TEXTURE_2D,lv,GL_TEXTURE_WIDTH,&lw); glGetTexLevelParameteriv(GL_TEXTURE_2D,lv,GL_TEXTURE_HEIGHT,&lh); if(!lw) break;
+         uint8_t *q2=malloc((size_t)lw*lh*4); glGetTexImage(GL_TEXTURE_2D,lv,GL_RGBA,GL_UNSIGNED_BYTE,q2); long sa=0; for(long i=0;i<(long)lw*lh;i++) sa+=q2[4*i+3];
+         fprintf(stderr,"texdump %s sampler %d level %d: %dx%d mean alpha %.1f first %u %u %u %u\n",h,k,lv,lw,lh,(double)sa/(lw*lh),q2[0],q2[1],q2[2],q2[3]); free(q2); }
+       { GLint mn=0,mx=0,base=0,maxl=0; glGetTexParameteriv(GL_TEXTURE_2D,GL_TEXTURE_MIN_FILTER,&mn); glGetTexParameteriv(GL_TEXTURE_2D,GL_TEXTURE_BASE_LEVEL,&base); glGetTexParameteriv(GL_TEXTURE_2D,GL_TEXTURE_MAX_LEVEL,&maxl); (void)mx;
+         fprintf(stderr,"texdump %s sampler %d: min filter %x base %d max level %d (surface levels %u)\n",h,k,mn,base,maxl,t->levels); }
+       uint8_t *px=malloc((size_t)t->w*t->h*4); glGetTexImage(GL_TEXTURE_2D,0,GL_RGBA,GL_UNSIGNED_BYTE,px);
+       char path[64]; snprintf(path,sizeof path,"/tmp/dsr-tex-%s-%d.pam",h,k); FILE *f=fopen(path,"wb");
+       if(f) { fprintf(f,"P7\nWIDTH %u\nHEIGHT %u\nDEPTH 4\nMAXVAL 255\nTUPLTYPE RGB_ALPHA\nENDHDR\n",t->w,t->h); fwrite(px,1,(size_t)t->w*t->h*4,f); fclose(f); }
+       free(px); fprintf(stderr,"texdump %s sampler %d: surface %u %ux%u fmt %u\n",h,k,r->tex[k],t->w,t->h,t->fmt); } } }
  glUseProgram(g->prog); glBindVertexArray(r->svao);
  float vpw=r->vp[2]?r->vp[2]:rt->w, vph=r->vp[3]?r->vp[3]:rt->h;
  apply_state(r,ds,vpw,vph);
  if(g->pixfix>=0) glUniform4f(g->pixfix,1.0f/vpw,-1.0f/vph,0,0);   /* D3D9 pixel centres (d3d9_shader.c wrap_vs) */
+ { static const char *red; static int init; if(!init) { init=1; red=getenv("DSR_RED_PROG"); }   /* DSR_RED_PROG=hash: those draws' surviving pixels painted red */
+   if(red) { char h[16]; snprintf(h,sizeof h,"%08x",g->hash); if(strstr(red,h)) { glEnable(GL_BLEND); glBlendEquation(GL_FUNC_ADD); glBlendFunc(GL_CONSTANT_COLOR,GL_ZERO); glBlendColor(1,0,0,1); } } }
  glBindBuffer(GL_ARRAY_BUFFER,r->pvbo); glBufferData(GL_ARRAY_BUFFER,(GLsizeiptr)nv*ns*16,p+5,GL_STREAM_DRAW);
  for(uint32_t sl=0,c=0;sl<16;sl++) {
   if(mask>>sl&1) { glEnableVertexAttribArray(sl); glVertexAttribPointer(sl,4,GL_FLOAT,GL_FALSE,ns*16,(void *)(uintptr_t)(c*16)); c++; }
@@ -436,6 +457,10 @@ static void draw_prog(DSRRenderer *r,const uint32_t *p,uint32_t size) {
   else { glActiveTexture(GL_TEXTURE0+k); glBindSampler(k,0); glBindTexture(GL_TEXTURE_3D,r->dummy_3d); }
  }
  GLenum type=prim==1?GL_POINTS:prim==2?GL_LINES:prim==3?GL_LINE_STRIP:prim==5?GL_TRIANGLE_STRIP:prim==6?GL_TRIANGLE_FAN:GL_TRIANGLES;
+ { static const char *nd,*nz; static int init; if(!init) { init=1; nd=getenv("DSR_NODRAW_PROG"); nz=getenv("DSR_NOZW_PROG"); }   /* debugging: state set, draw left out / depth not written */
+   char h[16]; snprintf(h,sizeof h,"%08x",g->hash);
+   if(nd && strstr(nd,h)) { glActiveTexture(GL_TEXTURE0); return; }
+   if(nz && strstr(nz,h)) glDepthMask(GL_FALSE); }
  if(ni) { glBindBuffer(GL_ELEMENT_ARRAY_BUFFER,r->pebo); glBufferData(GL_ELEMENT_ARRAY_BUFFER,ni*2,(const uint8_t *)(p+5)+(size_t)nv*ns*16,GL_STREAM_DRAW); glDrawElements(type,ni,GL_UNSIGNED_SHORT,0); }
  else glDrawArrays(type,0,nv);
  glActiveTexture(GL_TEXTURE0);
