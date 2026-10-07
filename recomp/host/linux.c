@@ -83,7 +83,10 @@ static void fnv_prefs(const char *drive,const char *game) {
   if(!strcasecmp(key,"iSize W")) { fprintf(out,"iSize W=%d\r\n",w); continue; }
   if(!strcasecmp(key,"iSize H")) { fprintf(out,"iSize H=%d\r\n",h); continue; }
   if(!strcasecmp(key,"bFull Screen")) { fprintf(out,"bFull Screen=%d\r\n",test_mode?0:1); continue; }
+  if(!strcasecmp(key,"sD3DDevice")) continue;
   fputs(line,out);
+  /* the engine runs its launcher (to redetect the card) unless this names the adapter d3d9.c reports */
+  if(!strncasecmp(line,"[Display]",9)) fprintf(out,"sD3DDevice=\"Native Linux (OpenGL)\"\r\niSize W=%d\r\niSize H=%d\r\nbFull Screen=%d\r\n",w,h,test_mode?0:1);
  }
  fclose(in); fclose(out); rename(temp,out_path);
 }
