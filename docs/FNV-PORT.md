@@ -6,6 +6,26 @@ This branch takes the static recompiler from this repository (x86 → C → clan
 `setup_fallout_new_vegas_1.4.0.525_(12010).exe`). As with Dungeon Siege, nothing from the game is committed. All
 generated code goes under `recomp/work/`, which git ignores.
 
+## Linux port status (2026-10-06, this repository)
+
+Done: the whole executable plus Bink and both Vorbis DLLs link into `FalloutNVLinux` (libvorbisfile is relocated
+to 0x11000000, see `tools/rebase_pe.py`). All 280 imports are implemented. It starts, plays the intro movie, draws
+the main menu and plays its music, then starts a new game and renders Doc Mitchell's house through the translated shaders.
+
+Next, roughly in order:
+1. UI frames that don't draw (the new-game confirmation box draws only its text).
+2. Occlusion queries (`dv_CreateQuery` type 9): the sun/moon glare shows indoors.
+3. Render-target formats: everything is RGBA8 now. FNV's HDR targets (A16B16G16R16F), depth textures and shadow
+   maps need real formats in `renderer.c`. Also cube and volume textures (stand-ins at the moment).
+4. Fog for shader model 2 shaders (fixed-function fog after the pixel shader), and the D3D9 half-pixel offset.
+5. Sound effects (DirectSound 8 buffers, 3D buffers via QueryInterface) and the Mac side (MojoShader's Metal
+   profile in place of GLSL; `renderer.m` needs DSR_GLSL_CREATE's MSL equivalent).
+6. Performance: programmable draws copy every vertex as float4 through the command ring. Caching vertex/index
+   buffers on the GPU is the big win.
+7. The 127 unresolved jump tables, `_except_handler4`, C++ exceptions if the game throws.
+
+The installer note below refers to the macOS repository's `game-installer` release (this repository has none).
+
 ## Status (2026-10-06, done on Linux x86-64)
 
 | Step | State |
