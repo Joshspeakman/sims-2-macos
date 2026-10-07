@@ -29,5 +29,9 @@ enum {
     DSR_PROG_CONST,        /* u32 count, float4 registers[count]: the bound program's parameters */
     DSR_DRAW_PROG,         /* u32 prim, u32 attribute mask, u32 nverts, u32 nindices, u32 flags (1 pretransformed),
                               float4 attributes[nverts][popcount(mask)] in slot order, u16 indices[n] (padded to 4) */
+    DSR_GLSL_CREATE,       /* u32 id, u32 nattr, u32 vs length, u32 ps length, {u32 slot; char name[28]} attr[nattr], vertex
+                              GLSL, pixel GLSL (each NUL-terminated, padded to 4): the game's own shader pair (d3d9_shader.c) */
+    DSR_SHADER_CONST,      /* u32 vs/ps float4 counts, vs/ps int4 counts, vs/ps bool counts, then those registers in that order
+                              (bools one u32 each), then float4 alpha test (reference 0-255, D3DCMP function, enabled, 0) */
 };
 #endif

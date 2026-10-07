@@ -24,9 +24,13 @@ typedef struct {   // must match game.*.glsl (std140) Uniforms
 
 struct DSRRenderer {
  Surf s[MAXSURF]; uint32_t rs[256],tss[8][32],tex[8],rt,ds,presented;
- float xf[32][16],vp[6]; GLuint fbo,vao,vbo,ebo,ubo,game,quad,dummy,scratch,gamma,sampler[2];
+ float xf[32][16],vp[6]; GLuint fbo,vao,vbo,ebo,ubo,game,quad,dummy,scratch,gamma,sampler[8];
  uint16_t ramps[3][256]; void *readback; size_t readback_size; volatile uint32_t *readback_done;
+ struct GProg *progs; uint32_t nprogs, cur; GLuint dummy_cube, dummy_3d, pvbo, pebo, svao;
 };
+/* the game's own shader pairs (DSR_GLSL_CREATE, d3d9_shader.c): MojoShader GLSL, attributes bound to the slots of
+ * programmable draws, MojoShader's per-type constant arrays */
+typedef struct GProg { uint32_t id; GLuint prog; GLint vf, pf, vi, pi, vb, pb, flip, at; GLenum samptype[16]; int nsamp; } GProg;
 static void mat_ident(float *m) { memset(m, 0, 64); m[0] = m[5] = m[10] = m[15] = 1; }
 static void mat_mul(float *o, const float *a, const float *b)   // D3D row-major: o = a * b
 {
@@ -87,7 +91,14 @@ DSRRenderer *dsr_gl_create(const char *dir) {
 
  for(int k=0;k<3;k++) for(int i=0;i<256;i++) r->ramps[k][i]=i*257;
  r->rs[53]=r->rs[54]=r->rs[55]=1; r->rs[56]=8; r->rs[58]=r->rs[59]=255; r->rs[168]=15;
- glGenSamplers(2,r->sampler);
+ glGenSamplers(8,r->sampler);
+ glGenVertexArrays(1,&r->svao); glGenBuffers(1,&r->pvbo); glGenBuffers(1,&r->pebo);
+ glGenTextures(1,&r->dummy_cube); glBindTexture(GL_TEXTURE_CUBE_MAP,r->dummy_cube);
+ for(int f=0;f<6;f++) glTexImage2D(GL_TEXTURE_CUBE_MAP_POSITIVE_X+f,0,GL_RGBA8,1,1,0,GL_BGRA,GL_UNSIGNED_BYTE,&white);
+ glTexParameteri(GL_TEXTURE_CUBE_MAP,GL_TEXTURE_MIN_FILTER,GL_NEAREST);
+ glGenTextures(1,&r->dummy_3d); glBindTexture(GL_TEXTURE_3D,r->dummy_3d);
+ glTexImage3D(GL_TEXTURE_3D,0,GL_RGBA8,1,1,1,0,GL_BGRA,GL_UNSIGNED_BYTE,&white); glTexParameteri(GL_TEXTURE_3D,GL_TEXTURE_MIN_FILTER,GL_NEAREST);
+ glBindVertexArray(r->vao);
  ramp(r); glDisable(GL_DITHER); return r;
 }
 static int target(DSRRenderer *r,uint32_t color,uint32_t depth) {
@@ -157,6 +168,20 @@ static void bind_texture(DSRRenderer *r,int stage,Surf *s) {
  glSamplerParameteri(sampler,GL_TEXTURE_MIN_FILTER,min); glSamplerParameteri(sampler,GL_TEXTURE_MAG_FILTER,t[16]>=2?GL_LINEAR:GL_NEAREST);
  glSamplerParameteri(sampler,GL_TEXTURE_WRAP_S,address(t[13])); glSamplerParameteri(sampler,GL_TEXTURE_WRAP_T,address(t[14]));
 }
+/* depth, stencil, colour mask, blending, culling and viewport from the D3D render states */
+static void apply_state(DSRRenderer *r,Surf *ds,float vpw,float vph) {
+ if(ds && r->rs[7]) glEnable(GL_DEPTH_TEST); else glDisable(GL_DEPTH_TEST);
+ glDepthMask(ds && r->rs[7] && r->rs[14]); glDepthFunc(compare(r->rs[23]));
+ if(ds && r->rs[52]) {
+  glEnable(GL_STENCIL_TEST); glStencilFunc(compare(r->rs[56]),r->rs[57]&255,r->rs[58]&255);
+  glStencilMask(r->rs[59]&255); glStencilOp(stencil_op(r->rs[53]),stencil_op(r->rs[54]),stencil_op(r->rs[55]));
+ } else glDisable(GL_STENCIL_TEST);
+ glColorMask((r->rs[168]&1)!=0,(r->rs[168]&2)!=0,(r->rs[168]&4)!=0,(r->rs[168]&8)!=0);
+ if(r->rs[27]) { glEnable(GL_BLEND); glBlendFunc(blend(r->rs[19]),blend(r->rs[20])); } else glDisable(GL_BLEND);
+ glDisable(GL_SCISSOR_TEST); glFrontFace(GL_CCW);
+ if(r->rs[22]==2 || r->rs[22]==3) { glEnable(GL_CULL_FACE); glCullFace(r->rs[22]==2?GL_FRONT:GL_BACK); } else glDisable(GL_CULL_FACE);
+ glViewport(r->vp[0],r->vp[1],vpw,vph); glDepthRange(r->vp[4],r->vp[5]?r->vp[5]:1);
+}
 static void draw(DSRRenderer *r,const uint32_t *p,uint32_t size) {
  uint32_t prim=p[0],fvf=p[1],nv=p[2],ni=p[3]; int rhw=(fvf&14)==4;
  uint32_t stride=rhw?16:12, coloroff=0,uvoff=0;
@@ -164,6 +189,7 @@ static void draw(DSRRenderer *r,const uint32_t *p,uint32_t size) {
  for(uint32_t k=0;k<((fvf>>8)&15);k++) { uint32_t f=(fvf>>(16+2*k))&3; stride+=f==0?8:f==1?12:f==2?16:4; }
  dsr_stat[0]++; if(!nv || 16ull+(uint64_t)nv*stride+(uint64_t)ni*2>size) { dsr_stat[1]++; return; }
  Surf *rt=surf(r,r->rt), *ds=surf(r,r->ds); if(!rt || !target(r,r->rt,r->ds)) { dsr_stat[2]++; return; }
+ glBindVertexArray(r->vao);
     Uniforms u; memset(&u, 0, sizeof u);
     float wv[16]; mat_mul(wv, r->xf[1], r->xf[2]); mat_mul(u.wvp, wv, r->xf[3]); memcpy(u.wv, wv, 64); memcpy(u.tex0, r->xf[16], 64); memcpy(u.tex1, r->xf[17], 64);
     u.s1[0] = r->tss[1][11]; u.s1[1] = r->tss[1][24];
@@ -179,17 +205,7 @@ static void draw(DSRRenderer *r,const uint32_t *p,uint32_t size) {
     u.xrgb[0] = t0 && t0->fmt == 2; u.xrgb[1] = t1 && t1->fmt == 2;
 
  glUseProgram(r->game); glBindBuffer(GL_UNIFORM_BUFFER,r->ubo); glBufferSubData(GL_UNIFORM_BUFFER,0,sizeof u,&u);
- if(ds && r->rs[7]) glEnable(GL_DEPTH_TEST); else glDisable(GL_DEPTH_TEST);
- glDepthMask(ds && r->rs[7] && r->rs[14]); glDepthFunc(compare(r->rs[23]));
- if(ds && r->rs[52]) {
-  glEnable(GL_STENCIL_TEST); glStencilFunc(compare(r->rs[56]),r->rs[57]&255,r->rs[58]&255);
-  glStencilMask(r->rs[59]&255); glStencilOp(stencil_op(r->rs[53]),stencil_op(r->rs[54]),stencil_op(r->rs[55]));
- } else glDisable(GL_STENCIL_TEST);
- glColorMask((r->rs[168]&1)!=0,(r->rs[168]&2)!=0,(r->rs[168]&4)!=0,(r->rs[168]&8)!=0);
- if(r->rs[27]) { glEnable(GL_BLEND); glBlendFunc(blend(r->rs[19]),blend(r->rs[20])); } else glDisable(GL_BLEND);
- glDisable(GL_SCISSOR_TEST); glFrontFace(GL_CCW);
- if(r->rs[22]==2 || r->rs[22]==3) { glEnable(GL_CULL_FACE); glCullFace(r->rs[22]==2?GL_FRONT:GL_BACK); } else glDisable(GL_CULL_FACE);
- glViewport(r->vp[0],r->vp[1],u.vp[2],u.vp[3]); glDepthRange(r->vp[4],r->vp[5]?r->vp[5]:1);
+ apply_state(r,ds,u.vp[2],u.vp[3]);
  glBindBuffer(GL_ARRAY_BUFFER,r->vbo); glBufferData(GL_ARRAY_BUFFER,nv*stride,p+4,GL_STREAM_DRAW);
  glEnableVertexAttribArray(0); glVertexAttribPointer(0,rhw?4:3,GL_FLOAT,GL_FALSE,stride,0);
  if(fvf&64) { glEnableVertexAttribArray(1); glVertexAttribPointer(1,GL_BGRA,GL_UNSIGNED_BYTE,GL_TRUE,stride,(void *)(uintptr_t)coloroff); }
@@ -257,6 +273,78 @@ int dsr_gl_display_screenshot(const char *path,int width,int height) {
  int ok=png_image_write_to_file(&image,path,0,topdown,0,NULL);
  png_image_free(&image); free(pixels); free(topdown); return ok?0:-1;
 }
+
+/* ---- the game's own shaders ---- */
+static GProg *gprog(DSRRenderer *r,uint32_t id) { for(uint32_t k=0;k<r->nprogs;k++) if(r->progs[k].id==id) return &r->progs[k]; return NULL; }
+static GLuint compile(GLenum type,const char *src,uint32_t id) {
+ GLuint sh=glCreateShader(type); glShaderSource(sh,1,&src,NULL); glCompileShader(sh); GLint ok; glGetShaderiv(sh,GL_COMPILE_STATUS,&ok);
+ if(!ok) { char log[4096]; glGetShaderInfoLog(sh,sizeof log,NULL,log); static int n; if(n++<10) fprintf(stderr,"renderer: program %u %s shader: %.600s\n",id,type==GL_VERTEX_SHADER?"vertex":"pixel",log); glDeleteShader(sh); return 0; }
+ return sh;
+}
+static void glsl_create(DSRRenderer *r,const uint32_t *p,uint32_t size) {
+ uint32_t id=p[0],na=p[1],vl=p[2],pl=p[3];
+ if(na>16 || 16ull+32ull*na+((vl+4)&~3u)+((pl+4)&~3u)>size || gprog(r,id)) return;
+ const char *vs=(const char *)(p+4+8*na), *ps=vs+((vl+4)&~3u);
+ GLuint v=compile(GL_VERTEX_SHADER,vs,id), f=v?compile(GL_FRAGMENT_SHADER,ps,id):0;
+ GProg g={0}; g.id=id;
+ if(v && f) {
+  g.prog=glCreateProgram(); glAttachShader(g.prog,v); glAttachShader(g.prog,f);
+  for(uint32_t k=0;k<na;k++) { char name[29]; memcpy(name,p+4+8*k+1,28); name[28]=0; glBindAttribLocation(g.prog,p[4+8*k],name); }
+  glLinkProgram(g.prog); GLint ok; glGetProgramiv(g.prog,GL_LINK_STATUS,&ok);
+  if(!ok) { char log[4096]; glGetProgramInfoLog(g.prog,sizeof log,NULL,log); static int n; if(n++<10) fprintf(stderr,"renderer: program %u link: %.600s\n",id,log); glDeleteProgram(g.prog); g.prog=0; }
+ }
+ if(v) glDeleteShader(v); if(f) glDeleteShader(f);
+ if(g.prog) {
+  g.vf=glGetUniformLocation(g.prog,"vs_uniforms_vec4"); g.pf=glGetUniformLocation(g.prog,"ps_uniforms_vec4");
+  g.vi=glGetUniformLocation(g.prog,"vs_uniforms_ivec4"); g.pi=glGetUniformLocation(g.prog,"ps_uniforms_ivec4");
+  g.vb=glGetUniformLocation(g.prog,"vs_uniforms_bool"); g.pb=glGetUniformLocation(g.prog,"ps_uniforms_bool");
+  g.flip=glGetUniformLocation(g.prog,"vpFlip"); g.at=glGetUniformLocation(g.prog,"d3d_alphatest");
+  glUseProgram(g.prog);
+  for(int k=0;k<16;k++) {                     /* sampler register k -> texture unit k; its type for the stand-in texture */
+   char n[16]; snprintf(n,sizeof n,"ps_s%d",k); GLint loc=glGetUniformLocation(g.prog,n); if(loc<0) continue;
+   glUniform1i(loc,k); g.nsamp=k+1;
+   GLint cnt; glGetProgramiv(g.prog,GL_ACTIVE_UNIFORMS,&cnt);
+   for(GLint u=0;u<cnt;u++) { char un[64]; GLint sz; GLenum ty; glGetActiveUniform(g.prog,u,sizeof un,NULL,&sz,&ty,un); if(!strcmp(un,n)) g.samptype[k]=ty; }
+  }
+ }
+ r->progs=realloc(r->progs,(r->nprogs+1)*sizeof *r->progs); r->progs[r->nprogs++]=g;
+}
+static void shader_consts(DSRRenderer *r,const uint32_t *p,uint32_t size) {
+ GProg *g=gprog(r,r->cur); if(!g || !g->prog || size<24) return;
+ uint32_t vf=p[0],pf=p[1],vi=p[2],pi=p[3],vb=p[4],pb=p[5];
+ if(24ull+16ull*(vf+pf+vi+pi)+4ull*(vb+pb)+16>size) return;
+ const uint32_t *w=p+6; glUseProgram(g->prog);
+ if(vf && g->vf>=0) glUniform4fv(g->vf,vf,(const float *)w); w+=4*vf;
+ if(pf && g->pf>=0) glUniform4fv(g->pf,pf,(const float *)w); w+=4*pf;
+ if(vi && g->vi>=0) glUniform4iv(g->vi,vi,(const GLint *)w); w+=4*vi;
+ if(pi && g->pi>=0) glUniform4iv(g->pi,pi,(const GLint *)w); w+=4*pi;
+ if(vb && g->vb>=0) glUniform1iv(g->vb,vb,(const GLint *)w); w+=vb;
+ if(pb && g->pb>=0) glUniform1iv(g->pb,pb,(const GLint *)w); w+=pb;
+ if(g->at>=0) glUniform4fv(g->at,1,(const float *)w);
+ if(g->flip>=0) glUniform1f(g->flip,-1.0f);        /* render targets are stored top row first: y is inverted */
+}
+static void draw_prog(DSRRenderer *r,const uint32_t *p,uint32_t size) {
+ uint32_t prim=p[0],mask=p[1],nv=p[2],ni=p[3],ns=(uint32_t)__builtin_popcount(mask);
+ GProg *g=gprog(r,r->cur); dsr_stat[0]++;
+ if(!g || !g->prog || !nv || 20ull+16ull*nv*ns+2ull*ni>size) { dsr_stat[1]++; return; }
+ Surf *rt=surf(r,r->rt), *ds=surf(r,r->ds); if(!rt || !target(r,r->rt,r->ds)) { dsr_stat[2]++; return; }
+ glUseProgram(g->prog); glBindVertexArray(r->svao);
+ apply_state(r,ds,r->vp[2]?r->vp[2]:rt->w,r->vp[3]?r->vp[3]:rt->h);
+ glBindBuffer(GL_ARRAY_BUFFER,r->pvbo); glBufferData(GL_ARRAY_BUFFER,(GLsizeiptr)nv*ns*16,p+5,GL_STREAM_DRAW);
+ for(uint32_t sl=0,c=0;sl<16;sl++) {
+  if(mask>>sl&1) { glEnableVertexAttribArray(sl); glVertexAttribPointer(sl,4,GL_FLOAT,GL_FALSE,ns*16,(void *)(uintptr_t)(c*16)); c++; }
+  else { glDisableVertexAttribArray(sl); glVertexAttrib4f(sl,0,0,0,1); }
+ }
+ for(int k=0;k<g->nsamp && k<8;k++) {
+  if(!g->samptype[k]) continue;
+  if(g->samptype[k]==GL_SAMPLER_2D || g->samptype[k]==GL_SAMPLER_2D_SHADOW) bind_texture(r,k,surf(r,r->tex[k]));
+  else { glActiveTexture(GL_TEXTURE0+k); glBindSampler(k,0); glBindTexture(g->samptype[k]==GL_SAMPLER_CUBE?GL_TEXTURE_CUBE_MAP:GL_TEXTURE_3D,g->samptype[k]==GL_SAMPLER_CUBE?r->dummy_cube:r->dummy_3d); }
+ }
+ GLenum type=prim==1?GL_POINTS:prim==2?GL_LINES:prim==3?GL_LINE_STRIP:prim==5?GL_TRIANGLE_STRIP:prim==6?GL_TRIANGLE_FAN:GL_TRIANGLES;
+ if(ni) { glBindBuffer(GL_ELEMENT_ARRAY_BUFFER,r->pebo); glBufferData(GL_ELEMENT_ARRAY_BUFFER,ni*2,(const uint8_t *)(p+5)+(size_t)nv*ns*16,GL_STREAM_DRAW); glDrawElements(type,ni,GL_UNSIGNED_SHORT,0); }
+ else glDrawArrays(type,0,nv);
+ glActiveTexture(GL_TEXTURE0);
+}
 int dsr_gl_exec(DSRRenderer *r,uint32_t op,const uint8_t *data,uint32_t size) {
  /* Explicit checks avoid assuming enum numbering for protocol extensions. */
  uint32_t need=0;
@@ -266,7 +354,8 @@ int dsr_gl_exec(DSRRenderer *r,uint32_t op,const uint8_t *data,uint32_t size) {
  case DSR_VIEWPORT: case DSR_READBACK: case DSR_SURFACE_UPLOAD: case DSR_UPLOAD_OVER: need=24; break;
  case DSR_CLEAR: need=20; break; case DSR_DRAW: need=16; break;
  case DSR_SURFACE_CREATE: need=28; break; case DSR_SURFACE_DESTROY: case DSR_PRESENT: need=4; break;
- case DSR_BLT: need=48; break; default: break;
+ case DSR_BLT: need=48; break; case DSR_GLSL_CREATE: need=16; break; case DSR_PROG_USE: need=4; break;
+ case DSR_SHADER_CONST: need=24; break; case DSR_DRAW_PROG: need=20; break; default: break;
  }
  if(size<need) return 0;
  const uint32_t *p=(const uint32_t *)data;
@@ -285,6 +374,10 @@ int dsr_gl_exec(DSRRenderer *r,uint32_t op,const uint8_t *data,uint32_t size) {
  case DSR_UPLOAD_OVER: upload(r,p,size,1); break;
  case DSR_READBACK: readback(r,p); break;
  case DSR_BLT: if(p[5]) blit(r,p[0],(const int32_t *)(p+1),p[5],(const int32_t *)(p+6),0,0); else if(!(p[10]&0x20000)) blit(r,p[0],(const int32_t *)(p+1),0,(const int32_t *)(p+1),1,p[11]); break;
+ case DSR_GLSL_CREATE: glsl_create(r,p,size); break;
+ case DSR_PROG_USE: r->cur=p[0]; break;
+ case DSR_SHADER_CONST: shader_consts(r,p,size); break;
+ case DSR_DRAW_PROG: draw_prog(r,p,size); break;
  case DSR_PRESENT: r->presented=p[0]; return 1;
  case DSR_GAMMA: if(size>=1536) { memcpy(r->ramps,p,1536); ramp(r);
   if(getenv("DSR_COLORLOG")) fprintf(stderr,"gamma: 64=%u/%u/%u 128=%u/%u/%u 192=%u/%u/%u\n",r->ramps[0][64],r->ramps[1][64],r->ramps[2][64],r->ramps[0][128],r->ramps[1][128],r->ramps[2][128],r->ramps[0][192],r->ramps[1][192],r->ramps[2][192]);
@@ -296,6 +389,6 @@ int dsr_gl_exec(DSRRenderer *r,uint32_t op,const uint8_t *data,uint32_t size) {
 void dsr_gl_destroy(DSRRenderer *r) {
  if(!r) return; for(uint32_t i=1;i<MAXSURF;i++) if(r->s[i].used && r->s[i].root==i) glDeleteTextures(1,&r->s[i].tex);
  glDeleteProgram(r->game); glDeleteProgram(r->quad); glDeleteFramebuffers(1,&r->fbo); glDeleteVertexArrays(1,&r->vao);
- glDeleteSamplers(2,r->sampler);
+ glDeleteSamplers(8,r->sampler);
  GLuint b[]={r->vbo,r->ebo,r->ubo}; glDeleteBuffers(3,b); GLuint t[]={r->dummy,r->scratch,r->gamma}; glDeleteTextures(3,t); free(r);
 }
