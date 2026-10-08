@@ -11,6 +11,7 @@ if [[ -f "$EXE" ]]; then
   EDITION=$(PYTHONPATH="$HERE/tools" python3 -c 'import sys; from editions import identify; print(identify(sys.argv[1], prepared=True))' "$EXE" 2>/dev/null || echo gog)
   [[ "$EDITION" == broken-world ]] && EDITION_FLAGS=(-DDS2_BROKEN_WORLD)
   [[ "$EDITION" == fnv ]] && EDITION_FLAGS=(-DFNV_EDITION)
+  [[ "$EDITION" == fnv && "$(uname -m)" == arm64 ]] && EDITION_FLAGS+=(-DRT_TSO)       # as the lifted code (build_fnv.sh)
 fi
 printf '%s\n' "${EDITION_FLAGS[@]:-}" > "$OUT/edition-flags.txt"
 # MojoShader (Direct3D 9 shader bytecode -> Metal for Fallout: New Vegas's own shaders, d3d9_shader.c): the Metal profile only

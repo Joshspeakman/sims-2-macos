@@ -111,26 +111,33 @@ class Lifter:
         if seg == 'fs' and not lea: e = '(c->fs_base + %s)' % e
         elif seg in ('gs',) or (seg == 'fs' and lea): raise Unsupported('segment ' + seg)
         return e
+    def stack(self, i, op):
+        """a memory operand in this thread's own stack frame ([esp + ...], or [ebp + ...] in a function that keeps ebp as
+        its frame pointer): no other thread looks there, so it needs none of rt.h's RT_TSO ordering (R32S/W32S)"""
+        m = op.mem
+        if not m.base or m.segment: return False
+        n = i.reg_name(m.base)
+        return n == 'esp' or n == 'ebp' and getattr(self, 'ebp_frame', False)
     def rd(self, i, op, size=None):
         size = size or op.size
         if op.type == X.X86_OP_REG: return self.rreg(i.reg_name(op.reg))
         if op.type == X.X86_OP_IMM: return '0x%xu' % (op.imm & {1: 0xff, 2: 0xffff, 4: 0xffffffff}[size])
-        return self.rmem(size, self.addr(i, op))
-    def rmem(self, size, a):
+        return self.rmem(size, self.addr(i, op), self.stack(i, op))
+    def rmem(self, size, a, stack=False):
         if size not in (1, 2, 4): raise Unsupported('operand size %d' % size)
-        return {1: 'R8', 2: 'R16', 4: 'R32'}[size] + '(%s)' % a
-    def wmem(self, size, a, v):
+        return {1: 'R8', 2: 'R16', 4: 'R32'}[size] + ('S' if stack else '') + '(%s)' % a
+    def wmem(self, size, a, v, stack=False):
         if size not in (1, 2, 4): raise Unsupported('operand size %d' % size)
-        return {1: 'W8', 2: 'W16', 4: 'W32'}[size] + '(%s, %s);' % (a, v)
+        return {1: 'W8', 2: 'W16', 4: 'W32'}[size] + ('S' if stack else '') + '(%s, %s);' % (a, v)
     def wr(self, i, op, v):
         if op.type == X.X86_OP_REG: return self.wreg(i.reg_name(op.reg), v)
-        return self.wmem(op.size, self.addr(i, op), v)
+        return self.wmem(op.size, self.addr(i, op), v, self.stack(i, op))
     def rmw(self, i, op):
         """(read expr, write fn, prelude) for a read-modify-write destination; memory address computed once"""
         if op.type == X.X86_OP_REG:
             n = i.reg_name(op.reg); return self.rreg(n), (lambda v: self.wreg(n, v)), ''
-        a = self.addr(i, op); sz = op.size
-        return self.rmem(sz, 'ea'), (lambda v: self.wmem(sz, 'ea', v)), 'uint32_t ea = %s; ' % a
+        a = self.addr(i, op); sz = op.size; st = self.stack(i, op)
+        return self.rmem(sz, 'ea', st), (lambda v: self.wmem(sz, 'ea', v, st)), 'uint32_t ea = %s; ' % a
 
     # ---------- function body ----------
     def collect(self, f, extra=()):
@@ -238,6 +245,17 @@ class Lifter:
                     if enc is None or not (enc == 0xffffffff or enc < e) or not (self.TLO <= hnd < self.THI) or (flt and not (self.TLO <= flt < self.THI)): break
                     if flt: out.append(hnd)
         return sorted(set(out))
+    def keeps_frame(self, f, insns):
+        """push ebp; mov ebp, esp at the entry, and nothing else in the function sets ebp (pop ebp/leave end it)"""
+        a = insns.get(f); b = a and insns.get(f + a.size)
+        if not (a and b and a.mnemonic == 'push' and a.op_str == 'ebp' and b.mnemonic == 'mov' and b.op_str == 'ebp, esp'): return False
+        for va, i in insns.items():
+            if va in (f, f + a.size) or not i.operands or i.mnemonic in ('push', 'cmp', 'test', 'pop', 'leave'): continue
+            o = i.operands[0]
+            if o.type == X.X86_OP_REG and i.reg_name(o.reg) in ('ebp', 'bp', 'bpl'): return False
+            if i.mnemonic in ('xchg', 'xadd', 'cmpxchg') and len(i.operands) > 1 and i.operands[1].type == X.X86_OP_REG and i.reg_name(i.operands[1].reg) in ('ebp', 'bp'): return False
+        return True
+
     def lift_function(self, f):
         insns = self.collect(f)
         # Flat guest blocks return to the dispatcher at every CALL. A C stack
@@ -246,6 +264,7 @@ class Lifter:
         if seh: insns = self.collect(f, seh)
         self.cur_seh = set(seh)
         order = sorted(insns)
+        self.ebp_frame = self.keeps_frame(f, insns)
         labels = {f}
         for va in order:
             i = insns[va]; mn = i.mnemonic
@@ -360,7 +379,7 @@ class Lifter:
         if mn == 'int3': return 'SPILL; rt_exception(c, 0x%08xu, 0x80000003u); RELOAD;' % i.address          # EXCEPTION_BREAKPOINT
         if mn == 'int': return 'SPILL; rt_exception(c, 0x%08xu, 0xc0000005u); RELOAD;' % i.address            # general protection
         if mn in JUNK: raise Unsupported(mn)
-        if rep == 'lock' and mn in ('add', 'adc', 'sub', 'sbb', 'and', 'or', 'xor', 'xadd') and ops[0].type == X.X86_OP_MEM:
+        if rep == 'lock' and mn in ('adc', 'sbb') and ops[0].type == X.X86_OP_MEM:
             self.nolock = True                                   # the plain instruction, under the runtime's bus lock
             try: body = self.emit(i, f, insns, callees)
             finally: self.nolock = False
@@ -382,9 +401,8 @@ class Lifter:
                 return '{ uint32_t t0 = %s, t1 = %s; %s %s }' % (self.rd(i, o[0]), self.rd(i, o[1]), self.wr(i, o[0], 't1'), self.wr(i, o[1], 't0'))
             m, r = (o[0], o[1]) if o[0].type == X.X86_OP_MEM else (o[1], o[0])
             if not self.guest_flow and m.size in (1, 2, 4) and not (m.mem.segment and i.reg_name(m.mem.segment) == 'fs'):   # implicitly locked: an atomic swap
-                t = {1: 'uint8_t', 2: 'uint16_t', 4: 'uint32_t'}[m.size]
-                return '{ uint32_t ea = %s; uint32_t old = __atomic_exchange_n((%s *)(M + ea), (%s)%s, __ATOMIC_SEQ_CST); %s }' % (
-                    self.addr(i, m), t, t, self.rd(i, r), self.wr(i, r, 'old'))
+                return '{ uint32_t ea = %s; uint32_t old = rt_lock_xchg(M, ea, %d, %s); %s }' % (
+                    self.addr(i, m), m.size, self.rd(i, r), self.wr(i, r, 'old'))
             rx, wfn, pre = self.rmw(i, m)
             body = '{ %suint32_t t0 = %s, t1 = %s; %s %s }' % (pre, rx, self.rd(i, r), wfn('t1'), self.wr(i, r, 't0'))
             # x86 memory XCHG is implicitly locked. BW's dispatcher uses this
@@ -402,7 +420,7 @@ class Lifter:
         if mn == 'cwd': return 'edx = (edx & 0xffff0000u) | (((int16_t)eax < 0) ? 0xffffu : 0);'
         if mn == 'push' and o[0].type == X.X86_OP_REG and i.reg_name(o[0].reg) in ('cs', 'ds', 'es', 'ss', 'fs', 'gs'):
             sel = {'cs': 0x1b, 'fs': 0x3b}.get(i.reg_name(o[0].reg), 0x23)        # flat user-mode selectors
-            return 'esp -= 4; W32(esp, 0x%xu);' % sel
+            return 'esp -= 4; W32S(esp, 0x%xu);' % sel
         if mn == 'pop' and o[0].type == X.X86_OP_REG and i.reg_name(o[0].reg) in ('ds', 'es', 'ss', 'fs', 'gs'):
             return 'esp += 4;'
         if mn == 'cpuid': return 'rt_cpuid(c, &eax, &ebx, &ecx, &edx);'
@@ -419,16 +437,16 @@ class Lifter:
                     if va not in self.constant_targets_cache:
                         self.constant_targets_cache[va] = stack_targets(self, va)
                     callees.update(self.constant_targets_cache[va])
-            return '{ uint32_t v = %s; esp -= 4; W32(esp, v); }' % self.rd(i, o[0])
+            return '{ uint32_t v = %s; esp -= 4; W32S(esp, v); }' % self.rd(i, o[0])
         if mn == 'pop':
             if o[0].size != 4: raise Unsupported('pop16')
-            return '{ uint32_t v = R32(esp); esp += 4; %s }' % self.wr(i, o[0], 'v')
+            return '{ uint32_t v = R32S(esp); esp += 4; %s }' % self.wr(i, o[0], 'v')
         if mn == 'pushal':
-            return '{ uint32_t s = esp; esp -= 32; W32(esp + 28, eax); W32(esp + 24, ecx); W32(esp + 20, edx); W32(esp + 16, ebx); W32(esp + 12, s); W32(esp + 8, ebp); W32(esp + 4, esi); W32(esp, edi); }'
+            return '{ uint32_t s = esp; esp -= 32; W32S(esp + 28, eax); W32S(esp + 24, ecx); W32S(esp + 20, edx); W32S(esp + 16, ebx); W32S(esp + 12, s); W32S(esp + 8, ebp); W32S(esp + 4, esi); W32S(esp, edi); }'
         if mn == 'popal':
-            return 'edi = R32(esp); esi = R32(esp + 4); ebp = R32(esp + 8); ebx = R32(esp + 16); edx = R32(esp + 20); ecx = R32(esp + 24); eax = R32(esp + 28); esp += 32;'
-        if mn == 'pushfd': return '{ uint32_t v = flags_get(&f); esp -= 4; W32(esp, v); }'
-        if mn == 'popfd': return '{ uint32_t v = R32(esp); esp += 4; flags_set(&f, v, 0xcd5u | F_DF); }'
+            return 'edi = R32S(esp); esi = R32S(esp + 4); ebp = R32S(esp + 8); ebx = R32S(esp + 16); edx = R32S(esp + 20); ecx = R32S(esp + 24); eax = R32S(esp + 28); esp += 32;'
+        if mn == 'pushfd': return '{ uint32_t v = flags_get(&f); esp -= 4; W32S(esp, v); }'
+        if mn == 'popfd': return '{ uint32_t v = R32S(esp); esp += 4; flags_set(&f, v, 0xcd5u | F_DF); }'
         if mn == 'lahf': return 'eax = (eax & 0xffff00ffu) | ((flags_get(&f) & 0xd5u | 2u) << 8);'
         if mn == 'sahf': return 'flags_set(&f, (eax >> 8) & 0xffu, F_CF | F_PF | F_AF | F_ZF | F_SF);'
         if mn == 'clc': return 'flags_set(&f, 0, F_CF);'
@@ -437,10 +455,10 @@ class Lifter:
         if mn == 'cld': return 'f.df = 0;'
         if mn == 'std': return 'f.df = 1;'
         if mn == 'nop': return ';'
-        if mn == 'leave': return 'esp = ebp; ebp = R32(esp); esp += 4;'
+        if mn == 'leave': return 'esp = ebp; ebp = R32S(esp); esp += 4;'
         if mn == 'enter':
             if o[1].imm & 0x1f: raise Unsupported('enter nesting')
-            return 'esp -= 4; W32(esp, ebp); ebp = esp; esp -= 0x%xu;' % (o[0].imm & 0xffff)
+            return 'esp -= 4; W32S(esp, ebp); ebp = esp; esp -= 0x%xu;' % (o[0].imm & 0xffff)
         if mn == 'xlatb': return 'eax = (eax & 0xffffff00u) | R8(ebx + (eax & 0xffu));'
         if mn == 'rdtsc': return '{ uint64_t t = rt_rdtsc(); eax = (uint32_t)t; edx = (uint32_t)(t >> 32); }'
         if mn in ('add', 'sub', 'adc', 'sbb', 'and', 'or', 'xor', 'cmp', 'test'):
@@ -485,7 +503,7 @@ class Lifter:
         if mn == 'call': return self.call(i, callees)
         if mn == 'ret':
             n = (o[0].imm & 0xffff) if o else 0
-            return ('c->tc = R32(esp); ' if self.guest_flow else '') + 'esp += %du; SPILL; return;' % (4 + n)
+            return ('c->tc = R32S(esp); ' if self.guest_flow else '') + 'esp += %du; SPILL; return;' % (4 + n)
         if mn == 'jmp': return self.jmp(i, f, insns, callees)
         if mn in ('jecxz', 'jcxz'):
             counter = '(ecx & 0xffffu)' if mn == 'jcxz' else 'ecx'
@@ -596,15 +614,27 @@ class Lifter:
 
     def locked(self, i, mn):
         o = i.operands
+        # hardware atomics (rt.h rt_lock_*), so every locked form excludes the others and kernel32's Interlocked*
         if mn in ('inc', 'dec') and o[0].type == X.X86_OP_MEM and o[0].size in (1, 2, 4):
-            sz = o[0].size; t = {1: 'uint8_t', 2: 'uint16_t', 4: 'uint32_t'}[sz]
-            fn = '__atomic_add_fetch' if mn == 'inc' else '__atomic_sub_fetch'
-            return '{ uint32_t ea = %s; uint32_t r = %s((%s *)(M + ea), (%s)1, __ATOMIC_SEQ_CST); f.cin = flag_cf(&f); LF(%s, %s, (%s & %s), 1, r); }' % (
-                self.addr(i, o[0]), fn, t, t, 'LF_INC' if mn == 'inc' else 'LF_DEC', SZ[sz], 'r - 1u' if mn == 'inc' else 'r + 1u', MASK[sz])
+            sz = o[0].size
+            return '{ uint32_t ea = %s; uint32_t a = rt_lock_rmw(M, ea, %d, RT_LADD, %s), r = (a %s 1u) & %s; f.cin = flag_cf(&f); LF(%s, %s, a, 1, r); }' % (
+                self.addr(i, o[0]), sz, '1u' if mn == 'inc' else '0xffffffffu', '+' if mn == 'inc' else '-', MASK[sz], 'LF_INC' if mn == 'inc' else 'LF_DEC', SZ[sz])
+        if mn in ('add', 'sub', 'and', 'or', 'xor') and o[0].type == X.X86_OP_MEM and o[0].size in (1, 2, 4):
+            sz = o[0].size
+            if mn in ('add', 'sub'):
+                return '{ uint32_t ea = %s, b = (%s) & %s; uint32_t a = rt_lock_rmw(M, ea, %d, RT_LADD, %s), r = (a %s b) & %s; LF(%s, %d, a, b, r); }' % (
+                    self.addr(i, o[0]), self.rd(i, o[1], sz), MASK[sz], sz, 'b' if mn == 'add' else '0u - b', '+' if mn == 'add' else '-', MASK[sz],
+                    'LF_ADD' if mn == 'add' else 'LF_SUB', SZ[sz])
+            op = {'and': '&', 'or': '|', 'xor': '^'}[mn]
+            return '{ uint32_t ea = %s, b = (%s) & %s; uint32_t r = (rt_lock_rmw(M, ea, %d, RT_L%s, b) %s b) & %s; LF(LF_LOGIC, %d, 0, 0, r); }' % (
+                self.addr(i, o[0]), self.rd(i, o[1], sz), MASK[sz], sz, mn.upper(), op, MASK[sz], SZ[sz])
+        if mn == 'xadd' and o[0].type == X.X86_OP_MEM and o[0].size in (1, 2, 4) and o[1].type == X.X86_OP_REG:
+            sz = o[0].size
+            return '{ uint32_t ea = %s, b = (%s) & %s; uint32_t a = rt_lock_rmw(M, ea, %d, RT_LADD, b), r = (a + b) & %s; %s LF(LF_ADD, %d, a, b, r); }' % (
+                self.addr(i, o[0]), self.rd(i, o[1]), MASK[sz], sz, MASK[sz], self.wr(i, o[1], 'a'), SZ[sz])
         if mn == 'cmpxchg' and o[0].type == X.X86_OP_MEM and o[0].size == 4 and o[1].type == X.X86_OP_REG:
             # compare eax with [ea]: equal -> [ea] = src (ZF set); not equal -> eax = [ea] (ZF clear); flags as cmp eax, [ea]
-            return ('{ uint32_t ea = %s, src = %s, exp = eax, old = exp; '
-                    '(void)__atomic_compare_exchange_n((uint32_t *)(M + ea), &old, src, 0, __ATOMIC_SEQ_CST, __ATOMIC_SEQ_CST); '
+            return ('{ uint32_t ea = %s, src = %s, exp = eax, old = rt_lock_cas(M, ea, exp, src); '
                     'LF(LF_SUB, %d, exp, old, exp - old); eax = old; }') % (self.addr(i, o[0]), self.rd(i, o[1]), SZ[4])
         raise Unsupported('lock ' + mn)
 
@@ -634,7 +664,7 @@ class Lifter:
 
     def call(self, i, callees):
         o = i.operands[0]; ret = i.address + i.size
-        push = 'esp -= 4; W32(esp, 0x%08xu); SPILL; ' % ret
+        push = 'esp -= 4; W32S(esp, 0x%08xu); SPILL; ' % ret
         if self.guest_flow:
             # VM handlers can unwind a guest CALL without returning to its C
             # caller. Keep these calls entirely on the guest stack and publish
