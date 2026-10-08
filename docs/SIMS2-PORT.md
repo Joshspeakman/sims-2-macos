@@ -131,8 +131,9 @@ What it took, beyond the imports (all 438 are implemented):
    `DS_CMDFILE=<file>` (append `tap:x,y` / `shot:<png>` lines). `tap` puts the cursor straight on the spot and
    hovers 15 frames before clicking (`click` passes through the screen corner, which scrolls the game's camera).
    Not yet: entering a lot (live mode), Create-a-Sim, build/buy. Open problems seen in the neighbourhood:
-   - the camera drifts slowly and steadily on its own (not the cursor: `W32_INPUTLOG=1` shows it inside the
-     window and no key down), which makes houses hard to click;
+   - the camera drifts slowly and steadily on its own, from before any input, at the same speed at 60 and 210 fps
+     (`DSR_FPSCAP=60`), and not from the cursor (`W32_INPUTLOG=1` shows it inside the window and no key down).
+     It makes houses hard to click; the lots panel works instead;
    - the ocean draws dark green or black (water shader / reflection target), some rocks draw black;
    - household thumbnails in the families panel are red T-posed figures (the offscreen Sim thumbnail render:
      no skinning or textures); lot thumbnails are fine;
