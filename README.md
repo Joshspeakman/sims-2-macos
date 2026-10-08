@@ -24,10 +24,12 @@ under Proton: both are given the same inputs and screenshots are taken at the sa
 
 - **Rendering.** The game's own shaders are translated to Metal (MojoShader's Metal profile, patched for Direct3D's
   semantics: half-pixel offset, alpha test, zero-safe maths); all 1,745 unique shader programs in the game compile.
-  Goodsprings, the Prospector Saloon, Doc Mitchell's house, night and day, the Pip-Boy, VATS and the kill cam all
-  render as on Linux; a 12-frame burst shows no flicker.
-- **Performance.** 60 fps (the original's rate) everywhere tried at 1280×720; uncapped, Doc Mitchell's house runs at
-  about 100 fps and lighter scenes at 120–130 fps.
+  Goodsprings by day and night, the Prospector Saloon, Doc Mitchell's house, Vault 22, the Lucky 38 penthouse,
+  Gomorrah, the Pip-Boy and VATS all render as on Linux; a 12-frame burst shows no flicker.
+- **Performance.** A locked 60 fps (the original's rate) everywhere tried, at the display's own 1728×1085 too (GPU
+  about 4 ms a frame). Uncapped, Goodsprings at night runs at about 70 fps at 1728×1085 (the CPU is the limit), Doc
+  Mitchell's house at about 100 fps at 1280×720, so 60 fps is the recommended setting.
+- **Full screen** works from the app (Game Mode turns on), through the intro logos to the main menu.
 - **Threads.** The Mac's CPU orders memory more loosely than x86, and the game's own locks rely on x86's order, so
   the build gives guest memory accesses x86's ordering (`RT_TSO` in `recomp/runtime/rt.h`; the thread's own stack is
   left plain, so it costs little), and every `lock`-prefixed instruction is a real hardware atomic.
@@ -45,8 +47,10 @@ Install (Apple Silicon, the Xcode command line tools and python3):
 It builds for about ten minutes and installs **Fallout New Vegas Native.app** in `~/Applications`. Saves and
 settings go to `~/Games/FalloutNVNative`; the game folder is only read.
 
-Not yet checked on the Mac: sound (it uses the same DirectSound/Core Audio path as the other ports, but every test so
-far ran muted), long play sessions, the DLC, and full-screen play at the display's own resolution. NaNs made by SSE
+Sound: the game's streams (music, ambience, voices) are mixed and played through Core Audio, checked by recording
+them (`W32_DSDUMP`); they have not been listened to yet, as every test ran muted. Not yet checked on the Mac: play
+sessions longer than about four minutes, the DLC, and the Strip (its scripted test took its picture before the
+teleport finished). NaNs made by SSE
 maths come out positive instead of negative (as arm64 makes them); nothing is known to depend on that.
 
 ## What works on Linux
