@@ -50,6 +50,20 @@ IMPL(kernel32, LoadLibraryExW) { VIA_ANSI(imp_kernel32_LoadLibraryExA, 1); }
 IMPL(kernel32, GetFileAttributesW) { VIA_ANSI(imp_kernel32_GetFileAttributesA, 1); }
 IMPL(kernel32, SetEnvironmentVariableW) { VIA_ANSI(imp_kernel32_SetEnvironmentVariableA, 3); }
 IMPL(kernel32, GetDriveTypeW) { RET(3, 1); }                                          /* DRIVE_FIXED */
+/* found with GetProcAddress (by the game and its C runtime) */
+IMPL(kernel32, CopyFileW) { VIA_ANSI(imp_kernel32_CopyFileA, 3); }
+IMPL(kernel32, SetFileAttributesW) { VIA_ANSI(imp_kernel32_SetFileAttributesA, 1); }
+IMPL(kernel32, GetDiskFreeSpaceExW) { VIA_ANSI(imp_kernel32_GetDiskFreeSpaceExA, 1); }
+void imp_kernel32_GetWindowsDirectoryA(Ctx *), imp_kernel32_GetLongPathNameA(Ctx *);
+IMPL(kernel32, GetWindowsDirectoryW) { via_ansi_out(c, imp_kernel32_GetWindowsDirectoryA, 0, 1); }
+IMPL(kernel32, GetLongPathNameW)                       /* (short, long buffer, chars): the name as given */
+{
+    uint32_t src = ARG(0), dst = ARG(1), cap = ARG(2), n = 0;
+    while (rt_r16(G_MEM, src + 2 * n)) n++;
+    if (n + 1 > cap) RET(n + 1, 3);
+    if (dst != src) memmove(GP(dst), GP(src), 2 * (size_t)(n + 1));
+    RET(n, 3);
+}
 void imp_kernel32_GetCurrentDirectoryA(Ctx *), imp_kernel32_GetTempPathA(Ctx *), imp_kernel32_GetModuleFileNameA(Ctx *);
 IMPL(kernel32, GetCurrentDirectoryW) { via_ansi_out(c, imp_kernel32_GetCurrentDirectoryA, 1, 0); }
 IMPL(kernel32, GetTempPathW) { via_ansi_out(c, imp_kernel32_GetTempPathA, 1, 0); }
@@ -307,6 +321,15 @@ IMPL(user32, ReleaseCapture) { RET(1, 0); }
 IMPL(user32, GetClassInfoA) { w32_set_last_error(c, 1411); RET(0, 3); }             /* not registered yet */
 IMPL(user32, GetSysColorBrush) { RET(0x40000 + (ARG(0) & 0xff), 1); }
 IMPL(user32, MonitorFromPoint) { RET(0x50001, 3); }                                   /* (POINT by value, flags): the one display */
+IMPL(user32, MonitorFromWindow) { RET(0x50001, 2); }                                  /* (window, flags); the game finds these with GetProcAddress */
+IMPL(user32, MonitorFromRect) { RET(0x50001, 2); }
+IMPL(user32, EnumDisplayMonitors)                     /* (dc, clip rect, callback(monitor, dc, rect *, data), data): one display */
+{
+    uint32_t r = scratch(16); int32_t v[4] = {0, 0, w32_screen_w, w32_screen_h}; memcpy(GP(r), v, 16);
+    uint32_t a[4] = {0x50001, ARG(0), r, ARG(3)}; w32_callback(c, ARG(2), 4, a);
+    unscratch(r); RET(1, 4);
+}
+IMPL(user32, TrackMouseEvent) { RET(1, 1); }                                         /* WM_MOUSELEAVE is not sent */
 IMPL(user32, GetMonitorInfoA)                          /* (monitor, MONITORINFO(EX)A *) */
 {
     uint32_t mi = ARG(1), cb = rt_r32(G_MEM, mi);

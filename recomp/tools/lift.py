@@ -41,6 +41,8 @@ SIMS2_OVERRIDES = {       # The Sims 2 (runtime/win32/hooks.c rt_override, SIMS2
     0xa0c2b206: 'crash reporter setup (crashpad: a named pipe to crashpad_handler.exe, reports to EA): skipped',
 }
 
+SEGSEL = {'cs': 0x23, 'ds': 0x2b, 'es': 0x2b, 'ss': 0x2b, 'fs': 0x53, 'gs': 0x2b}
+
 RET_FORMS = ('repz ret', 'rep ret', 'bnd ret')
 
 class Lifter:
@@ -92,6 +94,7 @@ class Lifter:
         if n in R16: return '(%s & 0xffffu)' % R16[n]
         if n in R8L: return '(%s & 0xffu)' % R8L[n]
         if n in R8H: return '((%s >> 8) & 0xffu)' % R8H[n]
+        if n in SEGSEL: return '0x%xu' % SEGSEL[n]           # reading a segment register: 32-bit Windows' selectors
         raise Unsupported('reg ' + n)
     def wreg(self, n, v):
         if n in R32: return '%s = (uint32_t)(%s);' % (n, v)

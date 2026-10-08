@@ -1199,7 +1199,13 @@ static void dev_surfaces(Dev9 *d, uint32_t pp)          /* back buffer (and the 
 {
     memcpy(d->pp, GP(pp), 56);
     if (getenv("D3D9_RTLOG")) { fprintf(stderr, "rtlog: present parameters:"); for (int k = 0; k < 14; k++) fprintf(stderr, " %x", d->pp[k]); fprintf(stderr, "\n"); }
-    if (!d->pp[0] || !d->pp[1]) { d->pp[0] = (uint32_t)w32_screen_w; d->pp[1] = (uint32_t)w32_screen_h; }
+    if (!d->pp[0] || !d->pp[1]) {                      /* 0x0: windowed, the device window's client area (else the screen) */
+        int w32_client_size(uint32_t, uint32_t *, uint32_t *); uint32_t cw, ch;
+        int ok = d->pp[8] && w32_client_size(d->pp[7] ? d->pp[7] : d->hwnd, &cw, &ch);
+        if (getenv("D3D9_RTLOG")) fprintf(stderr, "rtlog: 0x0 back buffer: window %x client %s %ux%u\n", d->pp[7] ? d->pp[7] : d->hwnd, ok ? "ok" : "unknown", ok ? cw : 0, ok ? ch : 0);
+        if (ok) { d->pp[0] = cw; d->pp[1] = ch; }
+        else { d->pp[0] = (uint32_t)w32_screen_w; d->pp[1] = (uint32_t)w32_screen_h; }
+    }
     if (!d->pp[2]) d->pp[2] = 22;
     if (!d->pp[3]) d->pp[3] = 1;
     memcpy(GP(pp), d->pp, 56);                          /* (the game reads back what was chosen) */
@@ -1325,8 +1331,9 @@ M(d9_GetAdapterMonitor, 2) RET(0x0001beef, 2); END
 static void init_vtables9(void);
 M(d9_CreateDevice, 7) ME(D3D9, O9_D3D)                 /* (adapter, type, focus window, behaviour, present parameters, device *) */
     if (the_dev) {
-        fprintf(stderr, "d3d9: a second device: the first one is reused\n"); dev_reset(the_dev, ARG(5));
+        fprintf(stderr, "d3d9: a second device: the first one is reused\n");
         the_dev->hwnd = ARG(3); the_dev->behavior = ARG(4); the_dev->swvp = (ARG(4) & 0x20) != 0;     /* the new one's flags */
+        dev_reset(the_dev, ARG(5));
         rt_w32(G_MEM, ARG(6), the_dev->g); the_dev->ref++; RET(D3D_OK, 7);
     }
     Dev9 *d = calloc(1, sizeof *d); d->ref = 1; d->g_d3d = me->g; d->hwnd = ARG(3); d->behavior = ARG(4);
