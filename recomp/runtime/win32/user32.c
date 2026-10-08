@@ -177,6 +177,15 @@ IMPL(user32, GetWindowRect)
     uint32_t v[4] = {(uint32_t)x, (uint32_t)y, (uint32_t)(x + w->w), (uint32_t)(y + w->h)}; memcpy(GP(r), v, 16);
     RET(1, 2);
 }
+int w32_client_size(uint32_t hwnd, uint32_t *cw, uint32_t *ch)   /* a window's client area (d3d9.c: a 0x0 windowed back buffer) */
+{
+    Win *w = W(hwnd); if (!w) return 0;
+    int l, t, rr, b; nc_size(w->style, w->exstyle, &l, &t, &rr, &b);
+    int x = w->w - l - rr, y = w->h - t - b;
+    if (getenv("D3D9_RTLOG")) fprintf(stderr, "rtlog: window %x at %d,%d size %dx%d style %x -> client %dx%d\n", hwnd, w->x, w->y, w->w, w->h, w->style, x, y);
+    if (x <= 0 || y <= 0) return 0;
+    *cw = (uint32_t)x; *ch = (uint32_t)y; return 1;
+}
 IMPL(user32, GetClientRect)
 {
     Win *w = W(ARG(0)); uint32_t r = ARG(1);
@@ -549,6 +558,7 @@ IMPL(user32, SystemParametersInfoA)
     case 0x32: case 0x34: case 0x3a: { uint32_t sz = rt_r32(G_MEM, pv); memset(GP(pv + 4), 0, sz > 4 ? sz - 4 : 0); break; }
     case 0x0a: case 0x16: if (pv) rt_w32(G_MEM, pv, 31); break;
     case 0x68: if (pv) rt_w32(G_MEM, pv, 3); break;                            /* SPI_GETWHEELSCROLLLINES */
+    default: if (pv && act < 0x2000 && !(act & 1)) rt_w32(G_MEM, pv, 0); break;   /* other SPI_GET*: off / zero (e.g. screen saver running) */
     }
     RET(1, 4);
 }

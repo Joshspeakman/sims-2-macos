@@ -97,13 +97,101 @@ static char *wrap_vs(const char *src, size_t n, size_t *outlen)
     o = append(o, &len, &cap, flip, n - (size_t)(flip - src));
     *outlen = len; return o;
 }
-static const char *FF_PS = "#version 120\nvoid main()\n{\n\tgl_FragColor = gl_Color;\n}\n";   /* a vertex shader without a pixel shader */
+/* A vertex shader without a pixel shader: Direct3D's fixed-function texture stages after it (The Sims 2 draws its UI
+ * and much of its world this way). Stage s reads texture unit s with the shader's texture coordinates s (with a vertex
+ * shader, D3DTSS_TEXCOORDINDEX must be the stage's own). The stage states arrive as the pixel constants (ff_consts):
+ * per stage (colour op, colour arg 1, colour arg 2, alpha op), (alpha arg 1, alpha arg 2, texture bound, texture has no
+ * alpha), then the texture factor and (specular enable, 0, 0, 0). Arguments are D3DTA source + 8 complement + 16
+ * alpha replicate (GLSL 1.20 has no bit operations). */
+#define FF_STAGES 4
+#define FF_CONSTS (2 * FF_STAGES + 2)
+static const char *FF_PS =
+    "#version 120\n"
+    "uniform vec4 ps_uniforms_vec4[10];\n"
+    "uniform sampler2D ps_s0, ps_s1, ps_s2, ps_s3;\n"
+    "vec4 ff_arg(float a, vec4 diffuse, vec4 current, vec4 texel, vec4 spec, vec4 temp)\n{\n"
+    "\tfloat src = mod(a, 8.0); vec4 v = diffuse;\n"
+    "\tif (src == 1.0) v = current; else if (src == 2.0) v = texel; else if (src == 3.0) v = ps_uniforms_vec4[8];\n"
+    "\telse if (src == 4.0) v = spec; else if (src == 5.0) v = temp;\n"
+    "\tif (mod(floor(a / 8.0), 2.0) == 1.0) v = 1.0 - v;\n"
+    "\tif (a >= 16.0) v = vec4(v.a);\n"
+    "\treturn v;\n}\n"
+    "vec4 ff_op(float o, vec4 x, vec4 y, vec4 diffuse, vec4 texel, vec4 current)\n{\n"
+    "\tif (o == 2.0) return x; if (o == 3.0) return y; if (o == 4.0) return x * y;\n"
+    "\tif (o == 5.0) return clamp(x * y * 2.0, 0.0, 1.0); if (o == 6.0) return clamp(x * y * 4.0, 0.0, 1.0);\n"
+    "\tif (o == 7.0) return clamp(x + y, 0.0, 1.0); if (o == 8.0) return clamp(x + y - 0.5, 0.0, 1.0);\n"
+    "\tif (o == 9.0) return clamp((x + y - 0.5) * 2.0, 0.0, 1.0); if (o == 10.0) return clamp(x - y, 0.0, 1.0);\n"
+    "\tif (o == 11.0) return clamp(x + y - x * y, 0.0, 1.0); if (o == 12.0) return mix(y, x, diffuse.a);\n"
+    "\tif (o == 13.0) return mix(y, x, texel.a); if (o == 14.0) return mix(y, x, ps_uniforms_vec4[8].a);\n"
+    "\tif (o == 15.0) return clamp(x + y * (1.0 - texel.a), 0.0, 1.0); if (o == 16.0) return mix(y, x, current.a);\n"
+    "\tif (o == 18.0) return clamp(vec4(x.rgb + x.a * y.rgb, x.a), 0.0, 1.0); if (o == 19.0) return clamp(vec4(x.rgb * y.rgb + x.a, x.a), 0.0, 1.0);\n"
+    "\tif (o == 20.0) return clamp(vec4(x.rgb + (1.0 - x.a) * y.rgb, x.a), 0.0, 1.0); if (o == 21.0) return clamp(vec4((1.0 - x.rgb) * y.rgb + x.a, x.a), 0.0, 1.0);\n"
+    "\tif (o == 24.0) return vec4(clamp(4.0 * dot(x.rgb - 0.5, y.rgb - 0.5), 0.0, 1.0));\n"
+    "\treturn x;\n}\n"
+    "void main()\n{\n"
+    "\tvec4 diffuse = gl_Color, spec = gl_SecondaryColor, current = diffuse, temp = vec4(0.0);\n"
+    "\tfor (int s = 0; s < 4; s++) {\n"
+    "\t\tvec4 c = ps_uniforms_vec4[2 * s], a = ps_uniforms_vec4[2 * s + 1];\n"
+    "\t\tif (c.x == 1.0) break;\n"
+    "\t\tvec4 texel = vec4(1.0);\n"
+    "\t\tif (a.z != 0.0) {\n"
+    "\t\t\tif (s == 0) texel = texture2D(ps_s0, gl_TexCoord[0].xy); else if (s == 1) texel = texture2D(ps_s1, gl_TexCoord[1].xy);\n"
+    "\t\t\telse if (s == 2) texel = texture2D(ps_s2, gl_TexCoord[2].xy); else texel = texture2D(ps_s3, gl_TexCoord[3].xy);\n"
+    "\t\t\tif (a.w != 0.0) texel.a = 1.0;\n"
+    "\t\t}\n"
+    "\t\tvec4 rc = ff_op(c.x, ff_arg(c.y, diffuse, current, texel, spec, temp), ff_arg(c.z, diffuse, current, texel, spec, temp), diffuse, texel, current);\n"
+    "\t\tvec4 ra = c.w == 1.0 ? current : ff_op(c.w, ff_arg(a.x, diffuse, current, texel, spec, temp), ff_arg(a.y, diffuse, current, texel, spec, temp), diffuse, texel, current);\n"
+    "\t\tcurrent = vec4(rc.rgb, ra.a);\n"
+    "\t}\n"
+    "\tif (ps_uniforms_vec4[9].x != 0.0) current.rgb = clamp(current.rgb + spec.rgb, 0.0, 1.0);\n"
+    "\tgl_FragColor = current;\n}\n";
 #ifdef __APPLE__
 /* ---- Metal (MojoShader's Metal profile): the same wrapping, on MSL text ---- */
-static const char *FF_MSL_PS =                              /* a vertex shader without a pixel shader: its first colour */
-    "#include <metal_stdlib>\nusing namespace metal;\n\nstruct psmain_Input\n{\n    float4 c [[user(color0)]];\n};\n\n"
+static const char *FF_MSL_PS =                              /* a vertex shader without a pixel shader: FF_PS in Metal */
+    "#include <metal_stdlib>\nusing namespace metal;\n\n"
+    "struct psmain_Uniforms\n{\n    float4 uniforms_float4[10];\n};\n\n"
+    "struct psmain_Input\n{\n    float4 d0 [[user(color0)]];\n    float4 d1 [[user(color1)]];\n"
+    "    float4 t0 [[user(texcoord0)]];\n    float4 t1 [[user(texcoord1)]];\n    float4 t2 [[user(texcoord2)]];\n    float4 t3 [[user(texcoord3)]];\n};\n\n"
     "struct psmain_Output\n{\n    float4 oC0 [[color(0)]];\n};\n\n"
-    "fragment psmain_Output psmain (\n    psmain_Input input [[stage_in]]\n) {\n    psmain_Output output;\n    output.oC0 = input.c;\n    return output;\n}\n";
+    "static float4 ff_arg(float a, float4 diffuse, float4 current, float4 texel, float4 spec, float4 temp, float4 tf)\n{\n"
+    "    float src = fmod(a, 8.0); float4 v = diffuse;\n"
+    "    if (src == 1.0) v = current; else if (src == 2.0) v = texel; else if (src == 3.0) v = tf;\n"
+    "    else if (src == 4.0) v = spec; else if (src == 5.0) v = temp;\n"
+    "    if (fmod(floor(a / 8.0), 2.0) == 1.0) v = 1.0 - v;\n"
+    "    if (a >= 16.0) v = float4(v.a);\n"
+    "    return v;\n}\n"
+    "static float4 ff_op(float o, float4 x, float4 y, float4 diffuse, float4 texel, float4 current, float4 tf)\n{\n"
+    "    if (o == 2.0) return x; if (o == 3.0) return y; if (o == 4.0) return x * y;\n"
+    "    if (o == 5.0) return saturate(x * y * 2.0); if (o == 6.0) return saturate(x * y * 4.0);\n"
+    "    if (o == 7.0) return saturate(x + y); if (o == 8.0) return saturate(x + y - 0.5);\n"
+    "    if (o == 9.0) return saturate((x + y - 0.5) * 2.0); if (o == 10.0) return saturate(x - y);\n"
+    "    if (o == 11.0) return saturate(x + y - x * y); if (o == 12.0) return mix(y, x, diffuse.a);\n"
+    "    if (o == 13.0) return mix(y, x, texel.a); if (o == 14.0) return mix(y, x, tf.a);\n"
+    "    if (o == 15.0) return saturate(x + y * (1.0 - texel.a)); if (o == 16.0) return mix(y, x, current.a);\n"
+    "    if (o == 18.0) return saturate(float4(x.rgb + x.a * y.rgb, x.a)); if (o == 19.0) return saturate(float4(x.rgb * y.rgb + x.a, x.a));\n"
+    "    if (o == 20.0) return saturate(float4(x.rgb + (1.0 - x.a) * y.rgb, x.a)); if (o == 21.0) return saturate(float4((1.0 - x.rgb) * y.rgb + x.a, x.a));\n"
+    "    if (o == 24.0) return float4(saturate(4.0 * dot(x.rgb - 0.5, y.rgb - 0.5)));\n"
+    "    return x;\n}\n"
+    "fragment psmain_Output psmain (\n    psmain_Input input [[stage_in]],\n    constant psmain_Uniforms &uniforms [[buffer(0)]],\n"
+    "    texture2d<float> s0 [[texture(0)]], sampler s0s [[sampler(0)]], texture2d<float> s1 [[texture(1)]], sampler s1s [[sampler(1)]],\n"
+    "    texture2d<float> s2 [[texture(2)]], sampler s2s [[sampler(2)]], texture2d<float> s3 [[texture(3)]], sampler s3s [[sampler(3)]]\n) {\n"
+    "    psmain_Output output;\n"
+    "    float4 diffuse = input.d0, spec = input.d1, current = diffuse, temp = float4(0.0), tf = uniforms.uniforms_float4[8];\n"
+    "    for (int s = 0; s < 4; s++) {\n"
+    "        float4 c = uniforms.uniforms_float4[2 * s], a = uniforms.uniforms_float4[2 * s + 1];\n"
+    "        if (c.x == 1.0) break;\n"
+    "        float4 texel = float4(1.0);\n"
+    "        if (a.z != 0.0) {\n"
+    "            if (s == 0) texel = s0.sample(s0s, input.t0.xy); else if (s == 1) texel = s1.sample(s1s, input.t1.xy);\n"
+    "            else if (s == 2) texel = s2.sample(s2s, input.t2.xy); else texel = s3.sample(s3s, input.t3.xy);\n"
+    "            if (a.w != 0.0) texel.a = 1.0;\n"
+    "        }\n"
+    "        float4 rc = ff_op(c.x, ff_arg(c.y, diffuse, current, texel, spec, temp, tf), ff_arg(c.z, diffuse, current, texel, spec, temp, tf), diffuse, texel, current, tf);\n"
+    "        float4 ra = c.w == 1.0 ? current : ff_op(c.w, ff_arg(a.x, diffuse, current, texel, spec, temp, tf), ff_arg(a.y, diffuse, current, texel, spec, temp, tf), diffuse, texel, current, tf);\n"
+    "        current = float4(rc.rgb, ra.a);\n"
+    "    }\n"
+    "    if (uniforms.uniforms_float4[9].x != 0.0) current.rgb = saturate(current.rgb + spec.rgb);\n"
+    "    output.oC0 = current;\n    return output;\n}\n";
 /* the member of the output struct with attribute att ("[[position]]", "[[color(0)]]"), into name; 0 if none */
 static int member_with(const char *src, const char *att, char *name, size_t cap)
 {
@@ -205,6 +293,7 @@ static void create(Prog *p)
     const MOJOSHADER_parseData *v = parse(p->vs), *f = p->ps ? parse(p->ps) : 0;
     if (!v || (p->ps && !f)) { p->bad = 1; if (v) MOJOSHADER_freeParseData(v); if (f) MOJOSHADER_freeParseData(f); return; }
     packs(p, 0, v); if (f) packs(p, 1, f);
+    else { p->f[1][0].index = 0; p->f[1][0].count = FF_CONSTS; p->nf[1] = 1; p->tf[1] = FF_CONSTS; }   /* ff_consts */
 #ifdef __APPLE__
     {   /* Metal: register -> slot pairs, the wrapped sources */
         char *ps = msl_ps(f ? f->output : FF_MSL_PS), *vs = msl_vs(v->output, ps);
@@ -268,6 +357,23 @@ void d9_shader_forget(Shader9 *s)
     for (int k = 0; k < nprogs; ) if (progs[k].vs == s || progs[k].ps == s) progs[k] = progs[--nprogs]; else k++;
     pthread_mutex_unlock(&plock);
 }
+/* the fixed-function stages as FF_PS's constants */
+static void ff_consts(Dev9 *d, float out[FF_CONSTS][4])
+{
+    memset(out, 0, sizeof(float) * 4 * FF_CONSTS);
+    for (int s = 0; s < FF_STAGES; s++) {
+        const uint32_t *t = d->tss[s];
+        #define FF_ARG(a) ((float)(((a) & 7) + (((a) >> 4) & 1) * 8 + (((a) >> 5) & 1) * 16))
+        out[2 * s][0] = (float)t[1]; out[2 * s][1] = FF_ARG(t[2]); out[2 * s][2] = FF_ARG(t[3]); out[2 * s][3] = (float)t[4];
+        out[2 * s + 1][0] = FF_ARG(t[5]); out[2 * s + 1][1] = FF_ARG(t[6]);
+        out[2 * s + 1][2] = d->tex[s] ? 1.0f : 0.0f; out[2 * s + 1][3] = d->tex[s] && !d9_fmt_alpha(d->tex[s]->fmt) ? 1.0f : 0.0f;
+        #undef FF_ARG
+    }
+    uint32_t tf = d->rs[60];                               /* D3DRS_TEXTUREFACTOR, ARGB */
+    out[2 * FF_STAGES][0] = ((tf >> 16) & 255) / 255.0f; out[2 * FF_STAGES][1] = ((tf >> 8) & 255) / 255.0f;
+    out[2 * FF_STAGES][2] = (tf & 255) / 255.0f; out[2 * FF_STAGES][3] = (tf >> 24) / 255.0f;
+    out[2 * FF_STAGES + 1][0] = d->rs[29] ? 1.0f : 0.0f;  /* D3DRS_SPECULARENABLE */
+}
 /* DSR_SHADER_CONST: u32 vs float4 count, ps float4 count, vs int4, ps int4, vs bool, ps bool; float4 vs[], ps[];
  * int4 vs[], ps[]; u32 vs[], ps[]; then float4 alpha test (reference 0-255, function, enabled, 0) */
 void d9_shader_consts(Dev9 *d, uint32_t id)
@@ -280,7 +386,9 @@ void d9_shader_consts(Dev9 *d, uint32_t id)
     uint32_t words = 6 + 4u * (uint32_t)(q.tf[0] + q.tf[1] + q.ti[0] + q.ti[1]) + (uint32_t)(q.tb[0] + q.tb[1]) + 4;
     uint32_t *c = cmd_begin(DSR_SHADER_CONST, 4 * words), *w = c + 6;
     c[0] = (uint32_t)q.tf[0]; c[1] = (uint32_t)q.tf[1]; c[2] = (uint32_t)q.ti[0]; c[3] = (uint32_t)q.ti[1]; c[4] = (uint32_t)q.tb[0]; c[5] = (uint32_t)q.tb[1];
+    float ff[FF_CONSTS][4]; if (!q.ps) ff_consts(d, ff);
     for (int st = 0; st < 2; st++) for (int r = 0; r < q.nf[st]; r++) {
+        if (st && !q.ps) { memcpy(w, ff, sizeof ff); w += 4 * FF_CONSTS; continue; }
         int max = st ? 224 : 256;
         for (int k = 0; k < q.f[st][r].count; k++) { int reg = q.f[st][r].index + k; if (reg < max) memcpy(w, st ? d->psc[reg] : d->vsc[reg], 16); else memset(w, 0, 16); w += 4; }
     }

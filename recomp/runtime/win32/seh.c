@@ -66,6 +66,18 @@ int w32_dispatch(Ctx *c, uint32_t code, uint32_t flags, uint32_t addr, int n, co
         for (uint32_t f = rt_r32(G_MEM, c->fs_base); f && f != 0xffffffffu && k < 12; f = rt_r32(G_MEM, f), k++)
             fprintf(stderr, "recomp:   chain %08x handler %08x state %08x%s\n", f, rt_r32(G_MEM, f + 4), rt_r32(G_MEM, f + 8), f < c->esp ? " (below esp)" : "");
         fprintf(stderr, "recomp:   esp %08x ebp %08x\n", c->esp, c->ebp);
+        if (code == 0xe06d7363u && n >= 3 && info[2]) {        /* a C++ throw: the thrown type, and what() for a std::exception */
+            uint32_t ti = info[2], cta = rt_r32(G_MEM, ti + 12), ct = cta ? rt_r32(G_MEM, cta + 4) : 0, td = ct ? rt_r32(G_MEM, ct + 4) : 0;
+            uint32_t obj = info[1], w = obj ? rt_r32(G_MEM, obj + 4) : 0;
+            fprintf(stderr, "recomp:   C++ %s, what %s\n", td ? GS(td + 8) : "?", w > 0x10000 && vm_page_state(w) == 2 ? GS(w) : "-");
+            fprintf(stderr, "recomp:   stack code addresses:");               /* return addresses: who threw */
+            extern uint32_t w32_image_base, w32_image_size; int shown = 0;
+            for (uint32_t sp = c->esp; sp < c->esp + 0x800 && shown < 24; sp += 4) {
+                uint32_t v = rt_r32(G_MEM, sp);
+                if (v - w32_image_base < 0xd9a000u && v - w32_image_base >= 0x1000u) { fprintf(stderr, " %08x", v); shown++; }
+            }
+            fprintf(stderr, "\n");
+        }
     }
     uint32_t rec, cx, ptrs = build(c, sp, code, flags, addr, n, info, &rec, &cx);
     Ctx h = *c; h.esp = rec - 0x40;                                             /* handlers run below the records */
