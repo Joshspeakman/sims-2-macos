@@ -112,6 +112,10 @@ What it took, beyond the imports (all 438 are implemented):
   `d3d9_shader.c`), which is how the game draws its UI, movies and much more.
 - **Windows**: the game's `multimon.h` needs every monitor function by `GetProcAddress` (else an uninitialised rect
   places the window off-screen); `SystemParametersInfoA` answers unknown queries with 0.
+- **Cursor**: kept in the game window's client coordinates; `GetCursorPos`/`SetCursorPos` now convert to and from
+  screen coordinates (the game centres its window, so it saw the cursor outside it).
+- **Two-level switches** (`movzx idx, byte [x + table]`): the bound must be a `cmp` on the byte table's own index
+  register; another `cmp` in between gave 2 of 8 cases (crash entering a lot).
 - **Jump tables**: the lifter bounded a switch by decoding backwards from the jump, which can start inside an
   instruction and miss the `cmp`; it now walks the function's own decoded instructions first (`known_prev`).
   Heuristically bounded tables: 62 → 28. One of them crashed the neighbourhood load.
@@ -122,8 +126,19 @@ What it took, beyond the imports (all 438 are implemented):
 
 ## Next
 
-1. **Interaction**: scripted clicks work (`DS_SCRIPT="@145:click:648,380;@160:click:607,630"` opens Desiderata
-   Valley). Next: a lot (live mode), Create-a-Sim, build/buy. Some neighbourhood objects (rocks) draw black.
+1. **Interaction**: the neighbourhood is interactive (dialogs, the lots and families panels, lot cards). Drive a
+   session with `DS_SCRIPT` (`@145:tap:648,380;@160:tap:607,630` opens Desiderata Valley) and, live, with
+   `DS_CMDFILE=<file>` (append `tap:x,y` / `shot:<png>` lines). `tap` puts the cursor straight on the spot and
+   hovers 15 frames before clicking (`click` passes through the screen corner, which scrolls the game's camera).
+   Not yet: entering a lot (live mode), Create-a-Sim, build/buy. Open problems seen in the neighbourhood:
+   - the camera drifts slowly and steadily on its own (not the cursor: `W32_INPUTLOG=1` shows it inside the
+     window and no key down), which makes houses hard to click;
+   - the ocean draws dark green or black (water shader / reflection target), some rocks draw black;
+   - household thumbnails in the families panel are red T-posed figures (the offscreen Sim thumbnail render:
+     no skinning or textures); lot thumbnails are fine;
+   - loading is slow (main menu after about 140 s, a neighbourhood about 3 minutes later). Neither the game
+     thread nor the render thread is busy (about 55% and 45%), so the loading is paced by frames or sleeps:
+     profile with `W32_PROFILE`.
 2. **The Mac**: nothing has been built there yet. `install.sh`, the launch window and `build_app.sh` still make
    Fallout NV; the Metal side of the fixed-function stages (`FF_MSL_PS`) is written but has never been compiled.
    `analyze.py` peaks at about 26 GB of memory (tight on a 32 GB Mac).
@@ -133,9 +148,9 @@ What it took, beyond the imports (all 438 are implemented):
    `std::length_error` ("vector too long") ends the game about a minute in. It would on Windows too, so the bad
    state, not the catch, is the bug: find what wrote it.
 4. **Audio**: test sessions mute it (`W32_AUDIO_MUTE`); not checked yet.
-5. **Build**: the lift is not deterministic between some runs (every C file was rebuilt after small `lift.py`
-   changes, with `PYTHONHASHSEED=0` set), which costs about 5 minutes per lifter change. Diff
-   `work/sims2/prev/lift_000.c` against the new one before the next lifter change to find the cause.
+5. **Build**: every C file was being recompiled after each relink, because `build_linux.sh` rewrote
+   `compiler-flags.txt` (making it newer than the objects); it now replaces the file only when it changes. Check
+   that the next lifter change recompiles only the affected files.
 
 ## Tests
 

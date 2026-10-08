@@ -191,8 +191,10 @@ class Lifter:
             if q.mnemonic == 'movzx' and q.operands[1].type == X.X86_OP_MEM and q.reg_name(q.operands[0].reg) == idx:
                 # two-level: idx = byte_table[j]; the bound is the largest byte in that table range
                 bt = q.operands[1].mem.disp & 0xffffffff; m = None
-                for r in reversed(p[:p.index(q)]):
-                    if r.mnemonic == 'cmp' and r.operands[1].type == X.X86_OP_IMM: m = (r.operands[1].imm & 0xffffffff) + 1; break
+                bm = q.operands[1].mem; ireg = q.reg_name(bm.index) if bm.index else q.reg_name(bm.base) if bm.base else None
+                for r in reversed(p[:p.index(q)]):   # the bound on the byte table's own index (not another test in between)
+                    if r.mnemonic == 'cmp' and r.operands[1].type == X.X86_OP_IMM and r.operands[0].type == X.X86_OP_REG \
+                            and r.reg_name(r.operands[0].reg) == ireg: m = (r.operands[1].imm & 0xffffffff) + 1; break
                 if m and m < 4096:
                     indices = self.pe.bytes_at(bt, m)
                     if indices: n = max(indices) + 1

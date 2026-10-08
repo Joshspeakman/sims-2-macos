@@ -5,7 +5,8 @@ HERE=$(cd "$(dirname "$0")/.." && pwd)
 ROOT=$(cd "$HERE/.." && pwd)
 OUT=$(realpath "${1:?usage: build_linux.sh <recomp output directory>}")
 CC=${CC:-clang}
-python3 "$HERE/tools/compiler_compat.py" "$CC" "$OUT/compiler-flags.txt"
+python3 "$HERE/tools/compiler_compat.py" "$CC" "$OUT/compiler-flags.txt.new"        # replaced only when it changes: a
+cmp -s "$OUT/compiler-flags.txt.new" "$OUT/compiler-flags.txt" && rm "$OUT/compiler-flags.txt.new" || mv "$OUT/compiler-flags.txt.new" "$OUT/compiler-flags.txt"   # newer file makes build_sims2.sh recompile everything
 read -ra COMPAT_FLAGS < "$OUT/compiler-flags.txt"
 EXE=$OUT/DungeonSiege2.exe; APP=DungeonSiege2Linux
 [[ -f "$OUT/FalloutNV.exe" ]] && { EXE=$OUT/FalloutNV.exe; APP=FalloutNVLinux; }

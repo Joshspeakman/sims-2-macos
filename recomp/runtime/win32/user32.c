@@ -434,24 +434,42 @@ IMPL(user32, EndPaint) { RET(1, 2); }
 /* ---- input state (the backend updates these) ---- */
 uint8_t w32_keys[256];                 /* bit 7: down, bit 0: toggled */
 int w32_cursor_visible_count = 0;
-IMPL(user32, GetAsyncKeyState) { RET((w32_keys[ARG(0) & 0xff] & 0x80) ? 0x8000 : 0, 1); }
+static int input_log(void) { static int on = -1; if (on < 0) on = getenv("W32_INPUTLOG") != 0; return on; }   /* W32_INPUTLOG=1: keys read as down, cursor reads */
+IMPL(user32, GetAsyncKeyState)
+{
+    int down = (w32_keys[ARG(0) & 0xff] & 0x80) != 0;
+    if (down && input_log()) { static int n; if (n++ < 200) fprintf(stderr, "input: GetAsyncKeyState(%#x) down\n", ARG(0)); }
+    RET(down ? 0x8000 : 0, 1);
+}
 IMPL(user32, GetKeyState) { uint8_t k = w32_keys[ARG(0) & 0xff]; RET(((k & 0x80) ? 0xff80u : 0) | (k & 1), 1); }
+/* The cursor is kept in the game window's client coordinates (what its mouse messages carry); GetCursorPos and
+ * SetCursorPos speak screen coordinates, so they add or subtract that window's client origin. The Sims 2 centres its
+ * window on the screen: without this it saw the cursor above and left of the window, scrolled its camera there and
+ * picked the wrong objects. */
+static void main_origin(int *x, int *y)
+{
+    *x = *y = 0;
+    for (int k = 0; k < MAXW; k++) if (wins[k].hwnd && !wins[k].parent) { client_origin(&wins[k], x, y); return; }
+}
 IMPL(user32, GetCursorPos)
 {
-    pthread_mutex_lock(&cursor_lock); int x = cursor_x, y = cursor_y;
-    cursor_read.x=x; cursor_read.y=y; cursor_read.epoch=cursor_epoch; cursor_read.valid=1;
+    int ox, oy; main_origin(&ox, &oy);
+    pthread_mutex_lock(&cursor_lock); int x = cursor_x + ox, y = cursor_y + oy;
+    cursor_read.x=x-ox; cursor_read.y=y-oy; cursor_read.epoch=cursor_epoch; cursor_read.valid=1;   /* (client coordinates) */
     pthread_mutex_unlock(&cursor_lock);
+    if (input_log()) { static int n; if (n++ % 500 == 0) fprintf(stderr, "input: GetCursorPos -> %d,%d (client %d,%d, origin %d,%d)\n", x, y, x - ox, y - oy, ox, oy); }
     rt_w32(G_MEM, ARG(0), (uint32_t)x); rt_w32(G_MEM, ARG(0) + 4, (uint32_t)y); RET(1, 1);
 }
 void (*w32_host_set_cursor_pos)(int x, int y);
 IMPL(user32, SetCursorPos)
 {
+    int ox, oy; main_origin(&ox, &oy);
     pthread_mutex_lock(&cursor_lock);
     int dx=0,dy=0;
     if(cursor_relative && cursor_read.valid && cursor_read.epoch==cursor_epoch) { dx=cursor_x-cursor_read.x; dy=cursor_y-cursor_read.y; }
-    cursor_x=(int)ARG(0)+dx; cursor_y=(int)ARG(1)+dy; cursor_read.valid=0; cursor_epoch++;
+    cursor_x=(int)ARG(0)-ox+dx; cursor_y=(int)ARG(1)-oy+dy; cursor_read.valid=0; cursor_epoch++;
     pthread_mutex_unlock(&cursor_lock);
-    if (w32_host_set_cursor_pos) w32_host_set_cursor_pos((int)ARG(0), (int)ARG(1));
+    if (w32_host_set_cursor_pos) w32_host_set_cursor_pos((int)ARG(0) - ox, (int)ARG(1) - oy);
     RET(1, 2);
 }
 void w32_set_cursor(int x, int y) { pthread_mutex_lock(&cursor_lock); cursor_x = x; cursor_y = y; cursor_epoch++; pthread_mutex_unlock(&cursor_lock); }
