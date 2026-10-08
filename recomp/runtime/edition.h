@@ -49,4 +49,9 @@
 #ifndef GAME_EXE
 #define GAME_EXE "DungeonSiege.exe"
 #endif
+#ifdef FNV_EDITION
+#define HOST_NAME "FalloutNVNative"                 /* the app's executable: log lines and reports */
+#else
+#define HOST_NAME "DungeonSiegeNative"
+#endif
 #endif

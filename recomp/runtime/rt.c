@@ -198,7 +198,7 @@ again:
         static __thread char m[160]; const char *img = "outside every image";
         for (unsigned k = 0; k < rt_images_n; k++) {
             uint32_t b = rt_images[k].base, sz = k ? 0x01000000u : DS2_IMAGE_END - b;   /* address windows: headers may be unmapped */
-            if (t - b < sz) { img = *rt_images[k].name ? rt_images[k].name : "DungeonSiege.exe"; break; }
+            if (t - b < sz) { img = *rt_images[k].name ? rt_images[k].name : GAME_EXE; break; }
         }
         snprintf(m, sizeof m, "indirect call to unknown code in %s", img); fault(c, t, m);
     }

@@ -82,7 +82,7 @@ static void *render_thread(void *arg)
                             extern long dsr_stat[8]; extern double dsr_gpu_ms[100000]; extern int dsr_frame;
                             double gsum = 0, gmax = 0; int gn = 0;   // frames whose command buffers have completed (two behind)
                             for (int k = (int)f0 - 2; k < dsr_frame - 2; k++) if (k >= 0 && k < 100000) { gsum += dsr_gpu_ms[k]; if (dsr_gpu_ms[k] > gmax) gmax = dsr_gpu_ms[k]; gn++; }
-                            fprintf(stderr, "DungeonSiegeNative: frame %u (%ux%u) %.1f fps; draws %ld, dropped %ld/%ld/%ld/%ld; gpu %.2f ms (max %.2f); longest frame %.1f ms, %d over 25 ms\n",
+                            fprintf(stderr, HOST_NAME ": frame %u (%ux%u) %.1f fps; draws %ld, dropped %ld/%ld/%ld/%ld; gpu %.2f ms (max %.2f); longest frame %.1f ms, %d over 25 ms\n",
                                     fno, w, h, (fno - f0) / (now - t0), dsr_stat[0], dsr_stat[1], dsr_stat[2], dsr_stat[3], dsr_stat[4],
                                     gn ? gsum / gn : 0, gmax, worst * 1000, spikes);
                             t0 = now; f0 = fno; worst = 0; spikes = 0; }
@@ -114,8 +114,8 @@ static void *render_thread(void *arg)
                                 NSBitmapImageRep *rep = [[NSBitmapImageRep alloc] initWithCGImage:img];
                                 [[rep representationUsingType:NSBitmapImageFileTypePNG properties:@{}] writeToFile:[NSString stringWithUTF8String:shot_path] atomically:YES];
                                 CGImageRelease(img); CGContextRelease(cg); CGColorSpaceRelease(cs); free(px);
-                                fprintf(stderr, "DungeonSiegeNative: frame %u saved to %s\n", fno, shot_path);
-                            } else if (tex) fprintf(stderr, "DungeonSiegeNative: screenshot: unexpected pixel format %lu\n", (unsigned long)tex.pixelFormat);
+                                fprintf(stderr, HOST_NAME ": frame %u saved to %s\n", fno, shot_path);
+                            } else if (tex) fprintf(stderr, HOST_NAME ": screenshot: unexpected pixel format %lu\n", (unsigned long)tex.pixelFormat);
                         }
                     }
                     uint64_t t_ready = clock_gettime_nsec_np(CLOCK_UPTIME_RAW);
@@ -194,7 +194,7 @@ static void cmdfile_poll(uint32_t fno)
         if (sscanf(line, "%7[a-z]:%599[^\n]", kind, rest) < 1 || !kind[0]) continue;
         memset(a, 0, sizeof *a); a->frame = fno + 1; snprintf(a->kind, sizeof a->kind, "%s", kind);
         if (!strcmp(kind, "shot") || !strcmp(kind, "type") || !strcmp(kind, "ditype") || !strcmp(kind, "peek")) snprintf(a->path, sizeof a->path, "%s", rest); else sscanf(rest, "%d,%d", &a->x, &a->y);
-        nacts++; fprintf(stderr, "DungeonSiegeNative: command %s\n", line);
+        nacts++; fprintf(stderr, HOST_NAME ": command %s\n", line);
     }
     fclose(f);
 }
@@ -256,7 +256,7 @@ static const char *script_tick(uint32_t fno)       /* returns a screenshot path 
         else if (!strcmp(a->kind, "peek") && fno == a->frame) {
             extern uint8_t *G_MEM; char *e = a->path; uint32_t at = (uint32_t)strtoul(e, &e, 16), v = 0;
             for (;;) { if (at < 0x10000u) { v = 0; break; } memcpy(&v, G_MEM + at, 4); if (*e != ',') break; at = v + (uint32_t)strtoul(e + 1, &e, 16); }
-            fprintf(stderr, "DungeonSiegeNative: peek %s = 0x%08x (byte 0x%02x)\n", a->path, v, v & 0xff);
+            fprintf(stderr, HOST_NAME ": peek %s = 0x%08x (byte 0x%02x)\n", a->path, v, v & 0xff);
         }
         else if (!strcmp(a->kind, "wheel") && fno >= a->frame && fno < a->frame + (uint32_t)abs(a->x)) post(0x20a, ((uint32_t)(int16_t)(a->x > 0 ? 120 : -120) << 16), pos_lp());   /* x notches */
         else if (!strcmp(a->kind, "type") && fno == a->frame) {   /* real NSEvents through the window (keyboard path) */
@@ -497,7 +497,7 @@ static void ensure_resolution(const char *drive_c)
     [lines insertObjects:add atIndexes:[NSIndexSet indexSetWithIndexesInRange:NSMakeRange(0, add.count)]];
     [[NSFileManager defaultManager] createDirectoryAtPath:@(dir) withIntermediateDirectories:YES attributes:nil error:nil];
     [[[lines componentsJoinedByString:@"\n"] stringByAppendingString:@"\n"] writeToFile:@(path) atomically:YES encoding:NSISOLatin1StringEncoding error:nil];
-    fprintf(stderr, "DungeonSiegeNative: resolution %dx%d (%s)\n", w, h, path);
+    fprintf(stderr, HOST_NAME ": resolution %dx%d (%s)\n", w, h, path);
 }
 
 
@@ -606,7 +606,7 @@ static void *game_thread(void *arg)
 {
     (void)arg; char msg[256];
     uint32_t code = w32_run(msg, sizeof msg);
-    fprintf(stderr, "DungeonSiegeNative: game ended: %s\n", msg);
+    fprintf(stderr, HOST_NAME ": game ended: %s\n", msg);
     usleep(100000); ds_trace_save(&frame_trace); frame_trace.samples = NULL;
     game_running = 0;
     const char *rp = !strncmp(msg, "fault", 5) ? w32_crash_last_path() : 0;
@@ -679,7 +679,7 @@ int main(int argc, char **argv)
             else if (!strcmp(argv[k], "--data")) data = argv[k + 1];
         }
         if (!exe && !game && !data) bundle_launch(argv[0], &exe, &game, &data);
-        if (!exe || !game || !data) { fprintf(stderr, "usage: DungeonSiegeNative --exe <DungeonSiege2.exe> --game <game folder> --data <data folder>\n"); return 1; }
+        if (!exe || !game || !data) { fprintf(stderr, "usage: " HOST_NAME " --exe <" GAME_EXE "> --game <game folder> --data <data folder>\n"); return 1; }
         NSString *bin = [[NSString stringWithUTF8String:argv[0]] stringByDeletingLastPathComponent];
         snprintf(dsr_snapshot_path, sizeof dsr_snapshot_path, "%s/dsr_snapshot.bin", bin.UTF8String);
         char drive_c[1024], overlay[1024];
@@ -755,7 +755,7 @@ int main(int argc, char **argv)
         H = m; ring = (uint8_t *)m + DSR_HEADER_SIZE; H->magic = DSR_SHM_MAGIC; H->version = 1;
         dsr_attach_consumer(H);
         w32_host_window_created = window_created; w32_host_window_changed = window_changed;
-        if (w32_prepare(exe, game, drive_c, overlay)) { fprintf(stderr, "DungeonSiegeNative: cannot load %s\n", exe); return 1; }
+        if (w32_prepare(exe, game, drive_c, overlay)) { fprintf(stderr, HOST_NAME ": cannot load %s\n", exe); return 1; }
         { void w32_lab_init(const char *); w32_lab_init(data); }      /* DS_TEST_LAB=1: the Test Lab's bridge (runtime/win32/test_lab.c) */
         if (!test_mode) report_from_last_session(data);
         [NSTimer scheduledTimerWithTimeInterval:0.5 repeats:YES block:^(NSTimer *tm) { (void)tm; w32_crash_heartbeat(2); }];   /* UI thread alive */
