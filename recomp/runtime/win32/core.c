@@ -136,7 +136,16 @@ IMPL(kernel32, GetEnvironmentVariableA)
     w32_set_last_error(c, 203); RET(0, 3);
 }
 IMPL(kernel32, SetHandleCount) { RET(ARG(0), 1); }
-IMPL(kernel32, GetStdHandle) { RET(0, 1); }                  /* a GUI process: no console handles */
+/* a GUI process: no console handles. W32_STDIO=1 (debugging): stdout and stderr write to the host's stderr, so the
+ * game's own log and assertion messages show up */
+IMPL(kernel32, GetStdHandle)
+{
+    static uint32_t h[2]; uint32_t which = ARG(0);
+    if (!getenv("W32_STDIO") || (which != 0xfffffff5u && which != 0xfffffff4u)) RET(0, 1);
+    int k = which == 0xfffffff5u ? 0 : 1;
+    if (!h[k]) { uint32_t w32_file_handle_for_fd(int fd, const char *name); h[k] = w32_file_handle_for_fd(2, k ? "stderr" : "stdout"); }
+    RET(h[k], 1);
+}
 IMPL(kernel32, SetStdHandle) { RET(1, 2); }
 
 /* ---- errors, threads, TLS ---- */

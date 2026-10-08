@@ -37,6 +37,10 @@ OVERRIDES = {             # address: description (runtime/win32/hooks.c rt_overr
     0x007663b0: 'UIButton::DisableButton: the main menu keeps its Multiplayer button (GOG 2.3 disables it)',
 }
 
+SIMS2_OVERRIDES = {       # The Sims 2 (runtime/win32/hooks.c rt_override, SIMS2_EDITION)
+    0xa0c2b206: 'crash reporter setup (crashpad: a named pipe to crashpad_handler.exe, reports to EA): skipped',
+}
+
 RET_FORMS = ('repz ret', 'rep ret', 'bnd ret')
 
 class Lifter:
@@ -425,6 +429,7 @@ class Lifter:
             return 'esp += 4;'
         if mn == 'cpuid': return 'rt_cpuid(c, &eax, &ebx, &ecx, &edx);'
         if mn == 'push':
+            if o[0].size == 2: return '{ uint32_t v = %s; esp -= 2; W16(esp, (uint16_t)v); }' % self.rd(i, o[0])   # operand-size prefix
             if o[0].size != 4: raise Unsupported('push16')
             if self.guest_flow and o[0].type == X.X86_OP_IMM:
                 target = o[0].imm & 0xffffffff
@@ -439,6 +444,7 @@ class Lifter:
                     callees.update(self.constant_targets_cache[va])
             return '{ uint32_t v = %s; esp -= 4; W32S(esp, v); }' % self.rd(i, o[0])
         if mn == 'pop':
+            if o[0].size == 2: return '{ uint32_t v = R16(esp); esp += 2; %s }' % self.wr(i, o[0], 'v')
             if o[0].size != 4: raise Unsupported('pop16')
             return '{ uint32_t v = R32S(esp); esp += 4; %s }' % self.wr(i, o[0], 'v')
         if mn == 'pushal':
@@ -446,6 +452,7 @@ class Lifter:
         if mn == 'popal':
             return 'edi = R32S(esp); esi = R32S(esp + 4); ebp = R32S(esp + 8); ebx = R32S(esp + 16); edx = R32S(esp + 20); ecx = R32S(esp + 24); eax = R32S(esp + 28); esp += 32;'
         if mn == 'pushfd': return '{ uint32_t v = flags_get(&f); esp -= 4; W32S(esp, v); }'
+        if mn == 'pushf': return '{ uint32_t v = flags_get(&f); esp -= 2; W16(esp, (uint16_t)v); }'      # 16-bit (a Cyrix CPU test)
         if mn == 'popfd': return '{ uint32_t v = R32S(esp); esp += 4; flags_set(&f, v, 0xcd5u | F_DF); }'
         if mn == 'lahf': return 'eax = (eax & 0xffff00ffu) | ((flags_get(&f) & 0xd5u | 2u) << 8);'
         if mn == 'sahf': return 'flags_set(&f, (eax >> 8) & 0xffu, F_CF | F_PF | F_AF | F_ZF | F_SF);'
@@ -814,7 +821,7 @@ def main():
         from editions import identify, PROFILES
         edition = a.game if a.game != 'ds2' else identify(a.exe, prepared=True)
         if edition in ('fnv', 'sims2'):                           # Fallout: New Vegas, The Sims 2: none of the DS2 hooks apply
-            L.hooks = {}; L.overrides = {}
+            L.hooks = {}; L.overrides = dict(SIMS2_OVERRIDES) if edition == 'sims2' else {}
         elif edition == 'broken-world':
             L.guest_flow = True
             L.hooks = dict(zip(PROFILES[edition]['hooks'], HOOKS.values()))

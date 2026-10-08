@@ -14,26 +14,35 @@ sha() { if command -v shasum >/dev/null; then shasum -a 256 "$1"; else sha256sum
 [ "$(sha "$BIN/Sims2EP9.exe")" = "$SHA" ] || [ -n "${SIMS2_ANY_BUILD:-}" ] || {
   echo "Sims2EP9.exe is not the build this port was made from (Steam updated the game?); SIMS2_ANY_BUILD=1 tries anyway"; exit 1; }
 PY="$HERE/.venv/bin/python"
+export PYTHONHASHSEED=0                                     # the same C from the same input (incremental compiles)
 [ -x "$PY" ] || { python3 -m venv "$HERE/.venv" && "$HERE/.venv/bin/pip" install -q capstone==5.0.7 unicorn==2.1.4; }
 mkdir -p "$OUT"; OUT="$(cd "$OUT" && pwd)"
-python3 "$HERE/tools/compiler_compat.py" "${CC:-clang}" "$OUT/compiler-flags.txt"
+python3 "$HERE/tools/compiler_compat.py" "${CC:-clang}" "$OUT/compiler-flags.txt.new"
 # arm64: x86's memory ordering for the game's threads (runtime/rt.h RT_TSO); x86-64 has it natively
-if [[ "$(uname -m)" == arm64 ]]; then printf '%s -DRT_TSO\n' "$(head -1 "$OUT/compiler-flags.txt")" > "$OUT/compiler-flags.txt.new" && mv "$OUT/compiler-flags.txt.new" "$OUT/compiler-flags.txt"; fi
+if [[ "$(uname -m)" == arm64 ]]; then printf '%s -DRT_TSO\n' "$(head -1 "$OUT/compiler-flags.txt.new")" > "$OUT/compiler-flags.txt.tmp" && mv "$OUT/compiler-flags.txt.tmp" "$OUT/compiler-flags.txt.new"; fi
+cmp -s "$OUT/compiler-flags.txt.new" "$OUT/compiler-flags.txt" && rm "$OUT/compiler-flags.txt.new" || mv "$OUT/compiler-flags.txt.new" "$OUT/compiler-flags.txt"   # changed flags: recompile all
 echo "== Steam DRM"
 "$PY" "$HERE/tools/steamstub.py" "$BIN/Sims2EP9.exe" "$OUT/Sims2EP9.exe"
 EXE="$OUT/Sims2EP9.exe"
 [ "$(sha "$EXE")" = "$SHA_UNPACKED" ] || [ -n "${SIMS2_ANY_BUILD:-}" ] || { echo "unpacked Sims2EP9.exe differs from the expected one"; exit 1; }
+if [[ -n "${SIMS2_RELINK:-}" && -d "$OUT/obj" ]]; then          # runtime changes only: keep the lifted objects
+  echo "== runtime and link (SIMS2_RELINK)"; exec "$HERE/tools/build_runtime.sh" "$OUT"
+fi
 echo "== analysis"
-"$PY" "$HERE/tools/analyze.py" "$EXE" "$OUT/analysis.json" > "$OUT/analysis.log"
+if [[ -n "${SIMS2_REANALYZE:-}" || ! -f "$OUT/analysis.json" || "$OUT/analysis.json" -ot "$HERE/tools/analyze.py" ]]; then
+  "$PY" "$HERE/tools/analyze.py" "$EXE" "$OUT/analysis.json" > "$OUT/analysis.log"
+else echo "(kept: same executable, same analyze.py; SIMS2_REANALYZE=1 redoes it)"; fi
 sed -n '/^functions /p; /^decode failures:/p; /^jump tables /p; /^SEH:/p' "$OUT/analysis.log"
 echo "== lifting"
+# keep the previous C to recompile only the files whose text changed
+rm -rf "$OUT/prev"; mkdir -p "$OUT/prev"; for g in "$OUT"/lift_*.c "$OUT"/*_lift_*.c "$OUT/fntab.c"; do [ -f "$g" ] && mv "$g" "$OUT/prev/"; done
 "$PY" "$HERE/tools/lift.py" "$EXE" "$OUT/analysis.json" "$OUT" --game sims2 | grep -Ev '^unsupported: \{\}$'
 # the game's own DLL, recompiled into the same image set (as build.sh does for Miles and Bink): the Intel JPEG Library
 # (screenshots, thumbnails). Its base (0x60000000) is free, so it is lifted as it is.
 NIMP=$("$PY" -c 'import json,sys; print(len(json.load(open(sys.argv[1]))["imports"]))' "$OUT/image.json")
 IMGS=("=")
-for rel in ijl15.dll; do
-  tag=$(echo "$rel" | tr . _); src="$BIN/$rel"
+for rel in EP9/TSBin/ijl15.dll; do
+  tag=$(basename "$rel" | tr . _); src="$GAME/$rel"
   [ -f "$src" ] || { echo "missing $src"; exit 1; }
   "$PY" "$HERE/tools/analyze.py" "$src" "$OUT/$tag.json" | head -1
   "$PY" "$HERE/tools/lift.py" "$src" "$OUT/$tag.json" "$OUT" --tag "$tag" --imp-base "$NIMP" | grep -E 'lifted|internal'
@@ -42,8 +51,17 @@ for rel in ijl15.dll; do
 done
 "$PY" "$HERE/tools/link_tables.py" "$OUT" "${IMGS[@]}"
 echo "== compiling"
-rm -rf "$OUT/obj"; mkdir -p "$OUT/obj"
+mkdir -p "$OUT/obj"; [[ "$OUT/compiler-flags.txt" -nt "$OUT/obj" ]] && rm -f "$OUT"/obj/*.o
+TODO=()
+for g in "$OUT"/lift_*.c "$OUT"/*_lift_*.c "$OUT/fntab.c"; do
+  o="$OUT/obj/$(basename "$g" .c).o"
+  if [[ -f "$o" ]] && cmp -s "$g" "$OUT/prev/$(basename "$g")" && [[ "$o" -nt "$HERE/runtime/rt.h" && "$o" -nt "$HERE/runtime/rt_sse.h" ]]; then continue; fi
+  rm -f "$o"; TODO+=("$g")
+done
+for o in "$OUT"/obj/*.o; do [[ -f "$OUT/$(basename "$o" .o).c" ]] || rm -f "$o"; done    # files the lift no longer makes
+rm -rf "$OUT/prev"; touch "$OUT/obj"
+echo "${#TODO[@]} of $(ls "$OUT"/lift_*.c "$OUT"/*_lift_*.c "$OUT/fntab.c" | wc -l | tr -d ' ') files changed"
 JOBS="${SIMS2_BUILD_JOBS:-$(getconf _NPROCESSORS_ONLN)}"
-printf '%s\n' "$OUT"/lift_*.c "$OUT"/*_lift_*.c "$OUT/fntab.c" | xargs -n 1 -P "$JOBS" "$HERE/tools/cc1.sh" "$OUT"
-echo "== $(ls "$OUT/obj" | wc -l | tr -d ' ') object files"
-# Not linked yet: the runtime has no Sims 2 profile (start-up, paths, registry, Steam API); see docs/SIMS2-PORT.md.
+[[ ${#TODO[@]} -eq 0 ]] || printf '%s\n' "${TODO[@]}" | xargs -n 1 -P "$JOBS" "$HERE/tools/cc1.sh" "$OUT"
+echo "== $(ls "$OUT/obj" | wc -l | tr -d ' ') object files; runtime and link"
+"$HERE/tools/build_runtime.sh" "$OUT"

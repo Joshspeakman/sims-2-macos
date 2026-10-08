@@ -291,5 +291,13 @@ IMPL(winmm, mmioAdvance)                              /* (handle, MMIOINFO *, fl
     RET(0, 3);
 }
 
+IMPL(winmm, mmioSeek)                                 /* (handle, offset, origin: 0 set, 1 current, 2 end) -> position */
+{
+    Mmio *m = mm_get(ARG(0)); if (!m) RET(0xffffffffu, 3);
+    int64_t base = ARG(2) == 1 ? m->pos : ARG(2) == 2 ? m->size : 0, p = base + (int32_t)ARG(1);
+    if (p < 0 || p > m->size) RET(0xffffffffu, 3);
+    m->pos = (uint32_t)p; RET(m->pos, 3);
+}
+
 /* ---- WSOCK32 101 (WSAAsyncSelect): accepted, no window messages ---- */
 IMPL(wsock32, ord101) { RET(0, 4); }

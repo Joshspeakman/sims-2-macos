@@ -95,6 +95,9 @@ int rt_override(Ctx *c, uint32_t addr)
         c->eax = (c->eax & 0xffffff00u) | 1u;
         c->esp += 8;
         return 1;
+#elif defined(SIMS2_EDITION)
+    case 0xa0c2b206u:                                     /* crashpad setup (cdecl, three string pointers, result unused) */
+        c->esp += 4; return 1;
 #else
     case 0x007663b0u: return keep_multiplayer_button(c);
 #endif

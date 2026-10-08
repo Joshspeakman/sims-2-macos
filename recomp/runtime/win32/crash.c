@@ -207,6 +207,8 @@ const char *w32_crash_report(const char *kind, const char *reason, Ctx *c, uint3
     time_t tt = time(0); struct tm tm; localtime_r(&tt, &tm);
     char stamp[32]; strftime(stamp, sizeof stamp, "%Y-%m-%d_%H-%M-%S", &tm);
     snprintf(last_report, sizeof last_report, "%s/%s-%s.txt", report_dir, kind, stamp);
+    for (int n = 2; n < 100 && !access(last_report, F_OK); n++)          /* several in one second: keep each */
+        snprintf(last_report, sizeof last_report, "%s/%s-%s-%d.txt", report_dir, kind, stamp, n);
     int fd = open(last_report, O_CREAT | O_WRONLY | O_TRUNC, 0644);
     if (fd < 0) { writing = 0; return 0; }
     collect_stacks();

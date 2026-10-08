@@ -30,8 +30,8 @@ static RKey *lookup(const char *path, int create)
     RKey *k = calloc(1, sizeof *k); snprintf(k->path, sizeof k->path, "%s", path); keys[nkeys++] = k;
     return k;
 }
-/* a string value put in place before the game looks (install-time values; W32_REGISTRY="key|name|value;..." in tests) */
-void w32_reg_string(const char *path, const char *name, const char *str)
+/* a value put in place before the game looks (install-time values; W32_REGISTRY="key|name|value;..." in tests) */
+static void reg_set(const char *path, const char *name, uint32_t type, const void *data, uint32_t size)
 {
     char p[512]; snprintf(p, sizeof p, "%s", path);
     for (char *q = p; *q; q++) { if (*q >= 'A' && *q <= 'Z') *q += 32; if (*q == '/') *q = '\\'; }
@@ -40,16 +40,57 @@ void w32_reg_string(const char *path, const char *name, const char *str)
     if (k) {
         RVal *v = 0; for (int j = 0; j < k->nv; j++) if (!strcasecmp(k->v[j].name, name)) v = &k->v[j];
         if (!v) { k->v = realloc(k->v, (size_t)(k->nv + 1) * sizeof *k->v); v = &k->v[k->nv++]; memset(v, 0, sizeof *v); snprintf(v->name, sizeof v->name, "%s", name); }
-        free(v->data); v->type = 1; v->size = (uint32_t)strlen(str) + 1; v->data = (uint8_t *)strdup(str);   /* REG_SZ */
+        free(v->data); v->type = type; v->size = size; v->data = malloc(size); memcpy(v->data, data, size);
     }
     pthread_mutex_unlock(&rlock);
 }
+void w32_reg_string(const char *path, const char *name, const char *str) { reg_set(path, name, 1, str, (uint32_t)strlen(str) + 1); }   /* REG_SZ */
+void w32_reg_dword(const char *path, const char *name, uint32_t val) { reg_set(path, name, 4, &val, 4); }                        /* REG_DWORD */
 /* What the game's installer would have written. The GOG and Steam releases never run that installer, so these are
  * filled in from the data folder at start-up:
  *   cdkey-hash.txt  DoubleHash, the 8-byte value the retail installer derives from the player's own product key
  *                   (install.sh --cd-key computes it the way the installer does). The game shows it to GameSpy (now
  *                   OpenSpy) as its CD key for multiplayer; without it multiplayer stops at "Could not find a valid
  *                   CDKey". Only the hash is kept, never the key. */
+#ifdef SIMS2_EDITION
+/* The Sims 2 Legacy Collection: Steam's install script (<game>/3314070_install.vdf, "Registry" block) tells the game
+ * where each pack's data is: HKCU\Software\Electronic Arts\The Sims 2 Ultimate Collection 25\Sims2EP1.exe "path" =
+ * %INSTALLDIR%\EP1 and so on. Applied in order as Steam does (a later value replaces an earlier one); values given
+ * per language take W32_LANGUAGE's (default english). Called by w32_prepare, once the game folder is known. */
+void w32_sims2_registry(void)
+{
+    char p[1200]; snprintf(p, sizeof p, "%s/3314070_install.vdf", w32_game_dir);
+    FILE *f = fopen(p, "rb"); if (!f) { fprintf(stderr, "w32: no %s: the game won't find its packs\n", p); return; }
+    const char *lang = getenv("W32_LANGUAGE"); if (!lang) lang = "english";
+    char stack[8][512]; int depth = 0, nset = 0;
+    char tok[2][512]; int ntok = 0, c;
+    while ((c = fgetc(f)) != EOF) {
+        if (c == '"') {                                    /* a quoted token; \\ is a backslash */
+            char *t = tok[ntok & 1]; size_t n = 0;
+            while ((c = fgetc(f)) != EOF && c != '"') { if (c == '\\') { c = fgetc(f); if (c == EOF) break; } if (n < 511) t[n++] = (char)c; }
+            t[n] = 0; ntok++;
+            if (ntok == 2) {                               /* "name" "value" */
+                ntok = 0;
+                if (depth >= 4 && !strcmp(stack[1], "Registry") && (depth == 4 || !strcasecmp(stack[4], lang))) {
+                    char val[1024]; const char *v = tok[1];
+                    if (!strncasecmp(v, "%INSTALLDIR%", 12)) { snprintf(val, sizeof val, "C:\\GOG Games\\Dungeon Siege%s", v + 12); v = val; }
+                    char key[600]; snprintf(key, sizeof key, "%s", stack[2]);
+                    if (!strncasecmp(key, "HKEY_CURRENT_USER", 17)) { memmove(key + 4, key + 17, strlen(key + 17) + 1); memcpy(key, "hkcu", 4); }
+                    else if (!strncasecmp(key, "HKEY_LOCAL_MACHINE", 18)) { memmove(key + 4, key + 18, strlen(key + 18) + 1); memcpy(key, "hklm", 4); }
+                    if (!strcasecmp(stack[3], "dword")) w32_reg_dword(key, tok[0], (uint32_t)strtoul(v, 0, 0));
+                    else w32_reg_string(key, tok[0], v);
+                    nset++;
+                }
+            }
+        } else if (c == '{') {
+            if (ntok == 1 && depth < 8) snprintf(stack[depth], sizeof stack[depth], "%s", tok[0]);
+            depth++; ntok = 0;
+        } else if (c == '}') { if (depth) depth--; ntok = 0; }
+    }
+    fclose(f);
+    fprintf(stderr, "w32: %d registry values from Steam's install script\n", nset);
+}
+#endif
 void w32_registry_install(const char *data_dir)
 {
 #ifdef FNV_EDITION

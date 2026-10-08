@@ -253,6 +253,11 @@ IMPL(kernel32, GetTempFileNameA)
 
 /* ---- file handles ---- */
 typedef struct File { int fd; char path[1024]; int is_dir; } File;
+uint32_t w32_file_handle_for_fd(int fd, const char *name)     /* a handle on a host descriptor (W32_STDIO) */
+{
+    File *f = calloc(1, sizeof *f); f->fd = dup(fd); snprintf(f->path, sizeof f->path, "%s", name);
+    return h_new(H_FILE, f);
+}
 static uint64_t ft_from_ts(struct timespec t)
 {
     if (w32_deterministic) return 132000000000000000ull;          /* harness: file times must not differ between runs */
