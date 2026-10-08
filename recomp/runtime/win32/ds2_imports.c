@@ -80,7 +80,7 @@ IMPL(kernel32, GetFileInformationByHandle)             /* BY_HANDLE_FILE_INFORMA
 }
 IMPL(kernel32, SetFileTime)                            /* the modification time (the others aren't kept) */
 {
-    int fd = w32_file_fd(ARG(0)); uint32_t m = ARG(3);
+    int w32_file_write_fd(uint32_t); int fd = w32_file_write_fd(ARG(0)); uint32_t m = ARG(3);
     if (fd < 0) { w32_set_last_error(c, 6); RET(0, 4); }
     if (m) {
         uint64_t t = (uint64_t)rt_r32(G_MEM, m) | (uint64_t)rt_r32(G_MEM, m + 4) << 32;

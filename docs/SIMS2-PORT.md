@@ -29,7 +29,7 @@ tries anyway. Once there are hooks at fixed addresses, a new build means a new a
 | Compiling the generated C | **all 281 files compile** (exe + `ijl15.dll`, 111,368 functions), 0 errors, 589 MB of C, 2 min on 16 jobs (26 CPU-minutes). `build_sims2.sh` end to end, from the Steam folder: 7.5 min on 24 cores |
 | SIMD lifter on Sims 2's instruction forms (`tests/fuzz_sse.py`) | exe: 289 forms / 680 instances × 60 runs, **0 mismatches** with Unicorn. `ijl15.dll`: 97 forms / 282 instances × 60 runs, 0 mismatches. **Bug found and fixed**: MMX `packsswb`/`packssdw`/`packuswb` used the XMM layout, so the source operand's half was dropped (FNV never used the MMX forms). **Added**: `pshufw` (66 sites in `ijl15.dll`) and `cvtpi2ps` (13 in the exe) |
 | Integer/x87 lifter (`tests/fuzz_insn.py`) | 6,128 forms / 18,114 instances × 20 runs. Outside SIMD rows (this fuzzer does not seed XMM/MMX state; `fuzz_sse.py` covers those), only the expected differences remain: x87 transcendentals (`fyl2x`, `f2xm1`, `fprem`/`fprem1`: last-bit differences from the double model; one `fprem1` site lands one modulus apart in 2 of 20 runs, a quotient rounded at the half-way point) and `cpuid` (the fixed fake CPU) |
-| Linking / running | **not yet**: see "Runtime gaps" |
+| Linking / running (Linux, SDL/OpenGL host) | **runs to the main menu**: Steam check (offline shim), intro movies (EA MAD, decoded by the game), loading screen, the neighbourhood chooser with its 3D Sims. See "Running" below |
 
 Build the C (Mac or Linux):
 
@@ -83,41 +83,54 @@ names itself.
   so the address itself is fine, but anything in the runtime that assumes guest pointers < 0x80000000 (signed
   comparisons, the heap's top-down placement) needs checking.
 
-## Runtime gaps, roughly in order of the work
+## Running (Linux, 2026-10-07)
 
-1. **A Sims 2 profile** (`SIMS2_EDITION`, mirroring `FNV_EDITION`): `runtime/edition.h` needs `GAME_EXE
-   "Sims2EP9.exe"` and `DS2_IMAGE_END` = 0xA120F000 (base + SizeOfImage). The rt.c code-pointer window (`DS2_IMAGE_END - base`)
-   underflows with FNV's value. `w32_prepare`: set `rt_cpuid_sse2 = 1`. The virtual game folder must be the
-   collection root, with the module path at `…\EP9\TSBin\Sims2EP9.exe`. Registry from the `.vdf` as above. Window
-   title, logs, and the host app strings (`host/main.m`, `launcher.m`). `tools/build_runtime.sh` gets a `sims2`
-   edition. The runtime loader must map the **unwrapped** executable (the decrypted `.text` holds jump tables and
-   constants the code reads), so the app ships `work/sims2/Sims2EP9.exe`, not the Steam file.
-   `install.sh` and the launch window still build and install Fallout: New Vegas. On the Mac, "build from the Steam
-   install" ends up as `install.sh --game-dir "<…>/The Sims 2 Legacy Collection"` running `build_sims2.sh`, then
-   linking with the Sims 2 runtime profile and packaging the app.
-2. **Imports not implemented yet: 175 of 438** (`recomp/tools/import_gap.py`):
-   - KERNEL32 (55): the newer CRT's W-variants and Vista+ calls (`InitializeCriticalSectionEx`,
-     `AcquireSRWLockExclusive`/`SleepConditionVariableSRW`/`WakeAllConditionVariable`, `InitializeSListHead`,
-     `LCMapStringEx`, `EncodePointer`/`DecodePointer`, `FindFirstFileExW`, `GetFileAttributesExW`, `MoveFileExW`,
-     `LockFileEx`…), console and named-pipe calls (CRT / crashpad: stubs), change notifications (stubs).
-   - ADVAPI32 (18): security descriptors and tokens (stubs that succeed), `SystemFunction036` = `RtlGenRandom`
-     (`arc4random_buf`).
-   - USER32 (25): cursors and icons (`CreateCursor`, `CreateIconIndirect`, `LoadCursorFromFileA` for `.cur` files),
-     clipboard viewer chain, `SetCapture`/`ReleaseCapture`, `MonitorFromPoint`/`GetMonitorInfoA`,
-     `GetWindowPlacement`, rect helpers.
-   - WS2_32 by ordinal (27): map to the existing `winsock.c` by name (`WSAAsyncSelect` included).
-   - WININET (10), MSVFW32 (8), AVIFIL32 (8): stubs (see above). GDI32 (6), SHELL32 (3: special folders →
-     Documents), WINMM `mmioSeek`/`mmioSetInfo`, ole32 security (2), OLEAUT32 `#9` (`VariantClear`), IMM32
-     `ImmSetCompositionStringW`, DSOUND `#1` (`DirectSoundCreate`: map the ordinal).
-   - `steam_api.dll` (8): the offline shim above.
-3. **Rendering.** D3D9 with programmable shaders from the game's own compiler, on the metal branch's MojoShader
-   path. Check the render-target use (shadows, reflections, the neighborhood view's water), the "Saved by D3DX"
-   texture paths, and any `D3DX` texture/surface functions the static library calls into the device.
-4. **Audio.** One DSOUND import (`DirectSoundCreate`); EA's own mixer on top. Should map to `dsound.c` on Core
-   Audio as-is.
-5. **Threads and C++ EH.** 29,565 functions write `fs:[0]` (C++ EH frames). The newer CRT uses
-   `_except_handler4` (FNV item 7: `lift.py` doesn't parse it yet). If the game throws in normal play, catch
-   continuations are needed.
+![Main menu](screenshots/sims2-main-menu.jpg)
+
+```sh
+recomp/build_sims2.sh "<…>/The Sims 2 Legacy Collection"          # recompile (incremental) and link
+SECS=150 recomp/tools/sims2_iterate.sh run                            # a windowed test session; log in recomp/work/run-*.log
+DS_SHOT_RAW=1 DS_SCRIPT="@140:shot:/path/menu.png" SECS=150 recomp/tools/sims2_iterate.sh run   # screenshots
+```
+
+What it took, beyond the imports (all 438 are implemented):
+
+- **Profile** (`SIMS2_EDITION`, `runtime/edition.h`): the exe at `EP9\TSBin` below the collection folder, the
+  working folder there, registry from Steam's `3314070_install.vdf` (`w32_sims2_registry`), SSE2 CPU,
+  shader-model-3 caps (`MODERN_EDITION`, shared with Fallout NV).
+- **Offline Steam** (`sims2_imports.c`): `SteamAPI_Init` succeeds; ISteamApps008 `GetCurrentGameLanguage` and
+  ISteamUser023 `GetSteamID` are the only methods the game calls.
+- **Crash reporter** (crashpad, linked in): its setup `0xa0c2b206` is overridden to return (`SIMS2_OVERRIDES` in
+  `lift.py`, `hooks.c`).
+- **Lifter**: 16-bit `push`/`pop`/`pushf` (a Cyrix CPU check), reading segment registers (the CRT's fatal-error
+  path), MMX `pack*` fixed, `pshufw`/`cvtpi2ps`.
+- **PEB.ProcessParameters**: the newer CRT reads it in every thread.
+- **Direct3D 9**: `Get/SetSoftwareVertexProcessing` keep the mode (the game keeps one caps copy per mode); a reused
+  device takes the new behaviour flags; a windowed 0x0 back buffer is the window's client size; **a vertex shader
+  without a pixel shader runs Direct3D's fixed-function texture stages** (`FF_PS`, `FF_MSL_PS` in
+  `d3d9_shader.c`), which is how the game draws its UI, movies and much more.
+- **Windows**: the game's `multimon.h` needs every monitor function by `GetProcAddress` (else an uninitialised rect
+  places the window off-screen); `SystemParametersInfoA` answers unknown queries with 0.
+- **Files**: the game opens every package for writing. Such files are now read where they are and copied into the
+  data folder's overlay only on the first write (`File.cow`, `files.c`); before, 8.5 GB of packages were copied.
+
+## Next
+
+1. **Interaction**: click into a neighbourhood, Create-a-Sim, live mode. Input is untested (the host's DS_SCRIPT
+   clicks work for other ports); expect new imports and D3D paths (render targets for reflections and shadows,
+   the neighbourhood view).
+2. **The Mac**: nothing has been built there yet. `install.sh`, the launch window and `build_app.sh` still make
+   Fallout NV; the Metal side of the fixed-function stages (`FF_MSL_PS`) is written but has never been compiled.
+   `analyze.py` peaks at about 26 GB of memory (tight on a 32 GB Mac).
+3. **C++ catch continuations**: a `throw` that the game catches can't resume yet (`lift.py` registers `__except`
+   blocks only). None was needed to reach the menu. A known case: with a data folder left by earlier broken runs
+   (kept as `~/.local/share/sims2-linux-badstate`), a curve property reaches its parser empty, and
+   `std::length_error` ("vector too long") ends the game about a minute in. It would on Windows too, so the bad
+   state, not the catch, is the bug: find what wrote it.
+4. **Audio**: test sessions mute it (`W32_AUDIO_MUTE`); not checked yet.
+5. **Build**: the lift is not deterministic between some runs (every C file was rebuilt after small `lift.py`
+   changes, with `PYTHONHASHSEED=0` set), which costs about 5 minutes per lifter change. Diff
+   `work/sims2/prev/lift_000.c` against the new one before the next lifter change to find the cause.
 
 ## Tests
 

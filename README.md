@@ -6,12 +6,15 @@ Metal. No Wine, no Rosetta, no emulator. It's built on the recompiler and Window
 [docs/FNV-README.md](docs/FNV-README.md)), which itself comes from the Dungeon Siege ports. Nothing from the game is in
 this repository: the build regenerates everything locally from your Steam files, and the game folder is only read.
 
-**State: decompiling (2026-10-07).** The Steam executable is unwrapped from its DRM, and all 109,632 of its functions
-plus the Intel JPEG library lift to C and compile. The game doesn't link or run yet: it needs a Sims 2 profile in the
-runtime, an offline Steam shim, and about 175 more Windows functions. Status, findings and the work list are in
-[docs/SIMS2-PORT.md](docs/SIMS2-PORT.md).
+**State: runs on Linux to the main menu (2026-10-07).** The Steam executable is unwrapped from its DRM,
+recompiled (all 109,632 functions and the Intel JPEG library) and linked with the Windows runtime. On Linux (the same
+runtime's SDL/OpenGL host) the game starts offline, plays its intro movies, loads every expansion and stuff pack and
+shows the neighbourhood chooser with its 3D Sims. Playing (clicking into a neighbourhood) and the Mac app come next.
+Status and the work list: [docs/SIMS2-PORT.md](docs/SIMS2-PORT.md).
 
-## Build the C
+![Main menu](docs/screenshots/sims2-main-menu.jpg)
+
+## Build
 
 Needs python3 and clang (on a Mac, the Xcode command line tools), and The Sims 2 Legacy Collection installed by Steam
 (on a Mac, copy the folder over from a PC or Steam/CrossOver install).
@@ -22,7 +25,9 @@ recomp/build_sims2.sh "/path/to/steamapps/common/The Sims 2 Legacy Collection"
 
 This checks `EP9/TSBin/Sims2EP9.exe` against the build the port was made from, removes Steam's wrapper
 (`recomp/tools/steamstub.py`), then analyses, lifts and compiles the executable and `ijl15.dll` into
-`recomp/work/sims2/`. On a 24-core PC that takes about 8 minutes, and the analysis needs about 26 GB of memory.
+`recomp/work/sims2/`, then links it with the runtime (on Linux: `recomp/work/sims2/app/Sims2Linux`). On a 24-core PC the
+first build takes about 8 minutes (later ones reuse the analysis and recompile only what changed), and the analysis
+needs about 26 GB of memory. `recomp/tools/sims2_iterate.sh run` starts a windowed test session.
 
 ## How it works
 

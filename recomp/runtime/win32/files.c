@@ -54,7 +54,8 @@ static void resolve(const char *root, char **parts, int from, int np, char *out,
     }
     snprintf(out, cap, "%s", cur);
 }
-/* Windows path -> host path. mode 0: read (overlay if present, else base); 1: create/write (overlay, copied up). */
+/* Windows path -> host path. mode 0: read (overlay if present, else base); 1: create/write (overlay, copied up);
+ * 2: the overlay path only (nothing copied: File.cow copies on the first write). */
 int w32_host_path(const char *win, char *out, size_t cap, int mode)
 {
     char full[2048], norm[2048];
@@ -96,6 +97,7 @@ int w32_host_path(const char *win, char *out, size_t cap, int mode)
     }
     if (!mode) { snprintf(out, cap, "%s", base); return 0; }
     struct stat st;
+    if (mode == 2) { snprintf(out, cap, "%s", ov); return 0; }   /* where a write would go (see File.cow); nothing copied yet */
     if (!stat(base, &st) && S_ISREG(st.st_mode)) copy_file(base, ov); else mkdirs(ov);
     snprintf(out, cap, "%s", ov);
     return 0;
@@ -252,7 +254,27 @@ IMPL(kernel32, GetTempFileNameA)
 }
 
 /* ---- file handles ---- */
-typedef struct File { int fd; char path[1024]; int is_dir; } File;
+/* cow: a game file opened for writing but not written yet. It is read where it is; the first write (WriteFile,
+ * SetEndOfFile, SetFileTime, a read-write mapping) copies it to this overlay path and continues there. The Sims 2 opens
+ * all its packages for writing, which otherwise copied every one of them (8.5 GB) into the data folder. */
+typedef struct File { int fd; char path[1024]; int is_dir; char cow[1024]; } File;
+static int cow_realize(File *f)
+{
+    if (!f->cow[0]) return 0;
+    off_t pos = lseek(f->fd, 0, SEEK_CUR);
+    if (!exists(f->cow) && copy_file(f->path, f->cow)) return -1;   /* (another handle may have copied it already) */
+    int nfd = open(f->cow, O_RDWR); if (nfd < 0) return -1;
+    dup2(nfd, f->fd); close(nfd); lseek(f->fd, pos, SEEK_SET);
+    if (getenv("W32_FILELOG")) fprintf(stderr, "w32: first write to %s: copied to %s\n", f->path, f->cow);
+    snprintf(f->path, sizeof f->path, "%s", f->cow); f->cow[0] = 0;
+    return 0;
+}
+int w32_file_write_fd(uint32_t h)                      /* the descriptor for a write (copied up first if need be); -1 if none */
+{
+    HObj *o = h_get(h, H_FILE); if (!o) return -1;
+    File *f = o->p; if (cow_realize(f)) return -1;
+    return f->fd;
+}
 uint32_t w32_file_handle_for_fd(int fd, const char *name)     /* a handle on a host descriptor (W32_STDIO) */
 {
     File *f = calloc(1, sizeof *f); f->fd = dup(fd); snprintf(f->path, sizeof f->path, "%s", name);
@@ -269,6 +291,20 @@ IMPL(kernel32, CreateFileA)
     /* only opens that write (or create/truncate) go to the data folder's overlay of the game folder; plain reads use
      * the file where it is, so the game's archives are never copied */
     int writes = (access & (0x40000000u | 0x10000000u)) || disp == 1 || disp == 2 || disp == 5;
+    if (writes && (disp == 3 || disp == 4) && !(flags & 0x02000000)) {   /* opened for writing, not created: copy when written */
+        char rd[2048], ov[2048];
+        if (!w32_host_path(GS(ARG(0)), rd, sizeof rd, 0) && !stat(rd, &st) && S_ISREG(st.st_mode) &&
+            !w32_host_path(GS(ARG(0)), ov, sizeof ov, 2) && strcmp(rd, ov)) {
+            int fd = open(rd, O_RDONLY);
+            if (fd >= 0) {
+                File *f = calloc(1, sizeof *f); f->fd = fd; snprintf(f->path, sizeof f->path, "%s", rd); snprintf(f->cow, sizeof f->cow, "%s", ov);
+                w32_set_last_error(c, disp == 4 ? 183 : 0);
+                uint32_t h = h_new(H_FILE, f);
+                if (getenv("W32_FILELOG")) fprintf(stderr, "w32: CreateFileA(%s) -> %x fd %d (%s, copied on first write)\n", GS(ARG(0)), h, fd, rd);
+                RET(h, 7);
+            }
+        }
+    }
     if (host(c, ARG(0), p, writes)) RET(0xffffffffu, 7);
     if (!writes && stat(p, &st) && disp == 4 && host(c, ARG(0), p, 1)) RET(0xffffffffu, 7);   /* OPEN_ALWAYS creating it */
     int exists = !stat(p, &st), isdir = exists && S_ISDIR(st.st_mode);
@@ -311,6 +347,7 @@ IMPL(kernel32, WriteFile)
 {
     HObj *o = h_get(ARG(0), H_FILE); uint32_t buf = ARG(1), n = ARG(2), wr = ARG(3);
     if (!o) { w32_set_last_error(c, 6); RET(0, 5); }
+    if (cow_realize(o->p)) { w32_set_last_error(c, 5); RET(0, 5); }
     ssize_t r = write(((File *)o->p)->fd, GP(buf), n);
     if (wr) rt_w32(G_MEM, wr, r > 0 ? (uint32_t)r : 0);
     RET(r >= 0, 5);
@@ -452,6 +489,7 @@ IMPL(kernel32, CreateFileMappingA)
     else {
         HObj *o = h_get(fh, H_FILE); struct stat st;
         if (!o) { free(m); w32_set_last_error(c, 6); RET(0, 6); }
+        if ((prot & 0x04) && cow_realize(o->p)) { free(m); w32_set_last_error(c, 5); RET(0, 6); }   /* PAGE_READWRITE writes back */
         m->fd = dup(((File *)o->p)->fd);
         if (m->fd < 0 || fstat(m->fd, &st)) { if (m->fd >= 0) close(m->fd); free(m); w32_set_last_error(c, 4); RET(0, 6); }   /* out of descriptors */
         m->size = lo ? lo : (uint32_t)st.st_size;
