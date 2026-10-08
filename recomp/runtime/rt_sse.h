@@ -77,6 +77,7 @@ static inline void sse_pshuflw(X128 *d, const X128 *s, int i)
 { X128 r = *s; for (int k = 0; k < 4; k++) r.w[k] = s->w[(i >> (2 * k)) & 3]; *d = r; }
 static inline void sse_pshufhw(X128 *d, const X128 *s, int i)
 { X128 r = *s; for (int k = 0; k < 4; k++) r.w[4 + k] = s->w[4 + ((i >> (2 * k)) & 3)]; *d = r; }
+static inline void sse_pshufw(X128 *d, const X128 *s, int i) { sse_pshuflw(d, s, i); }      /* MMX: the low 64 bits */
 static inline void sse_unpcklps(X128 *d, const X128 *s) { X128 r; r.d[0] = d->d[0]; r.d[1] = s->d[0]; r.d[2] = d->d[1]; r.d[3] = s->d[1]; *d = r; }
 static inline void sse_unpckhps(X128 *d, const X128 *s) { X128 r; r.d[0] = d->d[2]; r.d[1] = s->d[2]; r.d[2] = d->d[3]; r.d[3] = s->d[3]; *d = r; }
 static inline void sse_unpcklpd(X128 *d, const X128 *s) { d->q[1] = s->q[0]; }
@@ -127,9 +128,10 @@ static inline void sse_psadbw(X128 *d, const X128 *s)
 static inline int8_t  sat8(int v)   { return v > 127 ? 127 : v < -128 ? -128 : v; }
 static inline uint8_t satu8(int v)  { return v > 255 ? 255 : v < 0 ? 0 : v; }
 static inline int16_t sat16(int v)  { return v > 32767 ? 32767 : v < -32768 ? -32768 : v; }
-static inline void sse_packsswb(X128 *d, const X128 *s) { X128 r; for (int k = 0; k < 8; k++) { r.sb[k] = sat8(d->sw[k]); r.sb[8 + k] = sat8(s->sw[k]); } *d = r; }
-static inline void sse_packuswb(X128 *d, const X128 *s) { X128 r; for (int k = 0; k < 8; k++) { r.b[k] = satu8(d->sw[k]); r.b[8 + k] = satu8(s->sw[k]); } *d = r; }
-static inline void sse_packssdw(X128 *d, const X128 *s) { X128 r; for (int k = 0; k < 4; k++) { r.sw[k] = sat16(d->sd[k]); r.sw[4 + k] = sat16(s->sd[k]); } *d = r; }
+/* packs: each half of the result from one operand; width 16 (XMM) or 8 (MMX) */
+static inline void sse_packsswb(X128 *d, const X128 *s, int width) { X128 r = {{0}}; int n = width / 2; for (int k = 0; k < n; k++) { r.sb[k] = sat8(d->sw[k]); r.sb[n + k] = sat8(s->sw[k]); } *d = r; }
+static inline void sse_packuswb(X128 *d, const X128 *s, int width) { X128 r = {{0}}; int n = width / 2; for (int k = 0; k < n; k++) { r.b[k] = satu8(d->sw[k]); r.b[n + k] = satu8(s->sw[k]); } *d = r; }
+static inline void sse_packssdw(X128 *d, const X128 *s, int width) { X128 r = {{0}}; int n = width / 4; for (int k = 0; k < n; k++) { r.sw[k] = sat16(d->sd[k]); r.sw[n + k] = sat16(s->sd[k]); } *d = r; }
 /* shifts by a count (an immediate or the source's low 64 bits): counts past the lane width give 0 (sign for psra) */
 static inline void sse_psllw(X128 *d, uint64_t n) { for (int k = 0; k < 8; k++) d->w[k] = n > 15 ? 0 : (uint16_t)(d->w[k] << n); }
 static inline void sse_pslld(X128 *d, uint64_t n) { for (int k = 0; k < 4; k++) d->d[k] = n > 31 ? 0 : d->d[k] << n; }
@@ -157,6 +159,7 @@ static inline uint32_t sse_cvt_i32(double r) { return (r >= -2147483648.0 && r <
 static inline uint32_t sse_cvtsi(uint32_t mxcsr, double v) { return sse_cvt_i32(sse_round(mxcsr, v)); }
 static inline uint32_t sse_cvttsi(double v) { return sse_cvt_i32(trunc(v)); }
 static inline void sse_cvtdq2ps(X128 *d, const X128 *s) { X128 r; for (int k = 0; k < 4; k++) r.f[k] = (float)s->sd[k]; *d = r; }
+static inline void sse_cvtpi2ps(X128 *d, const X128 *s) { float a = (float)s->sd[0], b = (float)s->sd[1]; d->f[0] = a; d->f[1] = b; }   /* lanes 2, 3 kept */
 static inline void sse_cvtdq2pd(X128 *d, const X128 *s) { X128 r; r.x[0] = s->sd[0]; r.x[1] = s->sd[1]; *d = r; }
 static inline void sse_cvtps2pd(X128 *d, const X128 *s) { X128 r; r.x[0] = s->f[0]; r.x[1] = s->f[1]; *d = r; }
 static inline void sse_cvtpd2ps(X128 *d, const X128 *s) { X128 r = {{0}}; r.f[0] = (float)s->x[0]; r.f[1] = (float)s->x[1]; *d = r; }

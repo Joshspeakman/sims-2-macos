@@ -802,7 +802,7 @@ def main():
     ap.add_argument('--per-file', type=int, default=400)
     ap.add_argument('--imp-base', type=int, default=0, help='index of this image\'s first import in the global import table')
     ap.add_argument('--tag', default='', help='multi-image builds: file name prefix; tables come from tools/link_tables.py')
-    ap.add_argument('--game', default='ds2', choices=('ds2', 'fnv'), help='which executable: HOOKS/OVERRIDES are Dungeon Siege II addresses')
+    ap.add_argument('--game', default='ds2', choices=('ds2', 'fnv', 'sims2'), help='which executable: HOOKS/OVERRIDES are Dungeon Siege II addresses')
     a = ap.parse_args()
     L = Lifter(a.exe, a.analysis); L.jt_cache = {}
     L.imp_index = {va: a.imp_base + k for k, (va, _) in enumerate(L.imports)}
@@ -812,8 +812,8 @@ def main():
     L.overrides = {} if a.tag else dict(OVERRIDES)
     if not a.tag:
         from editions import identify, PROFILES
-        edition = 'fnv' if a.game == 'fnv' else identify(a.exe, prepared=True)
-        if edition == 'fnv':                                      # Fallout: New Vegas: none of the DS2 hooks apply
+        edition = a.game if a.game != 'ds2' else identify(a.exe, prepared=True)
+        if edition in ('fnv', 'sims2'):                           # Fallout: New Vegas, The Sims 2: none of the DS2 hooks apply
             L.hooks = {}; L.overrides = {}
         elif edition == 'broken-world':
             L.guest_flow = True

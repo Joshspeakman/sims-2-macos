@@ -27,12 +27,13 @@ BIN = {'unpcklps', 'unpckhps', 'unpcklpd', 'unpckhpd', 'movhlps', 'movlhps',
        'paddb', 'paddw', 'paddd', 'paddq', 'psubb', 'psubw', 'psubd', 'psubq', 'paddusb', 'paddusw', 'psubusb',
        'psubusw', 'paddsw', 'psubsw', 'pmaxsw', 'pminsw', 'pmaxub', 'pminub', 'pavgb', 'pavgw', 'pcmpeqb', 'pcmpeqw',
        'pcmpeqd', 'pcmpgtb', 'pcmpgtw', 'pcmpgtd', 'pmullw', 'pmulhw', 'pmulhuw', 'pmuludq', 'pmaddwd', 'psadbw',
-       'packsswb', 'packuswb', 'packssdw', 'cvtdq2ps', 'cvtdq2pd', 'cvtps2pd', 'cvtpd2ps', 'cvtss2sd', 'cvtsd2ss',
-       'cvttps2dq', 'cvttpd2dq'}
+       'cvtdq2ps', 'cvtdq2pd', 'cvtps2pd', 'cvtpd2ps', 'cvtss2sd', 'cvtsd2ss',
+       'cvttps2dq', 'cvttpd2dq', 'cvtpi2ps'}
 BIN_MX = {'cvtps2dq', 'cvtpd2dq'}                     # rounding per MXCSR
-BIN_IMM = {'shufps', 'shufpd', 'pshufd', 'pshuflw', 'pshufhw'}
+BIN_IMM = {'shufps', 'shufpd', 'pshufd', 'pshuflw', 'pshufhw', 'pshufw'}
 SHIFT = {'psllw', 'pslld', 'psllq', 'psrlw', 'psrld', 'psrlq', 'psraw', 'psrad', 'pslldq', 'psrldq'}
 PUNPCK = re.compile(r'punpck([lh])(bw|wd|dq|qdq)$')
+PACK = {'packsswb', 'packuswb', 'packssdw'}             # take the register width: MMX packs 64 bits
 MOVE16 = {'movaps', 'movups', 'movapd', 'movupd', 'movdqa', 'movdqu', 'movntps', 'movntpd', 'movntdq', 'lddqu'}
 
 def emit(L, i, mn):
@@ -72,6 +73,7 @@ def emit(L, i, mn):
     if mn in BIN: return op2('sse_' + mn)
     if mn in BIN_MX: return op2('sse_' + mn, ', c->mxcsr')
     if mn in BIN_IMM: return op2('sse_' + mn, ', %d' % (o[2].imm & 0xff))
+    if mn in PACK: return op2('sse_' + mn, ', %d' % (8 if is_mm(L, i, o[0]) else 16))
     m = PUNPCK.match(mn)
     if m:
         width = 8 if is_mm(L, i, o[0]) else 16
