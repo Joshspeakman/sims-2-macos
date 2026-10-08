@@ -33,6 +33,9 @@ tries anyway. Once there are hooks at fixed addresses, a new build means a new a
 
 Build the C (Mac or Linux):
 
+The analysis peaks at about 26 GB of memory (`analyze.py` caches a decoded instruction per address). That is tight on
+a 32 GB Mac. If it swaps, run the analysis on a bigger machine, or bound that cache.
+
 ```sh
 recomp/build_sims2.sh "/path/to/steamapps/common/The Sims 2 Legacy Collection"     # -> recomp/work/sims2/
 ```
@@ -89,6 +92,9 @@ names itself.
    title, logs, and the host app strings (`host/main.m`, `launcher.m`). `tools/build_runtime.sh` gets a `sims2`
    edition. The runtime loader must map the **unwrapped** executable (the decrypted `.text` holds jump tables and
    constants the code reads), so the app ships `work/sims2/Sims2EP9.exe`, not the Steam file.
+   `install.sh` and the launch window still build and install Fallout: New Vegas. On the Mac, "build from the Steam
+   install" ends up as `install.sh --game-dir "<…>/The Sims 2 Legacy Collection"` running `build_sims2.sh`, then
+   linking with the Sims 2 runtime profile and packaging the app.
 2. **Imports not implemented yet: 175 of 438** (`recomp/tools/import_gap.py`):
    - KERNEL32 (55): the newer CRT's W-variants and Vista+ calls (`InitializeCriticalSectionEx`,
      `AcquireSRWLockExclusive`/`SleepConditionVariableSRW`/`WakeAllConditionVariable`, `InitializeSListHead`,
