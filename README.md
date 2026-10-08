@@ -1,7 +1,7 @@
-# Fallout: New Vegas — native Linux port
+# Fallout: New Vegas — native Mac (Metal) and Linux port
 
-Fallout: New Vegas, statically recompiled from your own copy into native x86-64 Linux code. No Wine, no Proton, no
-emulator. It's built on the recompiler and Windows runtime of the
+Fallout: New Vegas, statically recompiled from your own copy into native code: arm64 with Metal on Apple Silicon Macs,
+x86-64 with OpenGL on Linux. No Wine, no Proton, no Rosetta, no emulator. It's built on the recompiler and Windows runtime of the
 [Dungeon Siege II Linux port](https://github.com/Joshspeakman/dungeon-siege-2-linux) (whose README is now
 [docs/DS2-LINUX-README.md](docs/DS2-LINUX-README.md)). Nothing from the game is in this repository: the build
 regenerates everything locally from your files, and the game folder is only read.
@@ -18,7 +18,38 @@ under Proton: both are given the same inputs and screenshots are taken at the sa
 
 ![3440×1440 ultrawide](docs/screenshots/ultrawide-3440x1440.jpg)
 
-## What works
+## On the Mac
+
+**State: runs, in testing (2026-10-07), on the `metal` branch.** Tested on a 14-inch MacBook Pro (M1 Pro, 32 GB):
+
+- **Rendering.** The game's own shaders are translated to Metal (MojoShader's Metal profile, patched for Direct3D's
+  semantics: half-pixel offset, alpha test, zero-safe maths); all 1,745 unique shader programs in the game compile.
+  Goodsprings, the Prospector Saloon, Doc Mitchell's house, night and day, the Pip-Boy, VATS and the kill cam all
+  render as on Linux; a 12-frame burst shows no flicker.
+- **Performance.** 60 fps (the original's rate) everywhere tried at 1280×720; uncapped, Doc Mitchell's house runs at
+  about 100 fps and lighter scenes at 120–130 fps.
+- **Threads.** The Mac's CPU orders memory more loosely than x86, and the game's own locks rely on x86's order, so
+  the build gives guest memory accesses x86's ordering (`RT_TSO` in `recomp/runtime/rt.h`; the thread's own stack is
+  left plain, so it costs little), and every `lock`-prefixed instruction is a real hardware atomic.
+- **The launch window** shows the game's title and loading-screen art (read from your own archives at install time)
+  and sets the resolution, the notch, the frame rate and updates.
+
+Install (Apple Silicon, the Xcode command line tools and python3):
+
+```sh
+./install.sh --game-dir "/path/to/Fallout New Vegas"          # the folder with FalloutNV.exe and Data
+./install.sh --gog-installer setup_fallout_new_vegas_*.exe      # or the GOG offline installer (brew install innoextract)
+./install.sh --nightly                                          # "Fallout New Vegas Nightly.app": the nightly branch
+```
+
+It builds for about ten minutes and installs **Fallout New Vegas Native.app** in `~/Applications`. Saves and
+settings go to `~/Games/FalloutNVNative`; the game folder is only read.
+
+Not yet checked on the Mac: sound (it uses the same DirectSound/Core Audio path as the other ports, but every test so
+far ran muted), long play sessions, the DLC, and full-screen play at the display's own resolution. NaNs made by SSE
+maths come out positive instead of negative (as arm64 makes them); nothing is known to depend on that.
+
+## What works on Linux
 
 Tested on CachyOS with an RTX 3080 Ti:
 
@@ -58,11 +89,10 @@ In game, F11 toggles full screen and F12 releases the mouse.
 - After several `coc` console teleports in a row, the third-person camera can face a different way than in the
   original. The player's position and heading are correct.
 - Not yet verified: the VATS kill cam, the ending slides, and the DLC worldspaces.
-- Linux only for now. The Mac (Metal) renderer doesn't yet have this port's newer draw commands.
 
 The full status and the history of the fixes are in [docs/FNV-PORT.md](docs/FNV-PORT.md).
 
-## Build and run
+## Build and run (Linux)
 
 Needs the GOG offline installer for Fallout: New Vegas 1.4.0.525 (installer 12010), extracted with `innoextract`, and:
 
@@ -107,6 +137,9 @@ recomp/build_fnv.sh …` relinks after runtime-only changes.
 - `recomp/runtime/win32`: the Windows API the game uses, including what FNV added: INI files, DirectInput 8
   (`dinput8.c`), DirectShow music (`dshow.c`), DirectSound 8 with 3D positioning (`dsound.c`), D3DX maths
   (`d3dx9_math.c`), and Direct3D 9 with the game's own shaders (`d3d9.c`, `d3d9_shader.c`).
+- `src/renderer/renderer.m`: the Metal consumer of the D3D command stream on the Mac (the game's shaders as Metal
+  functions, kept vertex buffers, occlusion queries, float render targets). `recomp/host/main.m` is the Mac host and
+  `recomp/host/launcher.m` its launch window.
 - `src/renderer/linux/renderer.c`: the OpenGL consumer of the D3D command stream. It compiles the translated shaders,
   keeps vertex buffers on the GPU, and handles occlusion queries, float render targets, MSAA, FXAA and the gamma
   ramp.

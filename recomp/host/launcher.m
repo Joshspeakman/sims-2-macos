@@ -2,6 +2,7 @@
 // Its look comes from the game itself, read at launch from the player's own Resources/Objects.ds2res (the main menu's
 // logo, red backdrop and wooden menu bars) and set in Copperplate. Nothing from the game is stored in this project;
 // without the archive the window falls back to plain colours.
+#include "../runtime/edition.h"
 #import <AppKit/AppKit.h>
 #import <Metal/Metal.h>
 #import <ImageIO/ImageIO.h>
@@ -122,7 +123,7 @@ enum { HIT_NONE = -1, HIT_PLAY = 100, HIT_QUIT = 101, HIT_LAB = 102 };   /* rows
 {
     if (NSPointInRect(p, self.playRect)) return HIT_PLAY;
     if (NSPointInRect(p, self.quitRect)) return HIT_QUIT;
-    if (NSPointInRect(p, self.labRect)) return HIT_LAB;
+    if (self.onLab && NSPointInRect(p, self.labRect)) return HIT_LAB;
     for (NSInteger k = 0; k < (NSInteger)self.rows.count; k++) {
         if (NSPointInRect(p, [self arrow:k right:NO])) return 10 * k;
         if (NSPointInRect(p, [self arrow:k right:YES])) return 10 * k + 2;
@@ -269,7 +270,7 @@ static void draw_text(NSString *s, NSFont *f, NSColor *c, NSRect r, NSTextAlignm
     }
     if (self.note.length) draw_text(self.note, cp(11, NO), dim(), NSMakeRect(54, NSMaxY(panel) + 10, b.size.width - 108, 30), NSTextAlignmentCenter, nil);
     [self drawButton:self.quitRect title:@"QUIT" code:HIT_QUIT primary:NO];
-    [self drawButton:self.labRect title:@"TEST LAB" code:HIT_LAB primary:NO];
+    if (self.onLab) [self drawButton:self.labRect title:@"TEST LAB" code:HIT_LAB primary:NO];
     [self drawButton:self.playRect title:@"PLAY" code:HIT_PLAY primary:YES];
 }
 @end
@@ -330,6 +331,20 @@ static NSArray<NSDictionary *> *distance_choices(void)
              @{@"value": @"250", @"label": @"Horizon", @"note": @"250%; heavier in large outdoor areas"},
              @{@"value": @"300", @"label": @"Maximum", @"note": @"300%; may slow down in the biggest vistas"}];
 }
+#ifdef FNV_EDITION
+/* Fallout: New Vegas: 60 as the game was made for; any other rate gets Havok's step to match (the host writes
+ * Fallout.ini's [HAVOK] fMaxTime = 1 / rate), as the Linux port's launcher does */
+static NSArray<NSDictionary *> *framerate_choices(void)
+{
+    NSInteger hz = NSScreen.mainScreen.maximumFramesPerSecond; if (hz <= 0) hz = 60;
+    NSMutableArray *a = [NSMutableArray arrayWithObject:@{@"value": @"60", @"label": @"60 FPS", @"note": @"The rate the game was made for (recommended)"}];
+    if (hz > 60) [a addObject:@{@"value": [NSString stringWithFormat:@"%ld", (long)hz], @"label": [NSString stringWithFormat:@"%ld FPS", (long)hz], @"note": @"The display's refresh rate; physics stepped to match"}];
+    if (hz > 90) [a addObject:@{@"value": @"90", @"label": @"90 FPS", @"note": @"Smoother; physics stepped to match"}];
+    [a addObject:@{@"value": @"30", @"label": @"30 FPS", @"note": @"Saves battery"}];
+    [a addObject:@{@"value": @"unlimited", @"label": @"Unlimited", @"note": @"No cap and no vertical sync (may tear)"}];
+    return a;
+}
+#else
 static NSArray<NSDictionary *> *framerate_choices(void)
 {
     NSInteger hz = NSScreen.mainScreen.maximumFramesPerSecond; if (hz <= 0) hz = 60;
@@ -341,6 +356,7 @@ static NSArray<NSDictionary *> *framerate_choices(void)
     [a addObject:@{@"value": @"unlimited", @"label": @"Unlimited", @"note": @"No cap and no vertical sync (may tear)"}];
     return a;
 }
+#endif
 /* ---- the CD key for online play ----
  * The game presents a "DoubleHash" of the player's product key to the GameSpy (now OpenSpy) lobby. The retail
  * installer derived it from the key; digital releases never ran that installer. As its Setup.exe does: the 25
@@ -546,7 +562,12 @@ int ds_launcher_run(const char *game_dir, const char *data_dir)
     DSRow *online = [DSRow new]; online.title = @"Online"; online.choices = cdkey_choice(data);
     __weak DSRow *wo = online;
     online.activate = ^{ if (cdkey_panel(data)) wo.choices = cdkey_choice(data); };
+#ifdef FNV_EDITION
+    NSArray<DSRow *> *rows = notch_height() > 0 ? @[res, notch, fps, upd] : @[res, fps, upd];   /* (no view distance, interface size, CD key or Test Lab) */
+    (void)wo;
+#else
     NSArray<DSRow *> *rows = notch_height() > 0 ? @[res, ui, notch, dist, fps, online, upd] : @[res, ui, dist, fps, online, upd];
+#endif
     DSLaunchView *v = [[DSLaunchView alloc] initWithFrame:NSMakeRect(0, 0, 780, 700 + 74 * (NSInteger)(rows.count - 5))];
     v.rows = rows; v.hover = v.pressed = HIT_NONE;
     __block BOOL wasBelow = below();
@@ -591,6 +612,17 @@ int ds_launcher_run(const char *game_dir, const char *data_dir)
         }
         check();
     };
+#ifdef FNV_EDITION
+    {   /* the game's own art, decoded from its archives at install time (tools/fnv_art.py): the loading screen's desk, the title */
+        NSString *art = [data stringByAppendingPathComponent:@"art"];
+        NSImage *desk = [[NSImage alloc] initWithContentsOfFile:[art stringByAppendingPathComponent:@"backdrop.png"]];
+        NSImage *title = [[NSImage alloc] initWithContentsOfFile:[art stringByAppendingPathComponent:@"title.png"]];
+        if (desk.size.width > 100) v.stone = desk;
+        if (title.size.width > 100) v.logo = title;
+    }
+    if (0)
+#endif
+    {
     NSString *tank = [@(game_dir) stringByAppendingPathComponent:@"Resources/Objects.ds2res"], *m = @"art/bitmaps/gui/front_end/main/b_gui_fe_mn_";
     NSImage *(^art)(NSString *, BOOL) = ^NSImage *(NSString *name, BOOL trim) {
         CGImageRef img = dds_image(tank_read(tank, [[m stringByAppendingString:name] stringByAppendingString:@".dds"]));
@@ -607,6 +639,7 @@ int ds_launcher_run(const char *game_dir, const char *data_dir)
     }
     v.logo = art(@"logo", YES);
     v.wood = art(@"menubar-up", YES); v.woodHover = art(@"menubar-over", YES); v.woodDown = art(@"menubar-down", YES);
+    }
     if (shot) {   /* development: the window as an image */
         NSBitmapImageRep *rep = [v bitmapImageRepForCachingDisplayInRect:v.bounds]; [v cacheDisplayInRect:v.bounds toBitmapImageRep:rep];
         [[rep representationUsingType:NSBitmapImageFileTypePNG properties:@{}] writeToFile:@(shot) atomically:YES];
@@ -616,11 +649,12 @@ int ds_launcher_run(const char *game_dir, const char *data_dir)
     NSWindow *w = [[NSWindow alloc] initWithContentRect:v.frame styleMask:NSWindowStyleMaskTitled | NSWindowStyleMaskClosable | NSWindowStyleMaskFullSizeContentView
                                                 backing:NSBackingStoreBuffered defer:NO];
     w.releasedWhenClosed = NO;   /* ARC owns it: AppKit's default would release it again when the close button closes it (a crash on exit) */
-    w.titlebarAppearsTransparent = YES; w.titleVisibility = NSWindowTitleHidden; w.movableByWindowBackground = YES; w.title = @"Dungeon Siege II";
+    w.titlebarAppearsTransparent = YES; w.titleVisibility = NSWindowTitleHidden; w.movableByWindowBackground = YES; w.title = @DS2_TITLE;
     w.backgroundColor = NSColor.blackColor; w.contentView = v; [w center]; [w makeFirstResponder:v];
     __block int result = 0;
     v.onPlay = ^{ result = 1; [NSApp stopModal]; };
     v.onQuit = ^{ result = 0; [NSApp stopModal]; };
+#ifndef FNV_EDITION
     v.onLab = ^{   /* 2: the Test Lab with its saves as they are; 3: fresh copies of the single-player saves first */
         NSString *saves = [data stringByAppendingPathComponent:@"test-lab/drive_c/Users/player/Documents/My Games/Dungeon Siege 2/Save/SinglePlayer"];
         BOOL have = [NSFileManager.defaultManager fileExistsAtPath:saves];
@@ -633,6 +667,7 @@ int ds_launcher_run(const char *game_dir, const char *data_dir)
         if (r == NSAlertFirstButtonReturn) result = have ? 2 : 3; else if (have && r == NSAlertSecondButtonReturn) result = 3; else return;
         [NSApp stopModal];
     };
+#endif
     [[NSNotificationCenter defaultCenter] addObserverForName:NSWindowWillCloseNotification object:w queue:nil usingBlock:^(NSNotification *n) { (void)n; [NSApp stopModal]; }];
     [NSApp activateIgnoringOtherApps:YES];
     [w makeKeyAndOrderFront:nil];
