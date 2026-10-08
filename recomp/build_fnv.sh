@@ -14,6 +14,8 @@ PY="$HERE/.venv/bin/python"
 mkdir -p "$OUT"; OUT="$(cd "$OUT" && pwd)"
 GAME="$(cd "$(dirname "$EXE")" && pwd)"
 python3 "$HERE/tools/compiler_compat.py" "${CC:-clang}" "$OUT/compiler-flags.txt"
+# arm64: x86's memory ordering for the game's threads (runtime/rt.h RT_TSO); x86-64 has it natively
+if [[ "$(uname -m)" == arm64 ]]; then printf '%s -DRT_TSO\n' "$(head -1 "$OUT/compiler-flags.txt")" > "$OUT/compiler-flags.txt.new" && mv "$OUT/compiler-flags.txt.new" "$OUT/compiler-flags.txt"; fi
 cp "$EXE" "$OUT/FalloutNV.exe"; EXE="$OUT/FalloutNV.exe"
 if [[ -n "${FNV_RELINK:-}" && -d "$OUT/obj" ]]; then            # runtime changes only: keep the lifted objects
   echo "== runtime and link (FNV_RELINK)"; exec "$HERE/tools/build_runtime.sh" "$OUT"

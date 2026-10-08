@@ -45,16 +45,37 @@ typedef struct Ctx {
     uint64_t mm[8];                            /* MMX registers (not aliased onto the x87 stack in this model) */
 } Ctx;
 
-/* ---- memory (memcpy: guest accesses may be unaligned) ---- */
+/* ---- memory (memcpy: guest accesses may be unaligned) ----
+ * RT_TSO (Fallout: New Vegas on arm64): x86's memory ordering for the game's threads. x86 keeps loads and stores in
+ * program order as other cores see them (TSO); arm64 doesn't. The game's own spin locks are taken with lock cmpxchg
+ * but released with a plain mov [lock], 0, and on arm64 that store can become visible before the writes made under the
+ * lock: another thread then takes the lock and reads half-updated data. So 8/16/32-bit integer loads are acquires and
+ * stores releases (LDAPR/STLR when aligned; an unaligned access is copied with a fence), which is where locks, flags and
+ * pointers live. Float and 64-bit accesses stay plain: they are ordered by the integer accesses around them. */
+#ifdef RT_TSO
+#define RT_ALD(T, p) __atomic_load_n((const T *)(p), __ATOMIC_ACQUIRE)
+#define RT_AST(T, p, v) __atomic_store_n((T *)(p), (v), __ATOMIC_RELEASE)
+static inline uint32_t rt_r8 (const uint8_t *M, uint32_t a) { return RT_ALD(uint8_t, M + a); }
+static inline uint32_t rt_r16(const uint8_t *M, uint32_t a) { const uint8_t *p = M + a; if (!((uintptr_t)p & 1)) return RT_ALD(uint16_t, p);
+                                                               uint16_t v; memcpy(&v, p, 2); __atomic_thread_fence(__ATOMIC_ACQUIRE); return v; }
+static inline uint32_t rt_r32(const uint8_t *M, uint32_t a) { const uint8_t *p = M + a; if (!((uintptr_t)p & 3)) return RT_ALD(uint32_t, p);
+                                                               uint32_t v; memcpy(&v, p, 4); __atomic_thread_fence(__ATOMIC_ACQUIRE); return v; }
+static inline void rt_w8 (uint8_t *M, uint32_t a, uint32_t v) { RT_AST(uint8_t, M + a, (uint8_t)v); }
+static inline void rt_w16(uint8_t *M, uint32_t a, uint32_t v) { uint8_t *p = M + a; uint16_t x = (uint16_t)v; if (!((uintptr_t)p & 1)) { RT_AST(uint16_t, p, x); return; }
+                                                                 __atomic_thread_fence(__ATOMIC_RELEASE); memcpy(p, &x, 2); }
+static inline void rt_w32(uint8_t *M, uint32_t a, uint32_t v) { uint8_t *p = M + a; if (!((uintptr_t)p & 3)) { RT_AST(uint32_t, p, v); return; }
+                                                                 __atomic_thread_fence(__ATOMIC_RELEASE); memcpy(p, &v, 4); }
+#else
 static inline uint32_t rt_r8 (const uint8_t *M, uint32_t a) { return M[a]; }
 static inline uint32_t rt_r16(const uint8_t *M, uint32_t a) { uint16_t v; memcpy(&v, M + a, 2); return v; }
 static inline uint32_t rt_r32(const uint8_t *M, uint32_t a) { uint32_t v; memcpy(&v, M + a, 4); return v; }
-static inline uint64_t rt_r64(const uint8_t *M, uint32_t a) { uint64_t v; memcpy(&v, M + a, 8); return v; }
-static inline float    rt_rf32(const uint8_t *M, uint32_t a) { float v; memcpy(&v, M + a, 4); return v; }
-static inline double   rt_rf64(const uint8_t *M, uint32_t a) { double v; memcpy(&v, M + a, 8); return v; }
 static inline void rt_w8 (uint8_t *M, uint32_t a, uint32_t v) { M[a] = (uint8_t)v; }
 static inline void rt_w16(uint8_t *M, uint32_t a, uint32_t v) { uint16_t x = (uint16_t)v; memcpy(M + a, &x, 2); }
 static inline void rt_w32(uint8_t *M, uint32_t a, uint32_t v) { memcpy(M + a, &v, 4); }
+#endif
+static inline uint64_t rt_r64(const uint8_t *M, uint32_t a) { uint64_t v; memcpy(&v, M + a, 8); return v; }
+static inline float    rt_rf32(const uint8_t *M, uint32_t a) { float v; memcpy(&v, M + a, 4); return v; }
+static inline double   rt_rf64(const uint8_t *M, uint32_t a) { double v; memcpy(&v, M + a, 8); return v; }
 static inline void rt_w64(uint8_t *M, uint32_t a, uint64_t v) { memcpy(M + a, &v, 8); }
 static inline void rt_wf32(uint8_t *M, uint32_t a, float v) { memcpy(M + a, &v, 4); }
 static inline void rt_wf64(uint8_t *M, uint32_t a, double v) { memcpy(M + a, &v, 8); }
@@ -70,6 +91,15 @@ static inline void rt_wf64(uint8_t *M, uint32_t a, double v) { memcpy(M + a, &v,
 #define W64(a, v)  rt_w64(M, (uint32_t)(a), (v))
 #define WF32(a, v) rt_wf32(M, (uint32_t)(a), (v))
 #define WF64(a, v) rt_wf64(M, (uint32_t)(a), (v))
+/* this thread's own stack (lift.py stack()): plain accesses even under RT_TSO */
+static inline uint32_t rt_r32s(const uint8_t *M, uint32_t a) { uint32_t v; memcpy(&v, M + a, 4); return v; }
+static inline void rt_w32s(uint8_t *M, uint32_t a, uint32_t v) { memcpy(M + a, &v, 4); }
+#define R8S(a)     ((uint32_t)M[(uint32_t)(a)])
+#define R16S(a)    ({ uint16_t v_; memcpy(&v_, M + (uint32_t)(a), 2); (uint32_t)v_; })
+#define R32S(a)    rt_r32s(M, (uint32_t)(a))
+#define W8S(a, v)  (M[(uint32_t)(a)] = (uint8_t)(v))
+#define W16S(a, v) ({ uint16_t v_ = (uint16_t)(v); memcpy(M + (uint32_t)(a), &v_, 2); })
+#define W32S(a, v) rt_w32s(M, (uint32_t)(a), (v))
 
 /* ---- registers in locals ---- */
 #define REGS uint8_t *const M = G_MEM; \
@@ -293,4 +323,45 @@ extern int rt_cpuid_sse2;                     /* 1: cpuid reports a family 6 CPU
 void     rt_bus_lock(void);
 void     rt_bus_unlock(void);
 void     rt_exception(Ctx *c, uint32_t pc, uint32_t code);   /* raise a CPU exception (SEH); returns if a handler continues */
+
+/* lock add/sub/and/or/xor/xadd/inc/dec, xchg and cmpxchg on memory: hardware atomics, so they exclude one another and
+ * kernel32's Interlocked* (a refcount decremented by lock xadd on one thread and incremented by lock inc on another
+ * must not lose either). An operand that isn't naturally aligned (arm64 faults on those) goes under the bus lock. */
+enum { RT_LADD, RT_LAND, RT_LOR, RT_LXOR };
+#define RT_LOCK_OP(T, p, op, v) (op == RT_LADD ? __atomic_fetch_add((T *)(p), (T)(v), __ATOMIC_SEQ_CST) : \
+                                 op == RT_LAND ? __atomic_fetch_and((T *)(p), (T)(v), __ATOMIC_SEQ_CST) : \
+                                 op == RT_LOR  ? __atomic_fetch_or ((T *)(p), (T)(v), __ATOMIC_SEQ_CST) : \
+                                                 __atomic_fetch_xor((T *)(p), (T)(v), __ATOMIC_SEQ_CST))
+/* the old value; n = operand bytes (1, 2, 4) */
+static inline uint32_t rt_lock_rmw(uint8_t *M, uint32_t a, int n, int op, uint32_t v)
+{
+    uint8_t *p = M + a;
+    if (!((uintptr_t)p & (uintptr_t)(n - 1)))
+        return n == 1 ? RT_LOCK_OP(uint8_t, p, op, v) : n == 2 ? RT_LOCK_OP(uint16_t, p, op, v) : RT_LOCK_OP(uint32_t, p, op, v);
+    rt_bus_lock();
+    uint32_t old = n == 2 ? rt_r16(M, a) : rt_r32(M, a), r = op == RT_LADD ? old + v : op == RT_LAND ? old & v : op == RT_LOR ? old | v : old ^ v;
+    if (n == 2) rt_w16(M, a, r); else rt_w32(M, a, r);
+    rt_bus_unlock();
+    return n == 2 ? old & 0xffffu : old;
+}
+static inline uint32_t rt_lock_xchg(uint8_t *M, uint32_t a, int n, uint32_t v)
+{
+    uint8_t *p = M + a;
+    if (!((uintptr_t)p & (uintptr_t)(n - 1)))
+        return n == 1 ? __atomic_exchange_n(p, (uint8_t)v, __ATOMIC_SEQ_CST) : n == 2 ? __atomic_exchange_n((uint16_t *)p, (uint16_t)v, __ATOMIC_SEQ_CST)
+                      : __atomic_exchange_n((uint32_t *)p, v, __ATOMIC_SEQ_CST);
+    rt_bus_lock();
+    uint32_t old = n == 2 ? rt_r16(M, a) : rt_r32(M, a);
+    if (n == 2) rt_w16(M, a, v); else rt_w32(M, a, v);
+    rt_bus_unlock();
+    return old;
+}
+/* 32-bit compare-exchange: the value found ([a] = v if it was exp) */
+static inline uint32_t rt_lock_cas(uint8_t *M, uint32_t a, uint32_t exp, uint32_t v)
+{
+    uint8_t *p = M + a; uint32_t old = exp;
+    if (!((uintptr_t)p & 3)) { (void)__atomic_compare_exchange_n((uint32_t *)p, &old, v, 0, __ATOMIC_SEQ_CST, __ATOMIC_SEQ_CST); return old; }
+    rt_bus_lock(); old = rt_r32(M, a); if (old == exp) rt_w32(M, a, v); rt_bus_unlock();
+    return old;
+}
 #endif
