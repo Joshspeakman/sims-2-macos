@@ -54,8 +54,8 @@ IMPL(kernel32, CompareStringW)
 }
 IMPL(kernel32, SetEndOfFile)
 {
-    extern int w32_file_fd(uint32_t h);
-    int fd = w32_file_fd(ARG(0)); if (fd < 0) { w32_set_last_error(c, 6); RET(0, 1); }
+    extern int w32_file_write_fd(uint32_t h);
+    int fd = w32_file_write_fd(ARG(0)); if (fd < 0) { w32_set_last_error(c, 6); RET(0, 1); }
     off_t at = lseek(fd, 0, SEEK_CUR); RET(ftruncate(fd, at) == 0, 1);
 }
 /* OpenFile: only the existence check (OF_EXIST) and plain opens via CreateFileA's path mapping */
