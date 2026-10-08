@@ -89,6 +89,9 @@ def run(trials):
     stats = collections.Counter(); fails = collections.defaultdict(list)
     for va in vas:
         i = L.ins(va); mn = i.mnemonic.split(' ')[-1]
+        # data decoded as code: an absolute address in the guest NULL page faults natively too (no handler here)
+        if any(o.type == X.X86_OP_MEM and not o.mem.base and not o.mem.index and (o.mem.disp & 0xffffffff) < 0x10000 for o in i.operands):
+            stats['null-page absolute'] += 1; continue
         for t in range(trials):
             H.reset()
             regs = {r: rv() for r in REGS}
