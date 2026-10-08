@@ -375,7 +375,6 @@ IMPL(gdi32, GetClipBox)
     int32_t r[4] = {0, 0, w32_screen_w, w32_screen_h}; memcpy(GP(ARG(1)), r, 16); RET(2, 2);   /* SIMPLEREGION */
 }
 IMPL(gdi32, GetDCOrgEx) { rt_w32(G_MEM, ARG(1), 0); rt_w32(G_MEM, ARG(1) + 4, 0); RET(1, 2); }
-IMPL(gdi32, GetObjectA) { RET(0, 3); }
 IMPL(gdi32, SetDIBits) { RET(0, 7); }
 
 /* ---- shell32: special folders ---- */
@@ -517,3 +516,22 @@ IMPL(steam_api, SteamInternal_ContextInit)
 
 /* ---- Winsock 2 ordinal 112 (the others are WSOCK32's, winsock.c) ---- */
 IMPL(wsock32, ord112) { w32_set_last_error(c, ARG(0)); RET(0, 1); }                  /* WSASetLastError */
+
+/* ---- d3d9!Direct3DShaderValidatorCreate9 (by GetProcAddress): the statically linked D3DX shader assembler checks
+ * each instruction with it, and uses it even when it isn't found (a null object). This one accepts everything. ---- */
+static void sv_qi(Ctx *c) { RET(0x80004002u, 3); }
+static void sv_addref(Ctx *c) { RET(1, 1); }
+static void sv_begin(Ctx *c) { RET(0, 4); }                                           /* (callback, context, flags) */
+static void sv_instruction(Ctx *c) { RET(0, 5); }                                     /* (file, line, tokens, count) */
+static void sv_end(Ctx *c) { RET(0, 1); }
+IMPL(d3d9, Direct3DShaderValidatorCreate9)
+{
+    static uint32_t obj;
+    if (!obj) {
+        void (*fns[])(Ctx *) = {sv_qi, sv_addref, sv_addref, sv_begin, sv_instruction, sv_end};
+        uint32_t vt = heap_alloc(w32_process_heap, 8, 4 * 6); obj = heap_alloc(w32_process_heap, 8, 8);
+        for (int k = 0; k < 6; k++) { char nm[48]; snprintf(nm, sizeof nm, "d3d9!IDirect3DShaderValidator9.%d", k); rt_w32(G_MEM, vt + 4u * (uint32_t)k, w32_thunk_register(nm, fns[k])); }
+        rt_w32(G_MEM, obj, vt);
+    }
+    RET(obj, 0);
+}

@@ -180,7 +180,7 @@ class Lifter:
         table = op.mem.disp & 0xffffffff; idx = i.reg_name(op.mem.index); n = None
         # look back (in address order) for "cmp idx, N" + ja, or a byte-table "movzx idx, byte [x + table2]"
         va = i.address; back = []
-        p = self.prev_insns(i.address, 8)
+        p = self.known_prev(insns, i.address, 8) or self.prev_insns(i.address, 8)
         for q in reversed(p):
             if q.mnemonic == 'cmp' and q.operands[0].type == X.X86_OP_REG and q.operands[1].type == X.X86_OP_IMM \
                     and q.reg_name(q.operands[0].reg) == idx:
@@ -225,6 +225,14 @@ class Lifter:
         tg = [self.pe.u32(table + 4 * k) for k in range(n)]
         tg = [t for t in tg if t is not None and self.TLO <= t < self.THI]
         self.jt_cache[i.address] = (table, tg); return self.jt_cache[i.address]
+    def known_prev(self, insns, va, n):
+        # the instructions before va as the function's recursive decode found them (a linear decode backwards can start
+        # inside an instruction and resynchronise just before va, missing the switch's bound: 0xa058bd7b in The Sims 2)
+        if not insns: return []
+        by_end = {a + q.size: q for a, q in insns.items()}
+        chain = []; p = va
+        while len(chain) < n and p in by_end: q = by_end[p]; chain.insert(0, q); p = q.address
+        return chain if len(chain) >= 3 else []
     def prev_insns(self, va, n):
         # linear decode backwards is ambiguous; decode forward from a little before and keep the chain ending at va
         for back in range(4 * n, 6 * n * 8, 1):

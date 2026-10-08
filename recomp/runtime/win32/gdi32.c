@@ -17,6 +17,8 @@ enum { G_DC = 1, G_BITMAP, G_FONT, G_BRUSH, G_PEN, G_STOCK };
 typedef struct GObj {
     int type;
     /* bitmap */ int bw, bh; uint32_t *px;            /* 0x00RRGGBB per pixel, top-down */
+    /* DIB section: the pixels are in guest memory, where the game writes them (px unused) */
+    uint32_t dib, dib_stride, dib_bpp; int dib_topdown;
     /* font */   HostFont font; int height, weight, italic; char face[64]; int ascent, descent, internal_leading, avg_w, max_w;
     /* dc */     uint32_t bitmap, fontsel, text_color, bk_color; int bk_mode;
     uint32_t color;
@@ -54,7 +56,7 @@ IMPL(gdi32, DeleteObject)
 {
     uint32_t h = ARG(0), k = (h - GBASE) / 4; GObj *o = G(h, 0);
     if (!o) RET(1, 1);
-    if (o->type == G_BITMAP) free(o->px);
+    if (o->type == G_BITMAP) { free(o->px); if (o->dib) heap_free(w32_process_heap, o->dib); }
     if (o->type == G_FONT && o->font) {
 #ifdef __APPLE__
         CFRelease(o->font);
@@ -264,10 +266,47 @@ IMPL(gdi32, GetPixel)
     uint32_t p = bm->px[(size_t)y * bm->bw + x];                                         /* BGRX in memory */
     RET(((p >> 16) & 0xff) | (p & 0xff00) | ((p & 0xff) << 16), 3);                      /* COLORREF 0x00BBGGRR */
 }
+/* (dc, BITMAPINFO *, usage, void **bits, section, offset): a bitmap whose pixels the game reads and writes itself */
+IMPL(gdi32, CreateDIBSection)
+{
+    uint32_t bi = ARG(1), out = ARG(3);
+    int32_t w = (int32_t)rt_r32(G_MEM, bi + 4), h = (int32_t)rt_r32(G_MEM, bi + 8); uint32_t bpp = rt_r16(G_MEM, bi + 14);
+    if (w <= 0 || !h || w > 8192 || h > 8192 || h < -8192 || (bpp != 8 && bpp != 16 && bpp != 24 && bpp != 32)) { if (out) rt_w32(G_MEM, out, 0); RET(0, 6); }
+    uint32_t stride = ((uint32_t)w * bpp + 31) / 32 * 4, size = stride * (uint32_t)(h < 0 ? -h : h);
+    uint32_t mem = heap_alloc(w32_process_heap, 8, size); if (!mem) { if (out) rt_w32(G_MEM, out, 0); RET(0, 6); }
+    GObj *o = calloc(1, sizeof *o); o->type = G_BITMAP; o->bw = w; o->bh = h < 0 ? -h : h;
+    o->dib = mem; o->dib_stride = stride; o->dib_bpp = bpp; o->dib_topdown = h < 0;
+    if (out) rt_w32(G_MEM, out, mem);
+    RET(g_new(o), 6);
+}
+/* (object, size, buffer): BITMAP (24 bytes), DIBSECTION (84) for a DIB section */
+IMPL(gdi32, GetObjectA)
+{
+    GObj *o = G(ARG(0), 0); uint32_t n = ARG(1), out = ARG(2);
+    if (!o || o->type != G_BITMAP) RET(0, 3);
+    uint32_t bpp = o->dib ? o->dib_bpp : 32, stride = o->dib ? o->dib_stride : (uint32_t)o->bw * 4;
+    if (!out) RET(o->dib ? 84 : 24, 3);
+    if (n < 24) RET(0, 3);
+    uint32_t bm[6] = {0, (uint32_t)o->bw, (uint32_t)o->bh, stride, 1 | (bpp << 16), o->dib};
+    memcpy(GP(out), bm, 24);
+    if (!o->dib || n < 84) RET(24, 3);
+    uint32_t ih[10] = {40, (uint32_t)o->bw, o->dib_topdown ? (uint32_t)-o->bh : (uint32_t)o->bh, 1 | (bpp << 16), 0, stride * (uint32_t)o->bh, 0, 0, 0, 0};
+    memcpy(GP(out + 24), ih, 40); memset(GP(out + 64), 0, 20);
+    RET(84, 3);
+}
 IMPL(gdi32, GetDIBits)
 {
     GObj *bm = G(ARG(1), G_BITMAP); uint32_t start = ARG(2), lines = ARG(3), bits = ARG(4), bi = ARG(5);
     if (!bm) RET(0, 7);
+    if (bm->dib && bits) {                                   /* a DIB section: its rows as they are (same depth only) */
+        uint16_t want = (uint16_t)rt_r16(G_MEM, bi + 14); int32_t hh = (int32_t)rt_r32(G_MEM, bi + 8);
+        if (want != bm->dib_bpp) { fprintf(stderr, "w32: GetDIBits of a %u-bpp DIB section as %u bpp\n", bm->dib_bpp, want); RET(0, 7); }
+        for (uint32_t k = 0; k < lines && start + k < (uint32_t)bm->bh; k++) {
+            int row = (hh < 0) == bm->dib_topdown ? (int)(start + k) : bm->bh - 1 - (int)(start + k);   /* scan line order as asked */
+            memcpy(GP(bits + k * bm->dib_stride), GP(bm->dib + (uint32_t)row * bm->dib_stride), bm->dib_stride);
+        }
+        RET(lines, 7);
+    }
     int32_t h = (int32_t)rt_r32(G_MEM, bi + 8); uint16_t bpp = (uint16_t)rt_r16(G_MEM, bi + 14);
     if (!bits) {                                                                          /* fill in the header */
         rt_w32(G_MEM, bi + 4, (uint32_t)bm->bw); rt_w32(G_MEM, bi + 8, (uint32_t)bm->bh); rt_w16(G_MEM, bi + 12, 1);

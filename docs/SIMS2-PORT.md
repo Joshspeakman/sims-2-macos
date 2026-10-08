@@ -29,7 +29,7 @@ tries anyway. Once there are hooks at fixed addresses, a new build means a new a
 | Compiling the generated C | **all 281 files compile** (exe + `ijl15.dll`, 111,368 functions), 0 errors, 589 MB of C, 2 min on 16 jobs (26 CPU-minutes). `build_sims2.sh` end to end, from the Steam folder: 7.5 min on 24 cores |
 | SIMD lifter on Sims 2's instruction forms (`tests/fuzz_sse.py`) | exe: 289 forms / 680 instances × 60 runs, **0 mismatches** with Unicorn. `ijl15.dll`: 97 forms / 282 instances × 60 runs, 0 mismatches. **Bug found and fixed**: MMX `packsswb`/`packssdw`/`packuswb` used the XMM layout, so the source operand's half was dropped (FNV never used the MMX forms). **Added**: `pshufw` (66 sites in `ijl15.dll`) and `cvtpi2ps` (13 in the exe) |
 | Integer/x87 lifter (`tests/fuzz_insn.py`) | 6,128 forms / 18,114 instances × 20 runs. Outside SIMD rows (this fuzzer does not seed XMM/MMX state; `fuzz_sse.py` covers those), only the expected differences remain: x87 transcendentals (`fyl2x`, `f2xm1`, `fprem`/`fprem1`: last-bit differences from the double model; one `fprem1` site lands one modulus apart in 2 of 20 runs, a quotient rounded at the half-way point) and `cpuid` (the fixed fake CPU) |
-| Linking / running (Linux, SDL/OpenGL host) | **runs to the main menu**: Steam check (offline shim), intro movies (EA MAD, decoded by the game), loading screen, the neighbourhood chooser with its 3D Sims. See "Running" below |
+| Linking / running (Linux, SDL/OpenGL host) | **runs into a neighbourhood**: Steam check (offline shim), intro movies (EA MAD, decoded by the game), loading screen, the neighbourhood chooser with its 3D Sims, Desiderata Valley in 3D (clicked through with the host's scripted input). See "Running" below |
 
 Build the C (Mac or Linux):
 
@@ -86,6 +86,7 @@ names itself.
 ## Running (Linux, 2026-10-07)
 
 ![Main menu](screenshots/sims2-main-menu.jpg)
+![Desiderata Valley](screenshots/sims2-neighborhood.jpg)
 
 ```sh
 recomp/build_sims2.sh "<…>/The Sims 2 Legacy Collection"          # recompile (incremental) and link
@@ -111,14 +112,18 @@ What it took, beyond the imports (all 438 are implemented):
   `d3d9_shader.c`), which is how the game draws its UI, movies and much more.
 - **Windows**: the game's `multimon.h` needs every monitor function by `GetProcAddress` (else an uninitialised rect
   places the window off-screen); `SystemParametersInfoA` answers unknown queries with 0.
+- **Jump tables**: the lifter bounded a switch by decoding backwards from the jump, which can start inside an
+  instruction and miss the `cmp`; it now walks the function's own decoded instructions first (`known_prev`).
+  Heuristically bounded tables: 62 → 28. One of them crashed the neighbourhood load.
+- **D3DX**: its shader assembler uses `Direct3DShaderValidatorCreate9` even when it isn't found; it is now there and
+  accepts everything. `CreateDIBSection`/`GetObjectA`/`GetDIBits` on DIB sections are implemented.
 - **Files**: the game opens every package for writing. Such files are now read where they are and copied into the
   data folder's overlay only on the first write (`File.cow`, `files.c`); before, 8.5 GB of packages were copied.
 
 ## Next
 
-1. **Interaction**: click into a neighbourhood, Create-a-Sim, live mode. Input is untested (the host's DS_SCRIPT
-   clicks work for other ports); expect new imports and D3D paths (render targets for reflections and shadows,
-   the neighbourhood view).
+1. **Interaction**: scripted clicks work (`DS_SCRIPT="@145:click:648,380;@160:click:607,630"` opens Desiderata
+   Valley). Next: a lot (live mode), Create-a-Sim, build/buy. Some neighbourhood objects (rocks) draw black.
 2. **The Mac**: nothing has been built there yet. `install.sh`, the launch window and `build_app.sh` still make
    Fallout NV; the Metal side of the fixed-function stages (`FF_MSL_PS`) is written but has never been compiled.
    `analyze.py` peaks at about 26 GB of memory (tight on a 32 GB Mac).
