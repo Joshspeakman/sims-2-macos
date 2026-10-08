@@ -7,7 +7,9 @@ python3 "$HERE/tools/gen_imptab.py" "$OUT/imptab.c" "$HERE"/runtime/win32/*.c
 # the edition (Fallout: New Vegas, or Dungeon Siege II and Broken World) by the executable in the build folder
 EXE="$OUT/DungeonSiege2.exe"; [[ -f "$OUT/FalloutNV.exe" ]] && EXE="$OUT/FalloutNV.exe"
 EDITION_FLAGS=()
-if [[ -f "$EXE" ]]; then
+if [[ -f "$OUT/Sims2EP9.exe" ]]; then                     # The Sims 2 (build_sims2.sh checked the executable)
+  EDITION_FLAGS=(-DSIMS2_EDITION); [[ "$(uname -m)" == arm64 ]] && EDITION_FLAGS+=(-DRT_TSO)
+elif [[ -f "$EXE" ]]; then
   EDITION=$(PYTHONPATH="$HERE/tools" python3 -c 'import sys; from editions import identify; print(identify(sys.argv[1], prepared=True))' "$EXE" 2>/dev/null || echo gog)
   [[ "$EDITION" == broken-world ]] && EDITION_FLAGS=(-DDS2_BROKEN_WORLD)
   [[ "$EDITION" == fnv ]] && EDITION_FLAGS=(-DFNV_EDITION)

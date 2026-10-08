@@ -992,8 +992,10 @@ OK_M(dv_SetCurrentTexturePalette, 2)
 M(dv_GetCurrentTexturePalette, 2) rt_w32(G_MEM, ARG(1), 0); RET(D3D_OK, 2); END
 M(dv_SetScissorRect, 2) DEV_ME memcpy(me->scissor, GP(ARG(1)), 16); { uint32_t *p = cmd_begin(DSR_SCISSOR, 16); memcpy(p, me->scissor, 16); cmd_end(); } RET(D3D_OK, 2); END
 M(dv_GetScissorRect, 2) DEV_ME memcpy(GP(ARG(1)), me->scissor, 16); RET(D3D_OK, 2); END
-OK_M(dv_SetSoftwareVertexProcessing, 2)
-M(dv_GetSoftwareVertexProcessing, 1) RET(0, 1); END
+/* The Sims 2 keeps one caps copy per mode and reads the one this names: on its mixed device it turns software
+ * processing on, so it must read back as on */
+M(dv_SetSoftwareVertexProcessing, 2) DEV_ME if (me->behavior & 0x80) me->swvp = ARG(1) != 0; RET(D3D_OK, 2); END
+M(dv_GetSoftwareVertexProcessing, 1) DEV_ME RET(me->swvp, 1); END
 OK_M(dv_SetNPatchMode, 2)
 M(dv_GetNPatchMode, 1) FPUSH(0.0); RET(0, 1); END
 /* the game's own vertex shader bound: its program (d3d9_shader.c) and constants, then a programmable draw */
@@ -1308,9 +1310,9 @@ static void fill_caps(uint32_t out)                    /* D3DCAPS9: a Radeon 850
         v[66] = 0; v[67] = 0; v[68] = 12; v[69] = 0; v[70] = 96;  /* PS20Caps */
         v[72] = 65535; v[73] = 96;
     }
-#ifdef FNV_EDITION
-    /* Fallout NV draws with its precompiled vs/ps 1.1-3.0 shaders and picks a shader package from these: a shader model
-     * 3.0 card (GeForce 7-class), one render target */
+#ifdef MODERN_EDITION
+    /* Fallout NV (precompiled vs/ps 1.1-3.0 shaders) and The Sims 2 (its own, compiled at start-up) pick their shader
+     * paths from these: a shader model 3.0 card (GeForce 7-class), one render target */
     v[49] = 0xfffe0300u; v[50] = 256; v[51] = 0xffff0300u; v[59] = 0x3ff; v[60] = 1;
     v[62] = 1; v[63] = 24; v[64] = 32; v[65] = 4;                  /* VS20Caps: predication */
     v[66] = 0x1f; v[67] = 24; v[68] = 32; v[69] = 4; v[70] = 512;  /* PS20Caps: every 2.x feature */
@@ -1322,8 +1324,13 @@ M(d9_GetDeviceCaps, 4) fill_caps(ARG(3)); RET(D3D_OK, 4); END
 M(d9_GetAdapterMonitor, 2) RET(0x0001beef, 2); END
 static void init_vtables9(void);
 M(d9_CreateDevice, 7) ME(D3D9, O9_D3D)                 /* (adapter, type, focus window, behaviour, present parameters, device *) */
-    if (the_dev) { fprintf(stderr, "d3d9: a second device: the first one is reused\n"); dev_reset(the_dev, ARG(5)); rt_w32(G_MEM, ARG(6), the_dev->g); the_dev->ref++; RET(D3D_OK, 7); }
+    if (the_dev) {
+        fprintf(stderr, "d3d9: a second device: the first one is reused\n"); dev_reset(the_dev, ARG(5));
+        the_dev->hwnd = ARG(3); the_dev->behavior = ARG(4); the_dev->swvp = (ARG(4) & 0x20) != 0;     /* the new one's flags */
+        rt_w32(G_MEM, ARG(6), the_dev->g); the_dev->ref++; RET(D3D_OK, 7);
+    }
     Dev9 *d = calloc(1, sizeof *d); d->ref = 1; d->g_d3d = me->g; d->hwnd = ARG(3); d->behavior = ARG(4);
+    d->swvp = (ARG(4) & 0x20) != 0;                       /* D3DCREATE_SOFTWARE_VERTEXPROCESSING */
     d->g = make_iface(O9_DEV, d); d->g_swap = make_iface(O9_SWAP, d); the_dev = d;
     dev_surfaces(d, ARG(5)); dev_defaults(d);
     fprintf(stderr, "d3d9: device %ux%u (format %u, depth %u, %s)\n", d->pp[0], d->pp[1], d->pp[2], d->pp[9] ? d->pp[10] : 0, d->pp[8] ? "windowed" : "full screen");

@@ -34,6 +34,7 @@ static void canon(const char *dll, const char *fn, char *out, size_t cap)
     for (; dll[k] && dll[k] != '.' && k < sizeof d - 1; k++) d[k] = (char)(dll[k] >= 'A' && dll[k] <= 'Z' ? dll[k] + 32 : dll[k]);
     d[k] = 0;
     if (!strncmp(d, "d3dx9_", 6)) strcpy(d, "d3dx9_29");     /* every D3DX9 version: one implementation (DS2 29, Fallout NV 38) */
+    if (!strcmp(d, "ws2_32")) strcpy(d, "wsock32");          /* Winsock 2 (The Sims 2): the same ordinals as WSOCK32 */
     char f[128]; const char *s = fn; size_t j = 0;
     if (*s == '#') { snprintf(f, sizeof f, "ord%s", s + 1); }
     else {
@@ -240,6 +241,17 @@ int w32_load(const char *exe_path)
     w32_env_w = at;
     for (uint32_t s = w32_env_a; G_MEM[s]; ) { int l = (int)strlen(GS(s)) + 1; at += 2 * (uint32_t)w32_mb_to_wide(1252, G_MEM + s, l, (uint16_t *)GP(at), l); s += (uint32_t)l; }
     rt_w16(G_MEM, at, 0); at += 2;
+    {   /* PEB.ProcessParameters (RTL_USER_PROCESS_PARAMETERS): newer C runtimes read its flags and command line */
+        uint32_t pp = PEB_ADDR + 0x800, img = (at + 3) & ~3u;
+        int n = w32_mb_to_wide(1252, (const uint8_t *)GS(w32_modname_a), -1, (uint16_t *)GP(img), 512); at = img + 2 * (uint32_t)n;
+        memset(GP(pp), 0, 0x2a0);
+        rt_w32(G_MEM, pp, 0x2a0); rt_w32(G_MEM, pp + 4, 0x2a0); rt_w32(G_MEM, pp + 8, 1);   /* PROCESS_PARAMETERS_NORMALIZED */
+        uint32_t cl = 0; while (rt_r16(G_MEM, w32_cmdline_w + 2 * cl)) cl++;
+        rt_w16(G_MEM, pp + 0x38, (uint16_t)(2 * (n - 1))); rt_w16(G_MEM, pp + 0x3a, (uint16_t)(2 * n)); rt_w32(G_MEM, pp + 0x3c, img);   /* ImagePathName */
+        rt_w16(G_MEM, pp + 0x40, (uint16_t)(2 * cl)); rt_w16(G_MEM, pp + 0x42, (uint16_t)(2 * cl + 2)); rt_w32(G_MEM, pp + 0x44, w32_cmdline_w);   /* CommandLine */
+        rt_w32(G_MEM, pp + 0x48, w32_env_w);           /* Environment */
+        rt_w32(G_MEM, PEB_ADDR + 0x10, pp);
+    }
     w32_load_static_images();
     return 0;
 }

@@ -13,8 +13,14 @@ int w32_prepare(const char *exe, const char *game_dir, const char *drive_c, cons
     snprintf(w32_drive_c, sizeof w32_drive_c, "%s", drive_c);
     snprintf(w32_game_overlay, sizeof w32_game_overlay, "%s", overlay ? overlay : "");
     w32_deterministic = 0;
-#ifdef FNV_EDITION
+#ifdef SIMS2_EDITION
+    { void w32_sims2_registry(void); w32_sims2_registry(); }
+#endif
+#ifdef MODERN_EDITION
     rt_cpuid_sse2 = 1;                         /* an SSE2 CPU: the code was compiled for one (tools/sse.py lifts it) */
+#endif
+#ifdef GAME_DIR
+    { extern char w32_cwd[1024]; snprintf(w32_cwd, sizeof w32_cwd, "C:\\GOG Games\\Dungeon Siege\\%s", GAME_DIR); }   /* Steam starts it there */
 #endif
     extern int w32_protect_memory; void w32_seh_init(void);
     w32_protect_memory = getenv("W32_NOPROTECT") ? 0 : 1;

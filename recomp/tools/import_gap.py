@@ -9,6 +9,7 @@ for f in glob.glob(os.path.join(HERE, 'runtime', 'win32', '*.c')):
 def canon(dll, fn):
     d = dll.split('.')[0].lower()
     if d.startswith('d3dx9_'): d = 'd3dx9_29'                  # loader.c: one D3DX9 for every version
+    if d == 'ws2_32': d = 'wsock32'                             # loader.c: Winsock 2 by WSOCK32's ordinals
     if fn.startswith('#'): return '%s!ord%s' % (d, fn[1:])
     if fn.startswith('_') and '@' in fn: fn = fn[1:]
     return '%s!%s' % (d, fn.split('@')[0])

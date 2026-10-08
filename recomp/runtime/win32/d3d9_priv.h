@@ -63,6 +63,7 @@ struct Dev9 {
     uint32_t g, g_swap, g_d3d; int ref;
     uint32_t pp[14];                                    /* D3DPRESENT_PARAMETERS */
     uint32_t hwnd, behavior;
+    uint32_t swvp;                             /* software vertex processing on (the behaviour flags, or Set... on a mixed device) */
     Surf9 *back, *depth, *rt, *ds;
     uint32_t rs[256], tss[8][33], ss[16][14];
     float xf[512][16];                                  /* by D3DTRANSFORMSTATETYPE (WORLD = 256) */
