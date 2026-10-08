@@ -254,6 +254,11 @@ static const char *script_tick(uint32_t fno)       /* returns a screenshot path 
                 w32_keys[r ? 2 : 1] = 0x80; post(r ? 0x204 : 0x201, r ? 2 : 1, pos_lp()); a->phase=2; a->frame=fno;
             }
             if (a->phase==2 && fno == a->frame + 4) { w32_keys[r ? 2 : 1] = 0; post(r ? 0x205 : 0x202, 0, pos_lp()); a->phase=3; }
+        } else if (!strcmp(a->kind, "tap")) {             /* tap:x,y: the cursor straight to x,y (no trip through the corner,
+                                                              which scrolls the game's camera at the screen edge), then a click */
+            if (fno >= a->frame && fno < a->frame + 15) { w32_set_cursor(a->x, a->y); vcur_x = a->x; vcur_y = a->y; post(0x200, mk(), pos_lp()); }   /* hover: the game picks what is under the cursor over a few frames */
+            if (fno == a->frame + 15) { w32_keys[1] = 0x80; post(0x201, 1, pos_lp()); }
+            if (fno == a->frame + 20) { w32_keys[1] = 0; post(0x202, 0, pos_lp()); }
         } else if (!strcmp(a->kind, "lag") && fno == a->frame) { void dp8_set_lag(int, int); dp8_set_lag(a->x, a->y); }
         else if (!strcmp(a->kind, "move") && fno == a->frame) { mot_home = 8; mot_dx = a->x; mot_dy = a->y; }
         else if (!strcmp(a->kind, "rel") && fno >= a->frame && fno < a->frame + 60) rel_motion(a->x / 60.0, a->y / 60.0);   /* x,y over 60 frames, like a trackpad swipe */
