@@ -101,13 +101,14 @@ static char *wrap_vs(const char *src, size_t n, size_t *outlen)
  * and much of its world this way). Stage s reads texture unit s with the shader's texture coordinates s (with a vertex
  * shader, D3DTSS_TEXCOORDINDEX must be the stage's own). The stage states arrive as the pixel constants (ff_consts):
  * per stage (colour op, colour arg 1, colour arg 2, alpha op), (alpha arg 1, alpha arg 2, texture bound, texture has no
- * alpha), then the texture factor and (specular enable, 0, 0, 0). Arguments are D3DTA source + 8 complement + 16
+ * alpha), then the texture factor, (specular enable, 0, 0, 0), and four projected-coordinate flags.
+ * Arguments are D3DTA source + 8 complement + 16
  * alpha replicate (GLSL 1.20 has no bit operations). */
 #define FF_STAGES 4
-#define FF_CONSTS (2 * FF_STAGES + 2)
+#define FF_CONSTS (2 * FF_STAGES + 3)
 static const char *FF_PS =
     "#version 120\n"
-    "uniform vec4 ps_uniforms_vec4[10];\n"
+    "uniform vec4 ps_uniforms_vec4[11];\n"
     "uniform sampler2D ps_s0, ps_s1, ps_s2, ps_s3;\n"
     "vec4 ff_arg(float a, vec4 diffuse, vec4 current, vec4 texel, vec4 spec, vec4 temp)\n{\n"
     "\tfloat src = mod(a, 8.0); vec4 v = diffuse;\n"
@@ -135,8 +136,9 @@ static const char *FF_PS =
     "\t\tif (c.x == 1.0) break;\n"
     "\t\tvec4 texel = vec4(1.0);\n"
     "\t\tif (a.z != 0.0) {\n"
-    "\t\t\tif (s == 0) texel = texture2D(ps_s0, gl_TexCoord[0].xy); else if (s == 1) texel = texture2D(ps_s1, gl_TexCoord[1].xy);\n"
-    "\t\t\telse if (s == 2) texel = texture2D(ps_s2, gl_TexCoord[2].xy); else texel = texture2D(ps_s3, gl_TexCoord[3].xy);\n"
+    "\t\t\tvec4 tc = gl_TexCoord[s]; vec2 uv = ps_uniforms_vec4[10][s] != 0.0 ? tc.xy / tc.w : tc.xy;\n"
+    "\t\t\tif (s == 0) texel = texture2D(ps_s0, uv); else if (s == 1) texel = texture2D(ps_s1, uv);\n"
+    "\t\t\telse if (s == 2) texel = texture2D(ps_s2, uv); else texel = texture2D(ps_s3, uv);\n"
     "\t\t\tif (a.w != 0.0) texel.a = 1.0;\n"
     "\t\t}\n"
     "\t\tvec4 rc = ff_op(c.x, ff_arg(c.y, diffuse, current, texel, spec, temp), ff_arg(c.z, diffuse, current, texel, spec, temp), diffuse, texel, current);\n"
@@ -149,7 +151,7 @@ static const char *FF_PS =
 /* ---- Metal (MojoShader's Metal profile): the same wrapping, on MSL text ---- */
 static const char *FF_MSL_PS =                              /* a vertex shader without a pixel shader: FF_PS in Metal */
     "#include <metal_stdlib>\nusing namespace metal;\n\n"
-    "struct psmain_Uniforms\n{\n    float4 uniforms_float4[10];\n};\n\n"
+    "struct psmain_Uniforms\n{\n    float4 uniforms_float4[11];\n};\n\n"
     "struct psmain_Input\n{\n    float4 d0 [[user(color0)]];\n    float4 d1 [[user(color1)]];\n"
     "    float4 t0 [[user(texcoord0)]];\n    float4 t1 [[user(texcoord1)]];\n    float4 t2 [[user(texcoord2)]];\n    float4 t3 [[user(texcoord3)]];\n};\n\n"
     "struct psmain_Output\n{\n    float4 oC0 [[color(0)]];\n};\n\n"
@@ -182,8 +184,10 @@ static const char *FF_MSL_PS =                              /* a vertex shader w
     "        if (c.x == 1.0) break;\n"
     "        float4 texel = float4(1.0);\n"
     "        if (a.z != 0.0) {\n"
-    "            if (s == 0) texel = s0.sample(s0s, input.t0.xy); else if (s == 1) texel = s1.sample(s1s, input.t1.xy);\n"
-    "            else if (s == 2) texel = s2.sample(s2s, input.t2.xy); else texel = s3.sample(s3s, input.t3.xy);\n"
+    "            float4 tc = s == 0 ? input.t0 : s == 1 ? input.t1 : s == 2 ? input.t2 : input.t3;\n"
+    "            float2 uv = uniforms.uniforms_float4[10][s] != 0.0 ? tc.xy / tc.w : tc.xy;\n"
+    "            if (s == 0) texel = s0.sample(s0s, uv); else if (s == 1) texel = s1.sample(s1s, uv);\n"
+    "            else if (s == 2) texel = s2.sample(s2s, uv); else texel = s3.sample(s3s, uv);\n"
     "            if (a.w != 0.0) texel.a = 1.0;\n"
     "        }\n"
     "        float4 rc = ff_op(c.x, ff_arg(c.y, diffuse, current, texel, spec, temp, tf), ff_arg(c.z, diffuse, current, texel, spec, temp, tf), diffuse, texel, current, tf);\n"
@@ -372,6 +376,9 @@ static void ff_consts(Dev9 *d, float out[FF_CONSTS][4])
         out[2 * s][0] = (float)t[1]; out[2 * s][1] = FF_ARG(t[2]); out[2 * s][2] = FF_ARG(t[3]); out[2 * s][3] = (float)t[4];
         out[2 * s + 1][0] = FF_ARG(t[5]); out[2 * s + 1][1] = FF_ARG(t[6]);
         out[2 * s + 1][2] = d->tex[s] ? 1.0f : 0.0f; out[2 * s + 1][3] = d->tex[s] && !d9_fmt_alpha(d->tex[s]->fmt) ? 1.0f : 0.0f;
+        /* With a programmable VS the COUNT bits are disabled, but PROJECTED still applies in the
+         * fixed-function pixel pipeline. Divide by interpolated w, after rasterization (CAS mirrors). */
+        out[2 * FF_STAGES + 2][s] = (t[24] & 0x100) ? 1.0f : 0.0f;
         #undef FF_ARG
     }
     uint32_t tf = d->rs[60];                               /* D3DRS_TEXTUREFACTOR, ARGB */

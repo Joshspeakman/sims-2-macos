@@ -206,8 +206,9 @@ Build on the Mac without the 26 GB analysis: copy `recomp/work/sims2/analysis.js
 Checked on the Mac (test mode): Create-a-Sim (a new family made and moved into the bin), build and buy (an object
 bought, undone, sold; a wall and a floor), the game's own Graphics options (applied), saving (a purchase still there
 after saving and coming back), the families' thumbnails, audio (recorded with `W32_AUDIO_DUMP` while muted: music in
-the menus and neighbourhood, sounds and music in a lot). Not yet: the Create-a-Sim mirror (it shows a plain surface),
-the real (non-test) launch, and long sessions beyond 15 minutes.
+the menus and neighbourhood, sounds and music in a lot). The 2026-10-09 audit follow-up also checked an installed
+build for 26 minutes, a saved household reloaded on an isolated copy, the normal launcher, and the repaired
+Create-a-Sim mirror with a Sim present. Full-screen gameplay and multi-hour sessions remain untested.
 
 ### Neighbourhood pond (reference checked, 2026-10-09)
 
@@ -239,6 +240,13 @@ executes the original compressor on hits and reports byte mismatches at exit; us
 
 ### Mac audit fixes (2026-10-09)
 
+- A programmable vertex shader followed by fixed-function texture stages now honors `D3DTTFF_PROJECTED`.
+  Both GLSL and Metal divide the interpolated coordinates by their fourth component in the fragment shader.
+  The COUNT flags belong to fixed-function vertex processing and remain disabled on this path; see
+  [D3DTEXTURETRANSFORMFLAGS](https://learn.microsoft.com/en-us/windows/win32/direct3d9/d3dtexturetransformflags).
+  The GPU regression compiles the real fallback shader and checks projected/unprojected pixels for all four stages,
+  using constants packed by the runtime. The CAS mirror uses this path with a screen-sized reflection target;
+  an in-game check now shows both the room and the Sim reflected instead of a black surface.
 - Cursor images are copied at `SetCursorProperties`; source surfaces may be released or changed safely.
 - `SuspendThread` parks the calling guest thread with a counted condition-variable wait, also supports a
   not-yet-started thread, and reports unsupported instead of pretending to suspend another active thread.
