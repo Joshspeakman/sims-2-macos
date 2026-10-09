@@ -87,9 +87,15 @@ M(sf_SetPriority, 2) RET(0, 2); END
 M(sf_GetPriority, 1) RET(0, 1); END
 OK_M(sf_PreLoad, 1)
 M(sf_GetType, 1) RET(RT_SURFACE, 1); END
+/* (riid, out): the texture a surface belongs to when a texture interface is asked for, the device when IDirect3DDevice9
+ * is; anything else E_NOINTERFACE, as Direct3D does. The Sims 2 asks a surface for IDirect3DBaseTexture9 and calls the
+ * result's GetType: answered with the device, that reached SetCursorProperties (a crash entering a lot). */
 M(sf_GetContainer, 3) ME(Surf9, O9_SURF)
-    if (me->tex) { rt_w32(G_MEM, ARG(2), me->tex->g); me->tex->ref++; } else { rt_w32(G_MEM, ARG(2), me->dev->g); me->dev->ref++; }
-    RET(D3D_OK, 3);
+    static const uint8_t dev_iid[16] = {0x96, 0x3b, 0x22, 0xd0, 0x7a, 0xbf, 0xfd, 0x43, 0x92, 0xbd, 0xa4, 0x3b, 0x0d, 0x82, 0xb9, 0xeb};   /* IID_IDirect3DDevice9 */
+    int want_dev = ARG(1) && !memcmp(GP(ARG(1)), dev_iid, 16);
+    if (me->tex && !want_dev) { rt_w32(G_MEM, ARG(2), me->tex->g); me->tex->ref++; RET(D3D_OK, 3); }
+    if (want_dev) { rt_w32(G_MEM, ARG(2), me->dev->g); me->dev->ref++; RET(D3D_OK, 3); }
+    rt_w32(G_MEM, ARG(2), 0); RET(0x80004002u, 3);
 END
 static void surf_desc(Surf9 *s, uint32_t out)          /* D3DSURFACE_DESC */
 {
@@ -602,18 +608,19 @@ static void draw_indexed(Dev9 *d, uint32_t prim, int32_t base, uint32_t minidx, 
 /* ---- programmable draws: an effect pass's Metal program bound (d3dx9_fx.c) ----
  * Every vertex element goes to an attribute slot by its semantic, as a float4 (hlsl.c reads them that way):
  * 0 position, 1 normal, 2-3 colour 0-1, 4-11 texture coordinates 0-7, 12 tangent, 13 binormal, 14 blend weights,
- * 15 blend indices. */
+ * 15 blend indices; 16-22 positions 1-7, 23-29 normals 1-7 (The Sims 2's morph targets), 30 blend indices 1-7, 31
+ * blend weights 1-7 (d3d9_shader.c slot_of and the renderer agree; 32 slots, the draw's slot mask). */
 static int sem_slot(int usage, int idx)
 {
     switch (usage) {
-    case DU_POSITION: case DU_POSITIONT: return idx ? -1 : 0;
-    case DU_NORMAL: return idx ? -1 : 1;
+    case DU_POSITION: case DU_POSITIONT: return !idx ? 0 : idx < 8 && usage == DU_POSITION ? 15 + idx : -1;
+    case DU_NORMAL: return !idx ? 1 : idx < 8 ? 22 + idx : -1;
     case DU_COLOR: return idx < 2 ? 2 + idx : -1;
     case DU_TEXCOORD: return idx < 8 ? 4 + idx : -1;
     case DU_TANGENT: return idx ? -1 : 12;
     case DU_BINORMAL: return idx ? -1 : 13;
-    case DU_BLENDWEIGHT: return idx ? -1 : 14;
-    case DU_BLENDINDICES: return idx ? -1 : 15;
+    case DU_BLENDWEIGHT: return !idx ? 14 : idx < 8 ? 31 : -1;
+    case DU_BLENDINDICES: return !idx ? 15 : idx < 8 ? 30 : -1;
     }
     return -1;
 }
@@ -688,7 +695,7 @@ static void prog_draw(Dev9 *d, uint32_t prim, uint32_t first, uint32_t nv, const
     p[0] = prim; p[1] = mask; p[2] = nv; p[3] = ni; p[4] = (uint32_t)pretrans;
     float *out = (float *)(p + 5);
     for (int s = 0; s < ns * (int)nv; s++) { out[4 * s] = out[4 * s + 1] = out[4 * s + 2] = 0; out[4 * s + 3] = 1; }
-    int col[16]; for (int sl = 0, c = 0; sl < 16; sl++) col[sl] = (mask >> sl) & 1 ? c++ : -1;
+    int col[32]; for (int sl = 0, c = 0; sl < 32; sl++) col[sl] = (mask >> sl) & 1 ? c++ : -1;
     for (int k = 0; k < n; k++) {
         const uint8_t *src; uint32_t stride; int sz = elem_size(el[k].type);
         if (up) { if (el[k].stream) continue; src = up; stride = up_stride; }

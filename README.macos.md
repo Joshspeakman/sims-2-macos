@@ -1,40 +1,50 @@
-# Dungeon Siege II for Apple Silicon Macs
+# The Sims 2 on Apple Silicon Macs
 
-Dungeon Siege II (GOG release 2.3), statically recompiled from your own copy into native arm64 code and run on Metal,
-as [dungeon-siege-macos](https://github.com/Joshspeakman/dungeon-siege-macos) does for Dungeon Siege 1. No Wine, no
-Rosetta, no emulator. Nothing from the game is in this repository: the build regenerates everything locally from your
-copy, and the game folder is only read.
+The Sims 2 Legacy Collection (Steam), statically recompiled from your own copy into native arm64 code and run on Metal.
+No Wine, no Rosetta, no emulator. Nothing from the game is in this repository: the build regenerates everything locally
+from your copy, and the game folder is only read.
 
-**State: Beta 1.** Single player is playable: main menu, hero creation, the intro movie and opening cutscene,
-gameplay (world, characters, HUD, dialogue), saving and loading, at the display's own resolution and up to 120 fps.
-The game's shader effects (Options → Video → Shaders: water, refraction, glow, heat shimmer) are translated to Metal,
-and a View Distance setting pushes out each area's fog like the SeeFar mods. Multiplayer is switched back on and signs
-in to OpenSpy with an original retail CD key; hosting and joining games are not tested yet
-([docs/MULTIPLAYER.md](docs/MULTIPLAYER.md)). What's next: [docs/PLAN.md](docs/PLAN.md).
+Status and the work list: [docs/SIMS2-PORT.md](docs/SIMS2-PORT.md).
 
 ## Install
 
-Needs an Apple Silicon Mac, the Xcode command line tools (`xcode-select --install`) and python3.
+Needs an Apple Silicon Mac, the Xcode command line tools (`xcode-select --install`) and python3. The game is
+Windows-only on Steam: copy its folder (`steamapps/common/The Sims 2 Legacy Collection`, about 13 GB) over from a PC,
+or use a CrossOver Steam library.
 
 ```sh
-git clone <this repository> && cd dungeon-siege-2-macos
-./install.sh --gog-installer ~/Downloads/setup_dungeon_siege_2_*.exe   # GOG offline installer (brew install innoextract)
-# or, with the game already unpacked or installed somewhere:
-./install.sh --game-dir "/path/to/Dungeon Siege 2"
+git clone <this repository> && cd sims-2-macos
+./install.sh --game-dir "/path/to/The Sims 2 Legacy Collection"
 ```
 
-This recompiles the game (a few minutes) and installs **Dungeon Siege II Native** in `~/Applications`. Settings, saves
-and logs live in `~/Games/DungeonSiege2Native`. The launch window picks the resolution, view distance and frame rate, takes a CD key for online play, and offers
-updates: it rebuilds the app from the newest version of this repository and your own copy of the game.
+This recompiles the game (about fifteen minutes the first time; its analysis needs about 26 GB of memory) and installs
+**The Sims 2 Native** in `~/Applications`. Settings, neighbourhoods and logs live in `~/Games/Sims2Native`
+(the game's own folder is `drive_c/Users/player/Documents/EA Games/The Sims 2 Legacy` inside it).
 
-`./install.sh --nightly` installs **Dungeon Siege II Nightly** next to it, built from the `nightly` branch (experimental
-work), sharing the same saves and settings.
+`./install.sh --nightly` installs **The Sims 2 Nightly** next to it, built from the `nightly` branch (experimental
+work), sharing the same neighbourhoods and settings.
+
+## The launch window
+
+- **Resolution**: Retina (every pixel of the display), the display in points, or a common size.
+- **Display**: Interface Size (the game is laid out at the resolution divided by it, and the renderer draws at the
+  full resolution, so the interface is larger while the 3D stays sharp; 200% on a Retina display is the game's layout
+  in points), full screen or a window, below or around the notch, and the frame rate (the display's, 60 or 30).
+- **Graphics** and **Detail**: the game's own options (material and object detail, shadows, lighting, effects,
+  reflections, snow, ceilings, object hiding, opaque interface). Each starts at "Game's Setting", which leaves the
+  choice made in the game's Options alone; another choice is applied every time the game starts (through its
+  `userStartup.cheat`, as the properties its `Graphics Rules.sgr` sets for that level).
+- **Camera**: edge scrolling and its speed, the idle camera drift and the special-event cameras.
+- **Saves** opens the game's folder in Finder; **Updates** rebuilds the app from the newest version of this
+  repository and your own copy of the game.
+
+In the game: pinch on a trackpad, or scroll, to zoom; push the pointer against a screen edge to scroll.
 
 ## How it works
 
 `recomp/` holds the recompiler (x86 → C, then clang) and the runtime: a macOS implementation of the Windows APIs the
-game uses, Direct3D 9 and D3DX on the Metal renderer in `src/`, Winsock, Miles audio and Bink video (both recompiled
-from the DLLs in your game folder). Details in [recomp/README.md](recomp/README.md).
+game uses, Direct3D 9 on the Metal renderer in `src/` (the game's shaders translated with MojoShader), DirectSound on
+Core Audio, and Winsock. Details in [recomp/README.md](recomp/README.md).
 
-Dungeon Siege II is a trademark of its owners; this project is not affiliated with them. You need your own copy of the
+The Sims 2 is a trademark of Electronic Arts; this project is not affiliated with them. You need your own copy of the
 game.

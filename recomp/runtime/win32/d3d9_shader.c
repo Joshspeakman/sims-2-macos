@@ -277,14 +277,15 @@ static char *msl_ps(const char *ps)
 static int slot_of(int usage, int index)               /* d3d9.c sem_slot(): the attribute slots of programmable draws */
 {
     switch (usage) {
-    case MOJOSHADER_USAGE_POSITION: case MOJOSHADER_USAGE_POSITIONT: return index ? -1 : 0;
-    case MOJOSHADER_USAGE_NORMAL: return index ? -1 : 1;
+    case MOJOSHADER_USAGE_POSITION: return !index ? 0 : index < 8 ? 15 + index : -1;
+    case MOJOSHADER_USAGE_POSITIONT: return index ? -1 : 0;
+    case MOJOSHADER_USAGE_NORMAL: return !index ? 1 : index < 8 ? 22 + index : -1;
     case MOJOSHADER_USAGE_COLOR: return index < 2 ? 2 + index : -1;
     case MOJOSHADER_USAGE_TEXCOORD: return index < 8 ? 4 + index : -1;
     case MOJOSHADER_USAGE_TANGENT: return index ? -1 : 12;
     case MOJOSHADER_USAGE_BINORMAL: return index ? -1 : 13;
-    case MOJOSHADER_USAGE_BLENDWEIGHT: return index ? -1 : 14;
-    case MOJOSHADER_USAGE_BLENDINDICES: return index ? -1 : 15;
+    case MOJOSHADER_USAGE_BLENDWEIGHT: return !index ? 14 : index < 8 ? 31 : -1;
+    case MOJOSHADER_USAGE_BLENDINDICES: return !index ? 15 : index < 8 ? 30 : -1;
     default: return -1;
     }
 }

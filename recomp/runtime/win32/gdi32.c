@@ -84,7 +84,7 @@ IMPL(gdi32, GetDeviceCaps)
     case 8: RET((uint32_t)w32_screen_w, 2); case 10: RET((uint32_t)w32_screen_h, 2);
     case 12: RET(32, 2); case 14: RET(1, 2); case 24: RET(0xffffffffu, 2);
     case 88: case 90: RET(96, 2); case 116: RET(60, 2); case 38: RET(0x7e99, 2);
-    case 4: RET(320, 2); case 6: RET(240, 2);
+    case 4: RET(w32_screen_h > 0 ? (uint32_t)(240.0 * w32_screen_w / w32_screen_h + 0.5) : 320, 2); case 6: RET(240, 2);   /* HORZSIZE, VERTSIZE (mm): the screen's own shape (The Sims 2 takes its aspect from them) */
     }
     RET(0, 2);
 }
