@@ -285,8 +285,8 @@ static NSArray<NSDictionary *> *resolution_choices(BOOL below_notch)
         w &= ~1; h &= ~1; NSString *v = [NSString stringWithFormat:@"%dx%d", w, h]; if ([seen containsObject:v]) return; [seen addObject:v];
         [a addObject:@{@"value": v, @"label": [NSString stringWithFormat:@"%d × %d", w, h], @"note": note}];
     };
-    add(W, H, @"This display (recommended): smooth at full frame rate");
-    if (sc > 1.01) add((int)(W * sc + 0.5), (int)(H * sc + 0.5), @"Retina: every pixel; sharpest, about half the frame rate");
+    add(W, H, sc > 1.01 ? @"This display in points, scaled up: lighter on the GPU" : @"This display");
+    if (sc > 1.01) add((int)(W * sc + 0.5), (int)(H * sc + 0.5), @"Retina: every pixel, the sharpest (recommended)");
     static const int std[][2] = {{2560,1600},{2560,1440},{1920,1200},{1920,1080},{1680,1050},{1600,900},{1440,900},{1280,800},{1280,720},{1024,768}};
     for (size_t k = 0; k < sizeof std / sizeof *std; k++) if (std[k][0] <= W && std[k][1] <= H) add(std[k][0], std[k][1], @"Scaled to fill the screen");
     return a;
@@ -545,7 +545,7 @@ int ds_launcher_run(const char *game_dir, const char *data_dir)
     intro.index = index_of(intro.choices, saved[@"intro"], 0);
     notch.title = @"Notch"; notch.choices = notch_choices(); notch.index = index_of(notch.choices, saved[@"notch"], 0);
     BOOL (^below)(void) = ^BOOL { return ![notch.choices[notch.index][@"value"] isEqualToString:@"around"]; };
-    res.title = @"Resolution"; res.choices = resolution_choices(below()); res.index = index_of(res.choices, saved[@"resolution"], 0);
+    res.title = @"Resolution"; res.choices = resolution_choices(below()); res.index = index_of(res.choices, saved[@"resolution"], res.choices.count > 1 && NSScreen.mainScreen.backingScaleFactor > 1.01 ? 1 : 0);   /* Retina by default */
     ui.title = @"Interface Size"; ui.choices = ui_choices(res.choices[res.index][@"value"]);
     ui.index = index_of(ui.choices, saved[@"interfaceSize"], index_of(ui.choices, res.index == 1 ? @"200" : @"100", 0));   /* Retina: the layout in points by default */
     window.title = @"Window"; window.choices = window_choices(); window.index = index_of(window.choices, saved[@"window"], 0);
