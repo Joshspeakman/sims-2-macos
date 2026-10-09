@@ -26,14 +26,17 @@ work), sharing the same neighbourhoods and settings.
 
 ## The launch window
 
-- **Resolution**: Retina (every pixel of the display), the display in points, or a common size.
+- **Resolution**: the display (the default: smooth at the full frame rate), Retina (every pixel: the sharpest, at
+  about half the frame rate on an M1 Pro), or a common size.
 - **Display**: Interface Size (the game is laid out at the resolution divided by it, and the renderer draws at the
-  full resolution, so the interface is larger while the 3D stays sharp; 200% on a Retina display is the game's layout
-  in points), full screen or a window, below or around the notch, and the frame rate (the display's, 60 or 30).
+  full resolution, so the interface is larger while the 3D stays sharp; 200% at Retina resolution is the game's
+  layout in points, and the default there), full screen or a window, below or around the notch, and the frame rate
+  (the display's, 60 or 30).
 - **Graphics** and **Detail**: the game's own options (material and object detail, shadows, lighting, effects,
   reflections, snow, ceilings, object hiding, opaque interface). Each starts at "Game's Setting", which leaves the
-  choice made in the game's Options alone; another choice is applied every time the game starts (through its
-  `userStartup.cheat`, as the properties its `Graphics Rules.sgr` sets for that level).
+  choice made in the game's Options alone; another choice is written into the game's own settings
+  (`Config/userProps.xml`) each time it starts (on the very first start, before that file exists, as the properties
+  its `Graphics Rules.sgr` sets for that level, in its `userStartup.cheat`).
 - **Camera**: edge scrolling and its speed, the idle camera drift and the special-event cameras.
 - **Saves** opens the game's folder in Finder; **Updates** rebuilds the app from the newest version of this
   repository and your own copy of the game.

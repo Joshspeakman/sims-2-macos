@@ -285,20 +285,21 @@ static NSArray<NSDictionary *> *resolution_choices(BOOL below_notch)
         w &= ~1; h &= ~1; NSString *v = [NSString stringWithFormat:@"%dx%d", w, h]; if ([seen containsObject:v]) return; [seen addObject:v];
         [a addObject:@{@"value": v, @"label": [NSString stringWithFormat:@"%d × %d", w, h], @"note": note}];
     };
-    if (sc > 1.01) add((int)(W * sc + 0.5), (int)(H * sc + 0.5), @"Retina: every pixel of the display (sharpest)");
-    add(W, H, sc > 1.01 ? @"This display in points: lighter on the GPU" : @"This display");
+    add(W, H, @"This display (recommended): smooth at full frame rate");
+    if (sc > 1.01) add((int)(W * sc + 0.5), (int)(H * sc + 0.5), @"Retina: every pixel; sharpest, about half the frame rate");
     static const int std[][2] = {{2560,1600},{2560,1440},{1920,1200},{1920,1080},{1680,1050},{1600,900},{1440,900},{1280,800},{1280,720},{1024,768}};
     for (size_t k = 0; k < sizeof std / sizeof *std; k++) if (std[k][0] <= W && std[k][1] <= H) add(std[k][0], std[k][1], @"Scaled to fill the screen");
     return a;
 }
 /* Interface Size: the game runs at the resolution divided by this, so its interface is laid out that much larger, and
  * the renderer draws at the chosen resolution itself (DSR_RENDER_SCALE), so the 3D stays sharp. Sizes leaving the game
- * under 1024x700 aren't offered. The default on a Retina display is 200%: the game's layout in points, drawn in pixels. */
+ * under 1024x700 aren't offered. The default is 100%, and 200% at Retina resolution: the game's layout in points,
+ * drawn in pixels. */
 static NSArray<NSDictionary *> *ui_choices(NSString *res)
 {
     int W = 0, H = 0; sscanf(res.UTF8String, "%dx%d", &W, &H);
     NSMutableArray *a = [NSMutableArray array];
-    static const int sizes[] = {200, 175, 150, 125, 100, 250, 300};
+    static const int sizes[] = {100, 125, 150, 175, 200, 250, 300};
     for (size_t k = 0; k < sizeof sizes / sizeof *sizes; k++) { int pc = sizes[k];
         if (pc > 100 && (W * 100 / pc < 1024 || H * 100 / pc < 700)) continue;
         [a addObject:@{@"value": [NSString stringWithFormat:@"%d", pc], @"label": [NSString stringWithFormat:@"%d%%", pc],
@@ -541,7 +542,8 @@ int ds_launcher_run(const char *game_dir, const char *data_dir)
     notch.title = @"Notch"; notch.choices = notch_choices(); notch.index = index_of(notch.choices, saved[@"notch"], 0);
     BOOL (^below)(void) = ^BOOL { return ![notch.choices[notch.index][@"value"] isEqualToString:@"around"]; };
     res.title = @"Resolution"; res.choices = resolution_choices(below()); res.index = index_of(res.choices, saved[@"resolution"], 0);
-    ui.title = @"Interface Size"; ui.choices = ui_choices(res.choices[res.index][@"value"]); ui.index = index_of(ui.choices, saved[@"interfaceSize"], 0);
+    ui.title = @"Interface Size"; ui.choices = ui_choices(res.choices[res.index][@"value"]);
+    ui.index = index_of(ui.choices, saved[@"interfaceSize"], index_of(ui.choices, res.index == 1 ? @"200" : @"100", 0));   /* Retina: the layout in points by default */
     window.title = @"Window"; window.choices = window_choices(); window.index = index_of(window.choices, saved[@"window"], 0);
     fps.title = @"Frame Rate"; fps.choices = framerate_choices(); fps.index = index_of(fps.choices, saved[@"frameRate"], 0);
     NSMutableArray<DSRow *> *gfx = [NSMutableArray array], *det = [NSMutableArray array], *cam = [NSMutableArray array];
@@ -592,10 +594,11 @@ int ds_launcher_run(const char *game_dir, const char *data_dir)
     DSLaunchView *v = [[DSLaunchView alloc] initWithFrame:NSMakeRect(0, 0, 780, 800)];
     v.top = @[res]; v.sections = @[display, graphics, detail, camera, saves, updSec]; v.open = -1; v.hover = v.pressed = HIT_NONE;
     v.note = @"Sound and the rest: in the game's own Options. Pinch or scroll to zoom; push the pointer against an edge to scroll.";
-    __block BOOL wasBelow = below();
+    __block BOOL wasBelow = below(); __block NSString *wasRes = val(res);
     v.onChange = ^{
         if (below() != wasBelow) { NSString *cur = val(res); wasBelow = below(); res.choices = resolution_choices(wasBelow); res.index = index_of(res.choices, cur, 0); }
-        NSString *cur = val(ui); ui.choices = ui_choices(val(res)); ui.index = index_of(ui.choices, cur, 0);
+        NSString *keep = [val(res) isEqualToString:wasRes] ? val(ui) : (res.index == 1 ? @"200" : @"100");   /* a new resolution: its usual size */
+        wasRes = val(res); ui.choices = ui_choices(wasRes); ui.index = index_of(ui.choices, keep, 0);
     };
     __weak DSLaunchView *wv = v; __weak DSRow *wu = upd;
     saves.activate = ^{
