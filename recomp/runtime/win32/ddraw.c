@@ -227,7 +227,7 @@ static void cmd_cap_wait(void)
     }
     uint64_t period = (uint64_t)(cap_period_ms * 1000);
     if (!deadline) deadline = t;
-    if (t < deadline) { while ((t = now_us()) < deadline) { if (deadline - t > 2000) usleep(1000); } }
+    if (t < deadline) ds_sleep_until_ns(deadline * 1000);
     else if (t - deadline > period) deadline = t;
     deadline += period;
     released = now_us();

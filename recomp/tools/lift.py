@@ -39,6 +39,7 @@ OVERRIDES = {             # address: description (runtime/win32/hooks.c rt_overr
 
 SIMS2_OVERRIDES = {       # The Sims 2 (runtime/win32/hooks.c rt_override, SIMS2_EDITION)
     0xa0c2b206: 'crash reporter setup (crashpad: a named pipe to crashpad_handler.exe, reports to EA): skipped',
+    0xa0084dcb: 'BC1 texture compression: cache exact block results (sims2_texture_cache.c)',
     0xa09cc611: 'RefPack compression of a resource (runtime/win32/refpack.c natively: up to 3 s as recompiled code)',
 }
 

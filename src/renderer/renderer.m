@@ -5,6 +5,8 @@
 #include <stdio.h>
 #include <string.h>
 #include <stdlib.h>
+#include <unistd.h>
+#import "metal_cache.h"
 
 volatile int dsr_flash_frame; int dsr_verbose; long dsr_stat[8]; double dsr_gpu_ms[100000]; int dsr_frame;
 #define MAXSURF 65536
@@ -13,7 +15,7 @@ volatile int dsr_flash_frame; int dsr_verbose; long dsr_stat[8]; double dsr_gpu_
  * runs at a smaller resolution, so its interface is laid out larger, and its screen-sized surfaces are drawn that much
  * larger, at the display's own resolution). Positions stay in the game's units everywhere; they become texture pixels
  * only where Metal is given a viewport, an upload or a copy. */
-typedef struct { id<MTLTexture> tex, view2d, sview; uint32_t w, h, kind, fmt, level, root, slice; int used, fxrt; float sc; } Surf;   /* sview: float formats as sampled (missing channels 1, as D3D9) */   /* fxrt: an effect pass drew into it (DSR_GLOWLOG) */   /* cube faces: tex the cube, view2d the face as 2D */
+typedef struct { id<MTLTexture> tex, view2d, sview, srgb, srgb2d; uint32_t w, h, kind, fmt, level, root, slice; int used, fxrt; float sc; } Surf;   /* sview: float formats as sampled (missing channels 1, as D3D9) */   /* fxrt: an effect pass drew into it (DSR_GLOWLOG) */   /* cube faces: tex the cube, view2d the face as 2D */
 static inline id<MTLTexture> tex2d(const void *sp) { const Surf *s = sp; return s->view2d ? s->view2d : s->tex; }
 typedef struct {   // must match shaders.metal Uniforms
     float wvp[16], wv[16], tex0[16];
@@ -34,6 +36,7 @@ struct DSRRenderer {
      * flash; what drew the frame (effect programs, fixed-function draws, target switches, white clears) is logged with it */
     int fl_on; id<MTLTexture> fl_probe[4]; int fl_i; uint32_t fl_prog[24][2]; int fl_np; uint32_t fl_ff, fl_rtsw, fl_wclear, fl_draws_fx;
     float scale; uint32_t mode_w, mode_h;   /* the interface size (1: none) and the game's display mode */
+    DSRMetalCache *cache;
     id<MTLDevice> dev; id<MTLCommandQueue> q; id<MTLLibrary> lib;
     Surf s[MAXSURF];
     uint32_t rs[256], tss[16][32]; float xf[32][16]; float vp[6]; uint32_t tex[16];
@@ -43,7 +46,7 @@ struct DSRRenderer {
     /* pipeline, depth and sampler states by key: open-addressing tables (keys never 0), no Objective-C boxing per draw */
     uint64_t pso_k[1024]; id<MTLRenderPipelineState> pso_v[1024];
     uint64_t dso_k[64]; id<MTLDepthStencilState> dso_v[64];
-    uint32_t smp_k[1024]; id<MTLSamplerState> smp_v[1024]; int pso_n, dso_n, smp_n; uint32_t pso_last;   // filled at most 3/4, then uncached
+    uint32_t smp_k[1024][10]; uint8_t smp_used[1024]; id<MTLSamplerState> smp_v[1024]; int pso_n, dso_n, smp_n; uint32_t pso_last;   // filled at most 3/4, then uncached
     /* the current render encoder's state, so unchanged state isn't set again (cleared with each new encoder) */
     struct { __unsafe_unretained id pso, dso, tex[3], smp[3]; int cull, ring_bound; uint32_t sref; MTLViewport vp; } es;
     id<MTLRenderPipelineState> quad_pso, quad_over_pso, zclear_pso, present_pso; id<MTLTexture> scratch, gamma_lut; uint16_t gamma[3][256]; int gamma_dirty; id<MTLDepthStencilState> zclear_ds, nodepth_ds, zsclear_ds[4];
@@ -85,31 +88,31 @@ static NSString *shader_source(void)
 DSRRenderer *dsr_renderer_create(id<MTLDevice> dev)
 {
     DSRRenderer *r = calloc(1, sizeof *r); NSError *err = nil;
-    r->dev = dev; r->q = [dev newCommandQueue];
+    r->dev = dev; r->q = [dev newCommandQueue]; r->cache = [[DSRMetalCache alloc] initWithDevice:dev];
     r->lib = [dev newLibraryWithSource:shader_source() options:nil error:&err];
     if (!r->lib) { fprintf(stderr, "shader compile failed: %s\n", err.localizedDescription.UTF8String); exit(1); }
     r->ring_size = 256u << 20;
     { const char *mb = getenv("DSR_RINGMB"); if (mb && atoi(mb) >= 4 && atoi(mb) <= 256) r->ring_size = (uint32_t)atoi(mb) << 20; }   /* development: a small ring wraps often */ r->ring = [dev newBufferWithLength:r->ring_size options:MTLResourceStorageModeShared];
-    { uint32_t w = 0xffffffff; r->white = [dev newBufferWithBytes:&w length:16 options:MTLResourceStorageModeShared]; }
+    { uint32_t w[4] = {0xffffffff, 0xffffffff, 0xffffffff, 0xffffffff}; r->white = [dev newBufferWithBytes:w length:sizeof w options:MTLResourceStorageModeShared]; }
     r->fl_on = getenv("DSR_FLASHLOG") != 0;
     { const char *sc = getenv("DSR_RENDER_SCALE"); r->scale = sc ? (float)atof(sc) : 1; if (!(r->scale >= 1 && r->scale <= 3)) r->scale = 1; }
     for (int k = 0; k < 32; k++) mat_ident(r->xf[k]);
     for (int k = 0; k < 256; k++) r->rs[k] = 0;
     r->rs[168] = 15; r->rs[56] = 8; r->rs[58] = r->rs[59] = 0xff; r->rs[53] = r->rs[54] = r->rs[55] = 1; r->rs[7] = 1; r->rs[14] = 1; r->rs[23] = 4; r->rs[22] = 3; r->rs[19] = 2; r->rs[20] = 1; r->rs[25] = 8;   // ZENABLE, ZWRITE, ZFUNC LEQUAL, CULL CCW, SRC ONE, DST ZERO, AFUNC ALWAYS
     for (int st = 0; st < 16; st++) { r->tss[st][1] = st ? 1 : 4; r->tss[st][2] = 2; r->tss[st][3] = 1; r->tss[st][4] = st ? 1 : 2; r->tss[st][5] = 2; r->tss[st][6] = 1;
-                                     r->tss[st][11] = st; r->tss[st][13] = r->tss[st][14] = 1; r->tss[st][16] = r->tss[st][17] = 2; r->tss[st][18] = 1; }
+                                     r->tss[st][11] = st; r->tss[st][13] = r->tss[st][14] = r->tss[st][25] = 1; r->tss[st][21] = 1; r->tss[st][16] = r->tss[st][17] = 2; r->tss[st][18] = 1; }
     {   MTLRenderPipelineDescriptor *d = [MTLRenderPipelineDescriptor new];
         d.vertexFunction = [r->lib newFunctionWithName:@"vs_quad"]; d.fragmentFunction = [r->lib newFunctionWithName:@"fs_quad"];
         d.colorAttachments[0].pixelFormat = MTLPixelFormatBGRA8Unorm;
-        r->quad_pso = [dev newRenderPipelineStateWithDescriptor:d error:&err];
+        r->quad_pso = [r->cache pipeline:d error:&err];
         d.colorAttachments[0].blendingEnabled = YES;   // premultiplied "over" for DSR_UPLOAD_OVER
         d.colorAttachments[0].sourceRGBBlendFactor = d.colorAttachments[0].sourceAlphaBlendFactor = MTLBlendFactorOne;
         d.colorAttachments[0].destinationRGBBlendFactor = d.colorAttachments[0].destinationAlphaBlendFactor = MTLBlendFactorOneMinusSourceAlpha;
-        r->quad_over_pso = [dev newRenderPipelineStateWithDescriptor:d error:&err];
+        r->quad_over_pso = [r->cache pipeline:d error:&err];
         d.colorAttachments[0].blendingEnabled = NO;
         d.vertexFunction = [r->lib newFunctionWithName:@"vs_zclear"]; d.fragmentFunction = nil;
         d.colorAttachments[0].writeMask = MTLColorWriteMaskNone; d.depthAttachmentPixelFormat = d.stencilAttachmentPixelFormat = MTLPixelFormatDepth32Float_Stencil8;
-        r->zclear_pso = [dev newRenderPipelineStateWithDescriptor:d error:&err];
+        r->zclear_pso = [r->cache pipeline:d error:&err];
         if (!r->quad_pso || !r->zclear_pso) { fprintf(stderr, "helper pipelines: %s\n", err.localizedDescription.UTF8String); exit(1); }
         MTLDepthStencilDescriptor *z = [MTLDepthStencilDescriptor new]; z.depthCompareFunction = MTLCompareFunctionAlways; z.depthWriteEnabled = YES;
         r->zclear_ds = [dev newDepthStencilStateWithDescriptor:z];
@@ -123,7 +126,7 @@ DSRRenderer *dsr_renderer_create(id<MTLDevice> dev)
     {   MTLRenderPipelineDescriptor *d = [MTLRenderPipelineDescriptor new];
         d.vertexFunction = [r->lib newFunctionWithName:@"vs_present"]; d.fragmentFunction = [r->lib newFunctionWithName:@"fs_present"];
         d.colorAttachments[0].pixelFormat = MTLPixelFormatBGRA8Unorm;
-        r->present_pso = [dev newRenderPipelineStateWithDescriptor:d error:&err];
+        r->present_pso = [r->cache pipeline:d error:&err];
         if (!r->present_pso) { fprintf(stderr, "present pipeline: %s\n", err.localizedDescription.UTF8String); exit(1); }
         MTLTextureDescriptor *g = [MTLTextureDescriptor new]; g.textureType = MTLTextureType1D; g.pixelFormat = MTLPixelFormatRGBA16Unorm; g.width = 256;
         g.storageMode = MTLStorageModeShared; r->gamma_lut = [dev newTextureWithDescriptor:g];
@@ -146,6 +149,7 @@ DSRRenderer *dsr_renderer_create(id<MTLDevice> dev)
         def[2][0] = def[2][1] = def[2][2] = 1; def[3][3] = 0;
         r->attr_defaults = [dev newBufferWithBytes:def length:sizeof def options:MTLResourceStorageModeShared]; }
     r->vis = [dev newBufferWithLength:8192 * 8 options:MTLResourceStorageModeShared];   /* occlusion queries' counts (VIS_SLOTS) */
+    [r->cache warm];
     return r;
 }
 
@@ -211,6 +215,17 @@ static void float_view(Surf *s)
                                                 slices:NSMakeRange(0, s->tex.textureType == MTLTextureTypeCube ? 6 : 1) swizzle:sw];
 }
 static inline id<MTLTexture> tex_sampled(const Surf *s) { return s->sview ? s->sview : tex2d(s); }   /* a 2D texture as shaders read it */
+static id<MTLTexture> sampler_texture(DSRRenderer *r, Surf *s, id<MTLTexture> texture, int stage)
+{
+    if (!s || !r->tss[stage][29] || texture.pixelFormat != MTLPixelFormatBGRA8Unorm) return texture;
+    id<MTLTexture> view = texture.textureType == MTLTextureType2D ? s->srgb2d : s->srgb;
+    if (!view) {
+        view = [texture newTextureViewWithPixelFormat:MTLPixelFormatBGRA8Unorm_sRGB];
+        if (texture.textureType == MTLTextureType2D) s->srgb2d = view; else s->srgb = view;
+    }
+    return view ?: texture;
+}
+
 /* The depth buffer a target is drawn with: as Direct3D allows, one larger than the target (the game draws its 256x256
  * glow target with the screen's), but not one smaller, which Metal can't (an unscaled depth buffer with a target
  * enlarged by the interface size): then none. Draws ask the same, so their pipelines match the pass. */
@@ -245,7 +260,7 @@ static void surface_create(DSRRenderer *r, const uint32_t *p, uint32_t size)
     uint32_t id = p[0], w = p[1], h = p[2], kind = p[3], fmt = p[4], parent = p[5], level = p[6];
     uint32_t face = size >= 40 ? p[8] : 0, cube = size >= 40 && (p[9] & 1);
     if (id >= MAXSURF) return;
-    Surf *s = &r->s[id]; s->tex = s->view2d = s->sview = nil; s->used = 1; s->fxrt = 0; s->w = w; s->h = h; s->kind = kind; s->fmt = fmt; s->level = level; s->root = id; s->slice = face; s->sc = 1;
+    Surf *s = &r->s[id]; s->tex = s->view2d = s->sview = s->srgb = s->srgb2d = nil; s->used = 1; s->fxrt = 0; s->w = w; s->h = h; s->kind = kind; s->fmt = fmt; s->level = level; s->root = id; s->slice = face; s->sc = 1;
     /* the screen's surfaces (the back buffer, depth buffers and textures the size of the screen, which the game draws into
      * with the screen's depth buffer) are drawn larger with an interface size */
     float sc = r->scale > 1 && !parent && !cube && w == r->mode_w && h == r->mode_h && !(kind == 3 && size >= 32 && p[7] > 1) ? r->scale : 1;
@@ -342,7 +357,7 @@ static id<MTLRenderPipelineState> helper_pso(DSRRenderer *r, int kind, MTLPixelF
         d.vertexFunction = [r->lib newFunctionWithName:@"vs_zclear"]; d.colorAttachments[0].writeMask = MTLColorWriteMaskNone;
         d.depthAttachmentPixelFormat = d.stencilAttachmentPixelFormat = MTLPixelFormatDepth32Float_Stencil8;
     }
-    id<MTLRenderPipelineState> p = [r->dev newRenderPipelineStateWithDescriptor:d error:&err];
+    id<MTLRenderPipelineState> p = [r->cache pipeline:d error:&err];
     if (!p) { fprintf(stderr, "dsr: helper pipeline %d for format %lu: %s\n", kind, (unsigned long)pf, err.localizedDescription.UTF8String); return nil; }
     if (n_ < 64) { k_[n_] = key; v_[n_] = p; n_++; }
     return p;
@@ -421,7 +436,7 @@ static id<MTLRenderPipelineState> pipeline_for(DSRRenderer *r, uint32_t fvf, int
     if (!(fvf & 0x40) || !((fvf >> 8) & 0xf)) { v.layouts[2].stride = 16; v.layouts[2].stepFunction = MTLVertexStepFunctionConstant; v.layouts[2].stepRate = 0; }
     d.vertexDescriptor = v;
     double t0 = CACurrentMediaTime();
-    p = [r->dev newRenderPipelineStateWithDescriptor:d error:&err];
+    p = [r->cache pipeline:d error:&err];
     if (!p) { fprintf(stderr, "pipeline fvf %x: %s\n", fvf, err.localizedDescription.UTF8String); return nil; }
     static int psolog = -1; if (psolog < 0) psolog = getenv("DSR_PSOLOG") != 0;
     if (psolog) fprintf(stderr, "dsr: new pipeline %#llx in %.1f ms (frame %d)\n", (unsigned long long)key, (CACurrentMediaTime() - t0) * 1000, dsr_frame);
@@ -455,20 +470,45 @@ static id<MTLDepthStencilState> depth_for(DSRRenderer *r)
     }
     s = [r->dev newDepthStencilStateWithDescriptor:d]; if (r->dso_n < 48) { r->dso_k[h] = key; r->dso_v[h] = s; r->dso_n++; } return s;
 }
+static MTLSamplerAddressMode sampler_address(uint32_t a)
+{
+    switch (a) {
+    case 2: return MTLSamplerAddressModeMirrorRepeat;
+    case 3: return MTLSamplerAddressModeClampToEdge;
+    case 4: return MTLSamplerAddressModeClampToBorderColor;
+    case 5: return MTLSamplerAddressModeMirrorClampToEdge;
+    default: return MTLSamplerAddressModeRepeat;
+    }
+}
+static MTLSamplerDescriptor *sampler_descriptor(const uint32_t *t)
+{
+    MTLSamplerDescriptor *d = [MTLSamplerDescriptor new];
+    d.sAddressMode = sampler_address(t[13]); d.tAddressMode = sampler_address(t[14]); d.rAddressMode = sampler_address(t[25]);
+    d.magFilter = t[16] >= 2 ? MTLSamplerMinMagFilterLinear : MTLSamplerMinMagFilterNearest;
+    d.minFilter = t[17] >= 2 ? MTLSamplerMinMagFilterLinear : MTLSamplerMinMagFilterNearest;
+    d.mipFilter = t[18] == 3 ? MTLSamplerMipFilterLinear : t[18] == 2 ? MTLSamplerMipFilterNearest : MTLSamplerMipFilterNotMipmapped;
+    d.maxAnisotropy = t[16] == 3 || t[17] == 3 ? MAX(1u, MIN(16u, t[21])) : 1;
+    d.lodMinClamp = (float)MIN(t[20], 15u);   // MAXMIPLEVEL is the largest image allowed, hence a minimum LOD.
+    d.borderColor = t[15] == 0xffffffffu ? MTLSamplerBorderColorOpaqueWhite :
+                    t[15] == 0xff000000u ? MTLSamplerBorderColorOpaqueBlack : MTLSamplerBorderColorTransparentBlack;
+#if __MAC_OS_X_VERSION_MAX_ALLOWED >= 260000
+    if (@available(macOS 26.0, *)) { float bias; memcpy(&bias, t + 19, 4); d.lodBias = isfinite(bias) ? fmaxf(-16, fminf(15.984375f, bias)) : 0; }
+#endif
+    return d;
+}
 static id<MTLSamplerState> sampler_for(DSRRenderer *r, int st)
 {
-    uint32_t au = r->tss[st][13], av = r->tss[st][14], mag = r->tss[st][16], min = r->tss[st][17], mip = r->tss[st][18];
-    uint32_t key = ((au << 16) | (av << 12) | (mag << 8) | (min << 4) | mip) << 1 | 1, h = (key * 2654435761u) >> 22;
-    while (r->smp_k[h] && r->smp_k[h] != key) h = (h + 1) & 1023;
-    if (r->smp_k[h]) return r->smp_v[h];
-    id<MTLSamplerState> s;
-    MTLSamplerDescriptor *d = [MTLSamplerDescriptor new];
-    MTLSamplerAddressMode (^am)(uint32_t) = ^MTLSamplerAddressMode(uint32_t a) { return a == 2 ? MTLSamplerAddressModeMirrorRepeat : a == 3 ? MTLSamplerAddressModeClampToEdge : a == 4 ? MTLSamplerAddressModeClampToBorderColor : MTLSamplerAddressModeRepeat; };
-    d.sAddressMode = am(au); d.tAddressMode = am(av);
-    d.magFilter = mag >= 2 ? MTLSamplerMinMagFilterLinear : MTLSamplerMinMagFilterNearest; d.minFilter = min >= 2 ? MTLSamplerMinMagFilterLinear : MTLSamplerMinMagFilterNearest;
-    d.mipFilter = mip == 3 ? MTLSamplerMipFilterLinear : mip == 2 ? MTLSamplerMipFilterNearest : MTLSamplerMipFilterNotMipmapped;
-    s = [r->dev newSamplerStateWithDescriptor:d]; if (r->smp_n < 768) { r->smp_k[h] = key; r->smp_v[h] = s; r->smp_n++; } return s;
+    const uint32_t *t = r->tss[st];
+    uint32_t key[10] = {t[13], t[14], t[25], t[15], t[16], t[17], t[18], t[19], t[20], t[21]}, hash = 2166136261u;
+    for (int k = 0; k < 10; k++) hash = (hash ^ key[k]) * 16777619u;
+    uint32_t h = hash & 1023;
+    while (r->smp_used[h] && memcmp(r->smp_k[h], key, sizeof key)) h = (h + 1) & 1023;
+    if (r->smp_used[h]) return r->smp_v[h];
+    id<MTLSamplerState> s = [r->dev newSamplerStateWithDescriptor:sampler_descriptor(t)];
+    if (s && r->smp_n < 768) { memcpy(r->smp_k[h], key, sizeof key); r->smp_used[h] = 1; r->smp_v[h] = s; r->smp_n++; }
+    return s;
 }
+
 static void draw(DSRRenderer *r, const uint32_t *p, uint32_t size)
 {
     uint32_t prim = p[0], fvf = p[1], nv = p[2], ni = p[3], stride = 0, voff, ioff = 0;
@@ -534,12 +574,12 @@ static void draw(DSRRenderer *r, const uint32_t *p, uint32_t size)
         [e setVertexBuffer:r->ring offset:voff atIndex:0]; [e setVertexBuffer:r->white offset:0 atIndex:2];
         [e setVertexBuffer:r->ring offset:uoff atIndex:1]; [e setFragmentBuffer:r->ring offset:uoff atIndex:1]; r->es.ring_bound = 1;
     } else { [e setVertexBufferOffset:voff atIndex:0]; [e setVertexBufferOffset:uoff atIndex:1]; [e setFragmentBufferOffset:uoff atIndex:1]; }
-    id<MTLTexture> x0 = t0 ? tex2d(t0) : r->dummy, x1 = t1 ? tex2d(t1) : r->dummy; id<MTLSamplerState> s0 = sampler_for(r, 0), s1 = sampler_for(r, 1);
+    id<MTLTexture> x0 = t0 ? sampler_texture(r, t0, tex2d(t0), 0) : r->dummy, x1 = t1 ? sampler_texture(r, t1, tex2d(t1), 1) : r->dummy; id<MTLSamplerState> s0 = sampler_for(r, 0), s1 = sampler_for(r, 1);
     if (r->es.tex[0] != x0) { [e setFragmentTexture:x0 atIndex:0]; r->es.tex[0] = x0; }
     if (r->es.smp[0] != s0) { [e setFragmentSamplerState:s0 atIndex:0]; r->es.smp[0] = s0; }
     if (r->es.tex[1] != x1) { [e setFragmentTexture:x1 atIndex:1]; r->es.tex[1] = x1; }
     if (r->es.smp[1] != s1) { [e setFragmentSamplerState:s1 atIndex:1]; r->es.smp[1] = s1; }
-    if (t2) { id<MTLTexture> x2 = tex2d(t2); id<MTLSamplerState> s2 = sampler_for(r, 2);
+    if (t2) { id<MTLTexture> x2 = sampler_texture(r, t2, tex2d(t2), 2); id<MTLSamplerState> s2 = sampler_for(r, 2);
         if (r->es.tex[2] != x2) { [e setFragmentTexture:x2 atIndex:2]; r->es.tex[2] = x2; }
         if (r->es.smp[2] != s2) { [e setFragmentSamplerState:s2 atIndex:2]; r->es.smp[2] = s2; } }
     MTLPrimitiveType pt; uint32_t count = ni ? ni : nv;
@@ -596,7 +636,7 @@ static id<MTLRenderPipelineState> prog_pipeline(DSRRenderer *r, uint32_t mask, i
     v.layouts[0].stride = 16u * (uint32_t)(ns ? ns : 1);
     v.layouts[3].stride = 256; v.layouts[3].stepFunction = MTLVertexStepFunctionConstant; v.layouts[3].stepRate = 0;
     d.vertexDescriptor = v;
-    id<MTLRenderPipelineState> pso = [r->dev newRenderPipelineStateWithDescriptor:d error:&err];
+    id<MTLRenderPipelineState> pso = [r->cache pipeline:d error:&err];
     if (!pso) { fprintf(stderr, "dsr: effect pipeline (program %u): %s\n", r->cur_prog, err.localizedDescription.UTF8String); return nil; }
     if (r->ppso_n < 384) { r->ppso_k[h] = key; r->ppso_v[h] = pso; r->ppso_n++; }
     return pso;
@@ -649,7 +689,7 @@ static void draw_prog(DSRRenderer *r, const uint32_t *p, uint32_t size)
         uint32_t kind = (r->prog[r->cur_prog].kinds >> (2 * k)) & 3; Surf *t = surf(r, r->tex[k]);
         id<MTLTexture> x = kind == 1 ? r->dummy_cube : kind == 2 ? r->dummy_3d : (t ? tex2d(t) : r->dummy);
         if (kind == 1 && t && t->tex.textureType == MTLTextureTypeCube) x = t->tex;
-        [e setFragmentTexture:x atIndex:(NSUInteger)k]; [e setFragmentSamplerState:sampler_for(r, k) atIndex:(NSUInteger)k];
+        [e setFragmentTexture:sampler_texture(r, t, x, k) atIndex:(NSUInteger)k]; [e setFragmentSamplerState:sampler_for(r, k) atIndex:(NSUInteger)k];
     }
     if (rt->w == 256 && rt->h == 256) rt->fxrt = 1;
     { static int n = -1; if (n < 0) n = getenv("DSR_GLOWLOG") ? 600 : 0;
@@ -722,6 +762,8 @@ static void clear(DSRRenderer *r, const uint32_t *p, uint32_t size)
             [be endEncoding]; dsr_renderer_flush(r, 1);
             fprintf(stderr, "after clear %d: px %08x, cb status %ld err %s\n", n, *(uint32_t *)b.contents, (long)r->last_cb.status, r->last_cb.error.localizedDescription.UTF8String ?: "-"); } }
 }
+
+void dsr_renderer_save_cache(DSRRenderer *r, int force) { [r->cache save:force != 0]; }
 
 void dsr_renderer_flush(DSRRenderer *r, int wait)
 {
@@ -802,7 +844,7 @@ id<MTLCommandBuffer> dsr_renderer_present_to(DSRRenderer *r, id<MTLTexture> dst)
             gd.vertexFunction = [r->lib newFunctionWithName:@"vs_present"]; gd.fragmentFunction = [r->lib newFunctionWithName:@"fs_graph"];
             gd.colorAttachments[0].pixelFormat = MTLPixelFormatBGRA8Unorm; gd.colorAttachments[0].blendingEnabled = YES;
             gd.colorAttachments[0].sourceRGBBlendFactor = MTLBlendFactorSourceAlpha; gd.colorAttachments[0].destinationRGBBlendFactor = MTLBlendFactorOneMinusSourceAlpha;
-            r->graph_pso = [r->dev newRenderPipelineStateWithDescriptor:gd error:&err];
+            r->graph_pso = [r->cache pipeline:gd error:&err];
             if (!r->graph_pso) fprintf(stderr, "graph pipeline: %s\n", err.localizedDescription.UTF8String);
         }
         if (r->graph_pso) {
@@ -884,14 +926,10 @@ static GP *gp_of(DSRRenderer *r, uint32_t id) { return id >= GP_BASE && id - GP_
 static uint32_t fnv1a(uint32_t h, const void *p, size_t n) { const uint8_t *b = p; for (size_t k = 0; k < n; k++) h = (h ^ b[k]) * 16777619u; return h; }
 static id<MTLFunction> msl_function(DSRRenderer *r, const char *src, NSString *name, uint32_t pid, const char *what)
 {
-    MTLCompileOptions *o = [MTLCompileOptions new]; NSError *err = nil;
-    if (@available(macOS 11.0, *)) o.preserveInvariance = YES;   /* the position is [[invariant]]: multi-pass lighting draws with depth EQUAL */
-    if (@available(macOS 15.0, *)) o.mathMode = MTLMathModeSafe; else { _Pragma("clang diagnostic push") _Pragma("clang diagnostic ignored \"-Wdeprecated-declarations\"") o.fastMathEnabled = NO; _Pragma("clang diagnostic pop") }   /* Direct3D's arithmetic: no reassociation, NaN and infinity kept */
-    double t0 = CACurrentMediaTime();
-    id<MTLLibrary> lib = [r->dev newLibraryWithSource:@(src) options:o error:&err];
-    id<MTLFunction> f = lib ? [lib newFunctionWithName:name] : nil;
+    NSError *err = nil; double t0 = CACurrentMediaTime(); NSUInteger hits = r->cache->functionHits;
+    id<MTLFunction> f = [r->cache function:@(src) entry:name error:&err];
     static int log = -1; if (log < 0) log = getenv("DSR_PSOLOG") != 0;
-    if (log) fprintf(stderr, "dsr: game shader %u (%s) compiled in %.1f ms (frame %d)\n", pid, what, (CACurrentMediaTime() - t0) * 1000, dsr_frame);
+    if (log) fprintf(stderr, "dsr: game shader %u (%s) %s in %.1f ms (frame %d)\n", pid, what, r->cache->functionHits > hits ? "reused" : "compiled", (CACurrentMediaTime() - t0) * 1000, dsr_frame);
     if (!f) { static int n; if (n++ < 20) fprintf(stderr, "dsr: game shader %u (%s): %s\n", pid, what, err ? err.localizedDescription.UTF8String : "no entry point"); }
     return f;
 }
@@ -1044,7 +1082,7 @@ static id<MTLRenderPipelineState> gpipeline(DSRRenderer *r, GP *g, const GAttr *
         v.layouts[VB_DEFAULTS].stride = 16; v.layouts[VB_DEFAULTS].stepFunction = MTLVertexStepFunctionConstant; v.layouts[VB_DEFAULTS].stepRate = 0; break; }
     d.vertexDescriptor = v;
     double t0 = CACurrentMediaTime();
-    id<MTLRenderPipelineState> pso = [r->dev newRenderPipelineStateWithDescriptor:d error:&err];
+    id<MTLRenderPipelineState> pso = [r->cache pipeline:d error:&err];
     if (!pso) { static int n; if (n++ < 20) fprintf(stderr, "dsr: pipeline for game shader %08x: %s\n", g->hash, err.localizedDescription.UTF8String); }
     static int psolog = -1; if (psolog < 0) psolog = getenv("DSR_PSOLOG") != 0;
     if (psolog) fprintf(stderr, "dsr: game pipeline %08x in %.1f ms (frame %d)\n", g->hash, (CACurrentMediaTime() - t0) * 1000, dsr_frame);
@@ -1139,7 +1177,7 @@ static void gdraw(DSRRenderer *r, const uint32_t *p, uint32_t size, int vb)
         if (g->samp[k] == 2) x = t && t->tex.textureType == MTLTextureTypeCube ? (t->sview ? t->sview : t->tex) : r->dummy_cube;
         else if (g->samp[k] == 3) x = t && t->tex.textureType == MTLTextureType3D ? t->tex : r->dummy_3d;
         else x = t && t->tex && (t->view2d || t->tex.textureType == MTLTextureType2D) && !(t->tex == rt->tex) ? tex_sampled(t) : r->dummy;
-        [e setFragmentTexture:x atIndex:(NSUInteger)k]; [e setFragmentSamplerState:sampler_for(r, k) atIndex:(NSUInteger)k];
+        [e setFragmentTexture:sampler_texture(r, t, x, k) atIndex:(NSUInteger)k]; [e setFragmentSamplerState:sampler_for(r, k) atIndex:(NSUInteger)k];
     }
     if (indexed == 2) [e drawIndexedPrimitives:pt indexCount:icount indexType:it indexBuffer:r->ring indexBufferOffset:xoff instanceCount:1 baseVertex:vb ? (NSInteger)(int32_t)p[6] : 0 baseInstance:0];
     else if (indexed) [e drawIndexedPrimitives:pt indexCount:icount indexType:it indexBuffer:ibuf indexBufferOffset:ioff instanceCount:1 baseVertex:(NSInteger)(int32_t)p[6] baseInstance:0];
@@ -1204,7 +1242,9 @@ int dsr_renderer_exec(DSRRenderer *r, uint32_t op, const uint8_t *pl, uint32_t s
           Surf *t = surf(r, p[0]); if (n > 0 && r->rs[28]) { n--; fprintf(stderr, "dsr: frame %d: render target %u (%ux%u) depth %u, after %ld draws\n", dsr_frame, p[0], t ? t->w : 0, t ? t->h : 0, p[1], dsr_stat[0]); } }
         break;
     case DSR_SURFACE_CREATE: surface_create(r, p, size); break;
-    case DSR_SURFACE_DESTROY: if (p[0] < MAXSURF) { r->s[p[0]].used = 0; r->s[p[0]].tex = nil; } break;
+    case DSR_SURFACE_DESTROY: if (p[0] < MAXSURF) {
+        Surf *s = &r->s[p[0]]; s->used = 0; s->tex = s->view2d = s->sview = s->srgb = s->srgb2d = nil;
+    } break;
     case DSR_SURFACE_UPLOAD: surface_upload(r, p, size); break;
     case DSR_UPLOAD_OVER: upload_over(r, p, size); break;
     case DSR_READBACK: readback(r, p); break;

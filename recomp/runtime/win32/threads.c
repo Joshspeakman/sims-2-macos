@@ -2,12 +2,10 @@
  * the recompiled code. In harness (deterministic) mode threads are created but never started: the emulator side is
  * single-threaded, so the comparison ends at the first wait that would depend on another thread. */
 #include "w32.h"
+#include "thread_state.h"
 #include <setjmp.h>
 #include <unistd.h>
 
-typedef struct Sync { pthread_mutex_t m; pthread_cond_t cv; int manual, signaled, count; uint32_t owner; char name[64]; int waiters, closed; } Sync;   /* same in core.c and threads.c */
-typedef struct ThreadObj { Sync s; uint32_t teb, tid, exit_code, suspended; pthread_t pt; } ThreadObj;
-ThreadObj *w32_thread_obj(uint32_t teb);
 extern __thread jmp_buf *fault_jmp; extern __thread uint32_t fault_pc; extern __thread const char *fault_what;
 static __thread jmp_buf *thread_exit_jmp; static __thread uint32_t thread_exit_code;
 
@@ -18,6 +16,7 @@ static void *thread_main(void *arg)
     { void w32_crash_thread_at(uint32_t); w32_crash_thread_at(st->fn); }
     pthread_mutex_lock(&t->s.m);
     while (t->suspended) pthread_cond_wait(&t->s.cv, &t->s.m);
+    t->started = 1;
     pthread_mutex_unlock(&t->s.m);
     jmp_buf ej, fj; thread_exit_jmp = &ej; fault_jmp = &fj;
     extern __thread Ctx *w32_cur_ctx; w32_cur_ctx = &st->c;
@@ -41,6 +40,7 @@ IMPL(kernel32, CreateThread)
     uint32_t teb = w32_new_thread_teb(lo, lo + size);
     if (!teb) { w32_set_last_error(c, 8); RET(0, 6); }
     ThreadObj *t = w32_thread_obj(teb);
+    t->started = 0;
     t->suspended = (flags & 4) || w32_deterministic;            /* CREATE_SUSPENDED; harness: never runs */
     Start *st = calloc(1, sizeof *st); st->fn = fn; st->t = t;
     st->c.fs_base = teb; st->c.fcw = 0x027f; st->c.mxcsr = 0x1f80; st->c.f.eflags = 0x202;
@@ -51,7 +51,9 @@ IMPL(kernel32, CreateThread)
     if (tidp) rt_w32(G_MEM, tidp, t->tid);
     if (!w32_deterministic) {
         pthread_attr_t a; pthread_attr_init(&a); pthread_attr_setstacksize(&a, 64u << 20);
-        pthread_create(&t->pt, &a, thread_main, st); pthread_detach(t->pt);
+        int err = pthread_create(&t->pt, &a, thread_main, st); pthread_attr_destroy(&a);
+        if (err) { free(st); h_close(h); w32_set_last_error(c, 8); RET(0, 6); }
+        pthread_detach(t->pt);
     }
     RET(h, 6);
 }
@@ -61,16 +63,40 @@ IMPL(kernel32, ExitThread)
     if (thread_exit_jmp) longjmp(*thread_exit_jmp, 1);
     w32_exit(c, ARG(0));                                         /* the main thread: the process ends */
 }
+static ThreadObj *thread_from_handle(Ctx *c, uint32_t h)
+{
+    if (h == 0xfffffffeu) return w32_thread_obj(c->fs_base);
+    HObj *o = h_get(h, H_THREAD); return o ? o->p : NULL;
+}
 IMPL(kernel32, ResumeThread)
 {
-    HObj *o = h_get(ARG(0), H_THREAD); if (!o) RET(0xffffffffu, 1);
-    ThreadObj *t = o->p; pthread_mutex_lock(&t->s.m);
+    ThreadObj *t = thread_from_handle(c, ARG(0));
+    if (!t) { w32_set_last_error(c, 6); RET(0xffffffffu, 1); }
+    pthread_mutex_lock(&t->s.m);
     uint32_t prev = t->suspended;
     if (t->suspended && !w32_deterministic) { t->suspended--; pthread_cond_broadcast(&t->s.cv); }
     pthread_mutex_unlock(&t->s.m);
     RET(prev, 1);
 }
-IMPL(kernel32, SuspendThread) { fprintf(stderr, "w32: SuspendThread of a running thread is not supported\n"); RET(0, 1); }
+IMPL(kernel32, SuspendThread)
+{
+    ThreadObj *t = thread_from_handle(c, ARG(0));
+    if (!t) { w32_set_last_error(c, 6); RET(0xffffffffu, 1); }
+    pthread_mutex_lock(&t->s.m);
+    int self = t->teb == c->fs_base;
+    /* A guest can park itself, or increase an already suspended thread's count.
+     * Arbitrary asynchronous pthread suspension is unsafe: report unsupported
+     * instead of claiming success while the target continues to run. */
+    uint32_t err = t->s.signaled ? 6 : t->suspended >= 127 ? 156 :
+                   !self && t->started && !t->suspended ? 50 : 0;
+    if (err) { pthread_mutex_unlock(&t->s.m); w32_set_last_error(c, err); RET(0xffffffffu, 1); }
+    uint32_t prev = t->suspended++;
+    if (self && !w32_deterministic) {
+        while (t->suspended) pthread_cond_wait(&t->s.cv, &t->s.m);
+    }
+    pthread_mutex_unlock(&t->s.m);
+    RET(prev, 1);
+}
 IMPL(kernel32, TerminateThread) { fprintf(stderr, "w32: TerminateThread not supported\n"); RET(0, 2); }
 IMPL(kernel32, GetExitCodeThread)
 {
@@ -99,6 +125,7 @@ int w32_spawn_service(void (*fn)(Ctx *, void *), void *arg)
     Svc *s = calloc(1, sizeof *s); s->fn = fn; s->arg = arg;
     s->c.fs_base = teb; s->c.fcw = 0x027f; s->c.mxcsr = 0x1f80; s->c.f.eflags = 0x202; s->c.esp = lo + size - 64;
     pthread_attr_t a; pthread_attr_init(&a); pthread_attr_setstacksize(&a, 64u << 20);
-    pthread_t t; pthread_create(&t, &a, svc_main, s); pthread_detach(t);
+    pthread_t t; int err = pthread_create(&t, &a, svc_main, s); pthread_attr_destroy(&a);
+    if (err) { free(s); return -1; } pthread_detach(t);
     return 0;
 }

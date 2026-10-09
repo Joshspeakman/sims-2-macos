@@ -1,0 +1,9 @@
+name: macOS checks
+on: [push, pull_request]
+jobs:
+  native:
+    runs-on: macos-15
+    steps:
+      - uses: actions/checkout@v4
+      - name: Host, runtime and Metal regressions
+        run: bash recomp/tests/check_macos.sh

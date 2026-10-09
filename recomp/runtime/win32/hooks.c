@@ -96,6 +96,7 @@ int rt_override(Ctx *c, uint32_t addr)
         c->esp += 8;
         return 1;
 #elif defined(SIMS2_EDITION)
+    case 0xa0084dcbu: { int sims2_texture_compress(Ctx *); return sims2_texture_compress(c); }
     case 0xa0c2b206u:                                     /* crashpad setup (cdecl, three string pointers, result unused) */
         c->esp += 4; return 1;
     case 0xa09cc611u: {   /* RefPack compression (cdecl: source, length, destination, window, flag; returns the stream's length):
