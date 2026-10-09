@@ -232,15 +232,24 @@ void rt_call(Ctx *c, uint32_t t)
     uint32_t ret = rt_r32(G_MEM, c->esp);
 again:
 #endif
-    if (seh_set_n >= SEH_SET || seh_known(t))
-    for (RtSehPad *p = seh_pads; p; p = p->next)              /* control transfer to an __except block? */
-        for (const uint32_t *h = p->handlers; *h; h++) if (*h == t) {
-            Ctx *dst = p->c;
-            if (dst != c) { uint32_t fs = dst->fs_base; *dst = *c; dst->fs_base = fs; }   /* registers as the dispatcher left them */
-            p->target = t; seh_pads = p;                      /* frames above the target are gone */
-            w32_seh_abandon();
-            _longjmp(p->jb, 1);
+    if (seh_set_n >= SEH_SET || seh_known(t)) {               /* control transfer to an __except block or catch continuation? */
+        RtSehPad *hit = 0;
+        for (RtSehPad *p = seh_pads; p; p = p->next) {
+            int has = 0; for (const uint32_t *h = p->handlers; *h; h++) if (*h == t) { has = 1; break; }
+            if (!has) continue;
+            if (!hit) hit = p;
+            /* a recursive function has a pad per call: _JumpToContinuation holds the catching frame's registration
+             * node in ebx, and a pad's frame is that node, so that one is meant */
+            if (p->frame == c->ebx) { hit = p; break; }
         }
+        if (hit) {
+            Ctx *dst = hit->c;
+            if (dst != c) { uint32_t fs = dst->fs_base; *dst = *c; dst->fs_base = fs; }   /* registers as the dispatcher left them */
+            hit->target = t; seh_pads = hit;                  /* frames above the target are gone */
+            w32_seh_abandon();
+            _longjmp(hit->jb, 1);
+        }
+    }
     if (t >= RT_IMPORT_BASE) {
 #ifdef DS2_BROKEN_WORLD
         uint32_t next = rt_r32(G_MEM, c->esp);

@@ -262,6 +262,50 @@ class Lifter:
                     if enc is None or not (enc == 0xffffffff or enc < e) or not (self.TLO <= hnd < self.THI) or (flt and not (self.TLO <= flt < self.THI)): break
                     if flt: out.append(hnd)
         return sorted(set(out))
+    def cxx_continuations(self, insns):
+        """Visual C++ try/catch: where execution resumes after each catch block of this function. The prologue registers
+        a frame handler stub (push -1; push stub; mov eax, fs:[0]) that is "mov eax, FuncInfo; jmp __CxxFrameHandler";
+        FuncInfo's try blocks list catch funclets, and each funclet returns its continuation ("mov eax, offset; ret"),
+        to which the C runtime then jumps with the function's ebp and esp (_JumpToContinuation's "jmp eax"). They become
+        landing-pad targets like __except blocks: without one, that jump ran the rest of the function as a call and
+        returned into the C runtime's handler on the wrong frame (The Sims 2 froze on its first caught exception)."""
+        order = sorted(insns); out = set(); self.cur_eh_calls = set()
+        for k in range(len(order) - 1):
+            a, b = insns[order[k]], insns[order[k + 1]]
+            push_form = a.mnemonic == 'push' and a.operands and a.operands[0].type == X.X86_OP_IMM and b.mnemonic == 'mov' and b.op_str == 'eax, dword ptr fs:[0]'
+            # or "mov eax, stub; call __EH_prolog", which registers it and sets up ebp (the node at ebp - 0xc)
+            helper_form = a.mnemonic == 'mov' and a.op_str.startswith('eax, 0x') and b.mnemonic == 'call' and b.operands and b.operands[0].type == X.X86_OP_IMM
+            if not (push_form or helper_form): continue
+            stub = (a.operands[0].imm if push_form else a.operands[1].imm) & 0xffffffff
+            before = len(out)
+            if not (self.TLO <= stub < self.THI): continue
+            fi, va = None, stub
+            for _ in range(8):                                     # nop padding, cookie checks, then mov eax, FuncInfo; jmp
+                i = self.ins(va)
+                if i is None: break
+                if i.mnemonic == 'mov' and i.op_str.startswith('eax, 0x') and i.operands[1].type == X.X86_OP_IMM: fi = i.operands[1].imm & 0xffffffff
+                if i.mnemonic == 'jmp': break
+                va += i.size
+            magic = self.pe.u32(fi) if fi else None
+            if magic is None or not (0x19930520 <= magic <= 0x19930522): continue
+            ntry, ptry = self.pe.u32(fi + 12), self.pe.u32(fi + 16)
+            if ntry is None or ntry > 256 or not ptry: continue
+            for t in range(ntry):
+                nc, ph = self.pe.u32(ptry + 20 * t + 12), self.pe.u32(ptry + 20 * t + 16)
+                if nc is None or nc > 64 or ph is None: break
+                for h in range(nc):
+                    funclet = self.pe.u32(ph + 16 * h + 12)
+                    if not funclet or not (self.TLO <= funclet < self.THI): continue
+                    def returns(va3):                          # a ret here, or a jmp to one (a shared return)
+                        n = self.ins(va3)
+                        if n is not None and n.mnemonic == 'jmp' and n.operands[0].type == X.X86_OP_IMM: n = self.ins(n.operands[0].imm & 0xffffffff)
+                        return n is not None and n.mnemonic == 'ret'
+                    for va2, i in self.collect(funclet).items():
+                        if i.mnemonic == 'mov' and i.op_str.startswith('eax, 0x') and i.operands[1].type == X.X86_OP_IMM:
+                            cont = i.operands[1].imm & 0xffffffff
+                            if returns(va2 + i.size) and self.TLO <= cont < self.THI: out.add(cont)
+            if helper_form and len(out) > before: self.cur_eh_calls.add(order[k + 1])   # the landing pad goes after this call
+        return sorted(out)
     def keeps_frame(self, f, insns):
         """push ebp; mov ebp, esp at the entry, and nothing else in the function sets ebp (pop ebp/leave end it)"""
         a = insns.get(f); b = a and insns.get(f + a.size)
@@ -277,7 +321,7 @@ class Lifter:
         insns = self.collect(f)
         # Flat guest blocks return to the dispatcher at every CALL. A C stack
         # landing pad cannot remain registered after such a block returns.
-        seh = [] if self.guest_flow else self.seh_handlers(insns)
+        seh = [] if self.guest_flow else sorted(set(self.seh_handlers(insns)) | set(self.cxx_continuations(insns)))
         if seh: insns = self.collect(f, seh)
         self.cur_seh = set(seh)
         order = sorted(insns)
@@ -335,10 +379,11 @@ class Lifter:
                     body = 'SPILL; rt_exception(c, 0x%08xu, 0xc000001du); /* illegal here: %s; %s %s */ RELOAD;' % (va, str(e).replace('"', '').replace('*/', ''), i.mnemonic, i.op_str)
                 else:                    # the game: a lifter gap, fatal with a clear message
                     body = 'SPILL; rt_unhandled(c, 0x%08xu, "%s"); /* %s %s */' % (va, str(e).replace('"', ''), i.mnemonic, i.op_str)
-            if seh and i.mnemonic == 'mov' and i.op_str == 'dword ptr fs:[0], esp':
+            eh_call = va in getattr(self, 'cur_eh_calls', ())
+            if seh and (i.mnemonic == 'mov' and i.op_str == 'dword ptr fs:[0], esp' or eh_call):
                 cases = ' '.join('case 0x%08xu: goto L_%08x;' % (h, h) for h in seh)
-                body += (' { static const uint32_t seh_h[] = {%s, 0}; seh_pad.frame = esp; seh_pad.handlers = seh_h; seh_pad.c = c; SPILL; rt_seh_push(&seh_pad);'
-                         ' if (_setjmp(seh_pad.jb)) { RELOAD; switch (seh_pad.target) { %s } } }') % (', '.join('0x%08xu' % h for h in seh), cases)
+                body += (' { static const uint32_t seh_h[] = {%s, 0}; seh_pad.frame = %s; seh_pad.handlers = seh_h; seh_pad.c = c; SPILL; rt_seh_push(&seh_pad);'
+                         ' if (_setjmp(seh_pad.jb)) { RELOAD; switch (seh_pad.target) { %s } } }') % (', '.join('0x%08xu' % h for h in seh), 'ebp - 0xcu' if eh_call else 'esp', cases)
             if seh:   # leaving the function (return or tail call) drops its landing pad
                 body = re.sub(r'SPILL; ((?:f_[0-9a-f]{8}\(c\)|rt_call\(c, t\)|rt_import\(c, \d+\)); )?return;', lambda m: 'rt_seh_pop(&seh_pad); ' + m.group(0), body)
             if va in self.hooks:      # native features: runtime/win32/hooks.c runs before this instruction
