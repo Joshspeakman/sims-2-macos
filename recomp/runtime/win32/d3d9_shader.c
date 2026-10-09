@@ -270,6 +270,10 @@ static char *msl_ps(const char *ps)
         "        if (d3d_f == 1) d3d_pass = false; else if (d3d_f == 2) d3d_pass = d3d_a < d3d_r; else if (d3d_f == 3) d3d_pass = d3d_a == d3d_r; else if (d3d_f == 4) d3d_pass = d3d_a <= d3d_r;\n"
         "        else if (d3d_f == 5) d3d_pass = d3d_a > d3d_r; else if (d3d_f == 6) d3d_pass = d3d_a != d3d_r; else if (d3d_f == 7) d3d_pass = d3d_a >= d3d_r;\n"
         "        if (!d3d_pass) discard_fragment();\n    }\n    ", col);
+    {   /* development: D3D9_PAINT_MSL=<text>: pixel shaders whose Metal source contains it draw solid magenta */
+        const char *pt = getenv("D3D9_PAINT_MSL");
+        if (pt && *pt && strstr(ps, pt)) { char c2[1200]; snprintf(c2, sizeof c2, "output.%s = float4(1.0, 0.0, 1.0, 1.0);\n    %s", col, code); snprintf(code, sizeof code, "%s", c2); }
+    }
     return msl_wrap(ps, "psmain", "constant float4 &d3d_alphatest [[buffer(1)]]", code);
 }
 #endif

@@ -945,9 +945,14 @@ static uint32_t shash(Shader9 *s) { if (!s) return 0; uint32_t h = 2166136261u; 
 static void trace_draw(Dev9 *d, const char *kind, uint32_t prim, uint32_t n, const char *skip)
 {
     if (!dtrace) return;
+    if (d->vs) fprintf(stderr, "draw: program %u ", d9_shader_program(d));
     fprintf(stderr, "draw: %s prim %u n %u vs %08x ps %s%08x fvf %x%s | rt %ux%u | z %u/%u cull %u blend %u (%u,%u) atest %u/%u ref %u",
             kind, prim, n, shash(d->vs), d->ps ? "" : "FF:", shash(d->ps), d->fvf, d->decl ? " decl" : "", d->rt ? d->rt->w : 0, d->rt ? d->rt->h : 0,
             d->rs[7], d->rs[23], d->rs[22], d->rs[27], d->rs[19], d->rs[20], d->rs[15], d->rs[25], d->rs[24]);
+    if (d->ps) {                                       /* a pixel shader: every bound sampler (C cube, V volume) */
+        for (int st = 0; st < 16; st++) if (d->tex[st]) { Tex9 *t = d->tex[st];
+            fprintf(stderr, " | s%d %s%ux%u f%u", st, t->type == O9_CUBE ? "C" : t->type == O9_VOLTEX ? "V" : "", t->w, t->h, t->fmt); }
+    } else
     for (int st = 0; st < 8; st++) {
         if (!d->tex[st] && (st >= 1 || d->tss[st][1] == 1)) { if (d->tss[st][1] == 1) break; }
         Tex9 *t = d->tex[st];
@@ -1129,6 +1134,11 @@ M(dv_GetNPatchMode, 1) FPUSH(0.0); RET(0, 1); END
 static int shader_bind(Dev9 *d)
 {
     uint32_t id = d9_shader_program(d); if (!id) return 0;
+    {   /* development: D3D9_SKIP_SHADER=<hash>,... (the draw trace's vs/ps hashes): those draws are left out */
+        static uint32_t skip[16]; static int nskip = -1;
+        if (nskip < 0) { nskip = 0; const char *e = getenv("D3D9_SKIP_SHADER"); while (e && *e && nskip < 16) { skip[nskip++] = (uint32_t)strtoul(e, (char **)&e, 16); if (*e == ',') e++; else break; } }
+        if (nskip) { uint32_t hv = shash(d->vs), hp = shash(d->ps); for (int k = 0; k < nskip; k++) if (skip[k] == hv || skip[k] == hp) return 0; }
+    }
     { static int lg = -1; if (lg < 0) lg = getenv("D3D9_SHADERLOG") != 0;     /* each program's declarations, once */
       static uint64_t seen[4096]; static int ns;
       if (lg && d->decl) { uint64_t key = (uint64_t)id << 32 | (uint32_t)(uintptr_t)d->decl; int f = 0; for (int k = 0; k < ns; k++) if (seen[k] == key) f = 1;

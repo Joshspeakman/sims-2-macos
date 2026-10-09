@@ -32,6 +32,7 @@ struct VOut {
     float2 uv;                       // stage 0 coordinates (after its texture transform)
     float2 uv1;                      // stage 1 coordinates
     float3 tcproj;                   // projected texgen (camera-space position * tex0)
+    float3 tcproj1;                  // the same for stage 1 (* tex1): The Sims 2's water reads a depth gradient this way
     float fogf;
 };
 
@@ -55,7 +56,7 @@ vertex VOut vs_main(VIn in [[stage_in]], constant Uniforms &u [[buffer(1)]])
         float y = 1.0 - (in.pos.y + 0.5 - u.vp.y) / u.vp.w * 2.0;
         o.pos = float4(x * w, y * w, in.pos.z * w, w);
         o.fogf = 1.0;
-        o.tcproj = float3(0, 0, 1);
+        o.tcproj = float3(0, 0, 1); o.tcproj1 = float3(0, 0, 1);
     } else {
         float4 p = float4(in.pos.xyz, 1.0);
         o.pos = u.wvp * p;
@@ -63,7 +64,7 @@ vertex VOut vs_main(VIn in [[stage_in]], constant Uniforms &u [[buffer(1)]])
         o.pos.y -= o.pos.w / u.vp.w;
         float4 cam = u.wv * p;
         o.fogf = u.fog.z != 0 ? clamp((u.fog.y - cam.z) / (u.fog.y - u.fog.x), 0.0, 1.0) : 1.0;
-        o.tcproj = (u.tex0 * cam).xyz;
+        o.tcproj = (u.tex0 * cam).xyz; o.tcproj1 = (u.tex1 * cam).xyz;
     }
     o.diffuse = in.diffuse;
     o.uv = ttf(in.uv, u.tex0, u.a0.z, u.a0.w);
@@ -118,7 +119,9 @@ fragment float4 fs_main(VOut in [[stage_in]], constant Uniforms &u [[buffer(1)]]
         float4 a = u.c0.w == 1 ? current : op(u.c0.w, arg(u.a0.x, diffuse, current, texel, u.tfactor), arg(u.a0.y, diffuse, current, texel, u.tfactor), diffuse, texel, u.tfactor, current);
         current = float4(c.rgb, a.a);
         if (u.c1.x != 1) {
-            float4 texel1 = u.misc.w ? t1.sample(s1, in.uv1) : float4(1);
+            float2 uv1 = in.uv1;
+            if ((u.s1.x & 0xffff0000) == 0x20000) uv1 = (u.s1.y & 0x100) ? in.tcproj1.xy / in.tcproj1.z : in.tcproj1.xy;   // TCI_CAMERASPACEPOSITION
+            float4 texel1 = u.misc.w ? t1.sample(s1, uv1) : float4(1);
             if (u.xrgb.y) texel1.a = 1;
             float4 c1 = op(u.c1.x, arg(u.c1.y, diffuse, current, texel1, u.tfactor), arg(u.c1.z, diffuse, current, texel1, u.tfactor), diffuse, texel1, u.tfactor, current);
             float4 a1 = u.c1.w == 1 ? current : op(u.c1.w, arg(u.a1.x, diffuse, current, texel1, u.tfactor), arg(u.a1.y, diffuse, current, texel1, u.tfactor), diffuse, texel1, u.tfactor, current);

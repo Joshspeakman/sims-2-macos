@@ -185,6 +185,21 @@ Build on the Mac without the 26 GB analysis: copy `recomp/work/sims2/analysis.js
 Not yet on the Mac: the game's own Graphics menu has not been opened (its resolution list), build/buy and
 Create-a-Sim are untested, audio is muted in tests, and the Sim thumbnails of the families panel were not checked.
 
+### Neighbourhood water (open, 2026-10-09)
+
+Belladonna Cove's Central Park pond draws as the lake bed (dark green), with no water surface over it. What's known:
+- The pond's pixels are identical with the cube-mapped water program skipped (vs 0376492c / ps 0d292ba2, program 65551
+  in that session: a 434-vertex mesh plus small ones, sampler 2 a DXT1 cube map): it runs, translates and binds
+  without errors, yet leaves nothing on screen there (D3D9_PAINT_MSL=texturecube paints only the lot markers).
+- The terrain is program 65546 (17,514-triangle mesh, diffuse + normal map); 47 fixed-function draws blend its
+  layers (A8 alpha map + DXT1, z EQUAL). Four 2-triangle fixed-function draws use a 512x512 DXT1 texture and a 1x64
+  gradient through stage-1 camera-space texgen, now implemented (shaders.metal tcproj1) with no visible change.
+- No off-screen render targets in a neighbourhood frame (no reflection pass).
+Next: compare against a Windows screenshot of the same view; check where program 65551's geometry lands (its
+transformed positions) and whether its depth test or colour writes reject it.
+Tools: D3D9_DRAWTRACE_ON=<file> (program, shaders, samplers incl. cube maps), D3D9_SKIP_SHADER=<hash,...>,
+D3D9_PAINT_MSL=<text>, D3D9_MSL_DUMP=<dir>.
+
 ## Tests
 
 ```sh
