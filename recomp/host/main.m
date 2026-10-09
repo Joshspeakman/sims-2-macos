@@ -28,7 +28,7 @@ void w32_post(uint32_t tid, uint32_t hwnd, uint32_t msg, uint32_t wp, uint32_t l
 void w32_set_cursor(int x, int y);
 uint32_t w32_window_tid(uint32_t hwnd);
 extern uint8_t w32_keys[256];
-extern int w32_screen_w, w32_screen_h; extern double w32_screen_scale;
+extern int w32_screen_w, w32_screen_h, w32_screen_hz; extern double w32_screen_scale;
 extern void (*w32_host_window_created)(uint32_t, int, int, int, int, uint32_t);
 extern void (*w32_host_window_changed)(uint32_t, int, int, int, int, int);
 extern char dsr_snapshot_path[1024];
@@ -215,6 +215,11 @@ static const char *script_tick(uint32_t fno)       /* returns a screenshot path 
             if (fno == a->frame) { mot_home = 8; mot_dx = a->x; mot_dy = a->y; }
             if (fno == a->frame + 20) post(r ? 0x204 : 0x201, r ? 2 : 1, pos_lp());
             if (fno == a->frame + 24) post(r ? 0x205 : 0x202, 0, pos_lp());
+        } else if (!strcmp(a->kind, "tap")) {             /* tap:x,y: the cursor straight to x,y (no trip through the corner,
+                                                              which scrolls the game's camera at the screen edge), then a click */
+            if (fno >= a->frame && fno < a->frame + 15) { w32_set_cursor(a->x, a->y); vcur_x = a->x; vcur_y = a->y; post(0x200, mk(), pos_lp()); }   /* hover: the game picks what is under the cursor over a few frames */
+            if (fno == a->frame + 15) { w32_keys[1] = 0x80; post(0x201, 1, pos_lp()); }
+            if (fno == a->frame + 20) { w32_keys[1] = 0; post(0x202, 0, pos_lp()); }
         } else if (!strcmp(a->kind, "press")) {           /* press:x,y: the left button pressed and held (until a later click) */
             if (fno == a->frame) { mot_home = 8; mot_dx = a->x; mot_dy = a->y; }
             if (fno == a->frame + 20) post(0x201, 1, pos_lp());
@@ -325,6 +330,7 @@ static void capture(int on);
  * the same answer from all of them keeps it across hiding and showing the app too. The launcher's Notch row: around
  * (DS_NOTCH=around) the whole display, the camera housing over the picture's top centre; otherwise the area below it
  * (AppKit would move this borderless window below the notch without making it shorter, its bottom off the screen). */
+static int windowed(void) { static int v = -1; if (v < 0) v = getenv("DS_WINDOWED") && atoi(getenv("DS_WINDOWED")); return v; }   /* the launcher's Window row */
 static int notch_around(void) { static int v = -1; if (v < 0) v = getenv("DS_NOTCH") && !strcmp(getenv("DS_NOTCH"), "around"); return v; }
 @interface GameWindow : NSWindow @end
 @implementation GameWindow
@@ -383,6 +389,14 @@ static void rel_motion(double gx, double gy)
     static double acc; acc += e.hasPreciseScrollingDeltas ? e.scrollingDeltaY / 10.0 : e.scrollingDeltaY;
     while (acc >= 1 || acc <= -1) { int d = acc > 0 ? 1 : -1; acc -= d; w32_di_mouse_wheel(120 * d); post(0x20a, ((uint32_t)(int16_t)(120 * d) << 16) | mk(), pos_lp()); }
 }
+#ifdef SIMS2_EDITION
+/* The Sims 2: a trackpad pinch zooms the camera as the mouse wheel does (a wheel notch for each step of the pinch) */
+- (void)magnifyWithEvent:(NSEvent *)e
+{
+    static double acc; acc += e.magnification * 8;
+    while (acc >= 1 || acc <= -1) { int d = acc > 0 ? 1 : -1; acc -= d; w32_di_mouse_wheel(120 * d); post(0x20a, ((uint32_t)(int16_t)(120 * d) << 16) | mk(), pos_lp()); }
+}
+#endif
 - (void)keyDown:(NSEvent *)e
 {
     if (e.modifierFlags & NSEventModifierFlagCommand) { [super keyDown:e]; return; }
@@ -430,6 +444,12 @@ static void window_created(uint32_t hwnd, int x, int y, int w, int h, uint32_t s
         NSRect f = NSScreen.mainScreen.frame;
         NSWindowStyleMask sm = NSWindowStyleMaskBorderless;
         if (test_mode) { f = NSMakeRect(80, 80, 960, 620); sm = NSWindowStyleMaskTitled | NSWindowStyleMaskMiniaturizable; }
+        else if (windowed()) {                                        /* the launcher's Window row: 80% of the screen, the game's shape */
+            NSRect v = NSScreen.mainScreen.visibleFrame; double a = (double)w32_screen_w / w32_screen_h, h = v.size.height * 0.8, w = h * a;
+            if (w > v.size.width * 0.8) { w = v.size.width * 0.8; h = w / a; }
+            f = NSMakeRect(NSMidX(v) - w / 2, NSMidY(v) - h / 2, w, h);
+            sm = NSWindowStyleMaskTitled | NSWindowStyleMaskClosable | NSWindowStyleMaskMiniaturizable | NSWindowStyleMaskResizable;
+        }
         else if (lab_mode) {                                          /* the left of the screen; the Test Lab's window takes the right */
             NSRect v = NSScreen.mainScreen.visibleFrame; CGFloat w = floor(v.size.width - 560), h = floor(fmin(v.size.height - 40, w * 0.625));
             f = NSMakeRect(v.origin.x + 10, NSMaxY(v) - h - 30, w - 20, h);
@@ -442,6 +462,7 @@ static void window_created(uint32_t hwnd, int x, int y, int w, int h, uint32_t s
         GameView *v = [[GameView alloc] initWithFrame:f]; v.wantsLayer = YES;
         win.contentView = v; [win makeFirstResponder:v];
         win.collectionBehavior = NSWindowCollectionBehaviorFullScreenPrimary;
+        if (windowed() && !test_mode) win.contentAspectRatio = NSMakeSize(w32_screen_w, w32_screen_h);
         [win setLevel:NSNormalWindowLevel];
     });
 }
@@ -456,7 +477,8 @@ static void window_changed(uint32_t hwnd, int x, int y, int w, int h, int visibl
             else if (lab_mode) { [win makeKeyAndOrderFront:nil]; [NSApp activateIgnoringOtherApps:YES]; void lab_window_show(void); lab_window_show(); }
             else {
                 [win makeKeyAndOrderFront:nil]; [NSApp activateIgnoringOtherApps:YES]; capture(1);
-                if (getenv("DS_BORDERLESS")) [NSApp setPresentationOptions:NSApplicationPresentationHideDock | NSApplicationPresentationHideMenuBar];   /* the old way: a screen-sized window */
+                if (windowed()) ;                                         /* the launcher's Window row */
+                else if (getenv("DS_BORDERLESS")) [NSApp setPresentationOptions:NSApplicationPresentationHideDock | NSApplicationPresentationHideMenuBar];   /* the old way: a screen-sized window */
                 else enter_fullscreen();
             }
         }
@@ -501,6 +523,62 @@ static void ensure_resolution(const char *drive_c)
 }
 
 
+#ifdef SIMS2_EDITION
+/* The Sims 2 keeps its settings in Config/userProps.xml (<AnyUint32 key="optionShadows" ...>3</AnyUint32>: the
+ * Options screen's levels, which its Graphics Rules.sgr turns into properties at start-up; the camera's; and
+ * activeDeviceDisplayMode, its screen "WxHx32xHz"). Before the game starts:
+ *   - the screen is set to the one the launch window chose (the game would keep the size it saved), test runs included
+ *     when DS_RESOLUTION is given;
+ *   - S2_PROPS ("optionShadows=2;horzedgescrollrate=1;..."): the launch window's Graphics, Detail and Camera rows that
+ *     override the game's own choice, written into the file;
+ *   - the first time (no userProps.xml yet: the game writes it on its first run), the same choices as the properties
+ *     they stand for (S2_STARTUP, "boolProp simShadows false;...") in the game's userStartup.cheat, which it runs at
+ *     start-up, between marker lines (anything else the player keeps there stays); once the file exists that block is
+ *     removed again. */
+static NSString *sims2_config(const char *drive_c) { return [NSString stringWithFormat:@"%s/Users/player/Documents/EA Games/The Sims 2 Legacy/Config", drive_c]; }
+static void sims2_cheat(const char *drive_c, const char *e)
+{
+    NSString *dir = sims2_config(drive_c), *path = [dir stringByAppendingPathComponent:@"userStartup.cheat"];
+    NSString *old = [NSString stringWithContentsOfFile:path encoding:NSISOLatin1StringEncoding error:nil];
+    if (!old && !(e && *e)) return;
+    NSMutableArray<NSString *> *keep = [NSMutableArray array]; BOOL in = NO;
+    for (NSString *l in [old ?: @"" componentsSeparatedByCharactersInSet:NSCharacterSet.newlineCharacterSet]) {
+        if ([l hasPrefix:@"# sims-2-macos launch window: begin"]) { in = YES; continue; }
+        if ([l hasPrefix:@"# sims-2-macos launch window: end"]) { in = NO; continue; }
+        if (!in && l.length) [keep addObject:l];
+    }
+    NSMutableString *out = [NSMutableString stringWithString:keep.count ? [[keep componentsJoinedByString:@"\r\n"] stringByAppendingString:@"\r\n"] : @""];
+    NSArray<NSString *> *lines = [[@(e ?: "") componentsSeparatedByString:@";"] filteredArrayUsingPredicate:[NSPredicate predicateWithFormat:@"length > 0"]];
+    if (lines.count) [out appendFormat:@"# sims-2-macos launch window: begin (its Graphics, Detail and Camera rows, for the first run)\r\n%@\r\n# sims-2-macos launch window: end\r\n",
+                      [lines componentsJoinedByString:@"\r\n"]];
+    if (!old && !out.length) return;
+    [NSFileManager.defaultManager createDirectoryAtPath:dir withIntermediateDirectories:YES attributes:nil error:nil];
+    [out writeToFile:path atomically:YES encoding:NSISOLatin1StringEncoding error:nil];
+}
+static void sims2_prefs(const char *drive_c)
+{
+    NSString *path = [sims2_config(drive_c) stringByAppendingPathComponent:@"userProps.xml"];
+    NSMutableString *x = [NSMutableString stringWithContentsOfFile:path encoding:NSUTF8StringEncoding error:nil];
+    if (!x) { sims2_cheat(drive_c, getenv("S2_STARTUP")); fprintf(stderr, HOST_NAME ": first run: the launch window's settings in userStartup.cheat\n"); return; }
+    sims2_cheat(drive_c, NULL);
+    NSMutableDictionary<NSString *, NSString *> *set = [NSMutableDictionary dictionary];
+    for (NSString *kv in [@(getenv("S2_PROPS") ?: "") componentsSeparatedByString:@";"]) {
+        NSRange eq = [kv rangeOfString:@"="]; if (eq.location == NSNotFound) continue;
+        set[[kv substringToIndex:eq.location]] = [kv substringFromIndex:eq.location + 1];
+    }
+    if (!getenv("DS_TEST") || getenv("DS_RESOLUTION"))
+        set[@"activeDeviceDisplayMode"] = [NSString stringWithFormat:@"%dx%dx32x%d", w32_screen_w, w32_screen_h, w32_screen_hz > 0 ? w32_screen_hz : 60];
+    int n = 0;
+    for (NSString *k in set) {   /* <AnyX key="k" type="...">old</AnyX>: the value replaced */
+        NSString *pat = [NSString stringWithFormat:@"(<Any\\w+ key=\"%@\" type=\"[^\"]*\">)[^<]*(</Any\\w+>)", [NSRegularExpression escapedPatternForString:k]];
+        NSRegularExpression *re = [NSRegularExpression regularExpressionWithPattern:pat options:0 error:nil];
+        NSString *rep = [NSString stringWithFormat:@"$1%@$2", [NSRegularExpression escapedTemplateForString:set[k]]];
+        n += (int)[re replaceMatchesInString:x options:0 range:NSMakeRange(0, x.length) withTemplate:rep];
+    }
+    if (n) [x writeToFile:path atomically:YES encoding:NSUTF8StringEncoding error:nil];
+    fprintf(stderr, HOST_NAME ": %d settings set in userProps.xml%s\n", n, set[@"activeDeviceDisplayMode"] ? [NSString stringWithFormat:@" (screen %@)", set[@"activeDeviceDisplayMode"]].UTF8String : "");
+}
+#endif
 #ifdef FNV_EDITION
 /* Fallout: New Vegas (as the Linux host does): the first run makes FalloutPrefs.ini from the game's High preset, as its
  * own launcher does, at the display's size (DS_RESOLUTION to override), naming the adapter d3d9.c reports so the
@@ -720,7 +798,17 @@ int main(int argc, char **argv)
                 }
             }
         }
+#ifdef SIMS2_EDITION
+        {   /* The Sims 2 takes the desktop's size as its screen: the launcher's resolution (with an interface size, the game's
+             * layout size; DSR_RENDER_SCALE draws it larger), else this display in points, below a notch */
+            int rw, rh; const char *r = getenv("DS_RESOLUTION");
+            if (r && sscanf(r, "%dx%d", &rw, &rh) == 2 && rw >= 640 && rh >= 480) { w32_screen_w = rw; w32_screen_h = rh; }
+            else if (@available(macOS 12.0, *)) if (!windowed() && !notch_around()) w32_screen_h -= (int)NSScreen.mainScreen.safeAreaInsets.top;
+            fprintf(stderr, HOST_NAME ": the game's screen is %dx%d%s\n", w32_screen_w, w32_screen_h, getenv("DSR_RENDER_SCALE") ? ", drawn larger (DSR_RENDER_SCALE)" : "");
+        }
+#else
         if (@available(macOS 12.0, *)) if (!getenv("DS_BORDERLESS") && !notch_around()) w32_screen_h -= (int)NSScreen.mainScreen.safeAreaInsets.top;   /* full screen below a notch (the launcher's Notch row) */
+#endif
         if (getenv("DS_TEST_LAB") && !strcmp(getenv("DS_TEST_LAB"), "1")) {   /* the lab window's helper scripts: in the app, or beside a development build */
             NSString *t = [bin stringByAppendingPathComponent:@"../Resources/test_lab"];
             if (![NSFileManager.defaultManager fileExistsAtPath:t]) t = [bin stringByAppendingPathComponent:@"../../../host/test_lab"];
@@ -734,6 +822,8 @@ int main(int argc, char **argv)
 #ifdef FNV_EDITION
         if (!getenv("DSR_FPSCAP")) setenv("DSR_FPSCAP", "60", 1);   /* Gamebryo's physics and animation misbehave above 60 fps unless Havok's step follows (fnv_havok) */
         fnv_prefs(drive_c, game); fnv_havok(drive_c, game);
+#elif defined(SIMS2_EDITION)
+        sims2_prefs(drive_c);
 #else
         ensure_resolution(drive_c);
 #endif

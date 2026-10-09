@@ -66,6 +66,15 @@ static void add_attribute_register(Context *ctx, const RegisterType rtype,
         ctx->uses_fog = 1;  // note that we have to check this later.
 } // add_attribute_register
 
+/* sims-2-macos: ps_1_1..1_3 texture registers start out holding their texture coordinates. GLSL reads those from
+ * built-ins; Metal needs them declared as inputs, so every t register such a shader uses is registered as a TEXCOORD
+ * attribute (the Metal profile maps it with "float4 tN = input.tN"; without this the input struct was missing). */
+static void ps1x_texcoord_input(Context *ctx, const RegisterType rt, const int regnum)
+{
+    if (rt == REG_TYPE_TEXTURE && shader_is_pixel(ctx) && !shader_version_atleast(ctx, 1, 4))
+        add_attribute_register(ctx, REG_TYPE_TEXTURE, regnum, MOJOSHADER_USAGE_TEXCOORD, regnum, 0xF, 0);
+} // ps1x_texcoord_input
+
 static inline TextureType cvtMojoToD3DSamplerType(const MOJOSHADER_samplerType type)
 {
     return (TextureType) (((int) type) + 2);
@@ -453,7 +462,10 @@ static int parse_destination_token(Context *ctx, DestArgInfo *info)
         fail(ctx, "Register type is out of range");
 
     if (!isfail(ctx))
+    {
         set_used_register(ctx, info->regtype, info->regnum, 1);
+        ps1x_texcoord_input(ctx, info->regtype, info->regnum);
+    } // if
 
     return 1;
 } // parse_destination_token
@@ -847,6 +859,7 @@ static int parse_source_token(Context *ctx, SourceArgInfo *info)
     {
         RegisterList *reg;
         reg = set_used_register(ctx, info->regtype, info->regnum, 0);
+        ps1x_texcoord_input(ctx, info->regtype, info->regnum);
         // !!! FIXME: this test passes if you write to the register
         // !!! FIXME:  in this same instruction, because we parse the
         // !!! FIXME:  destination token first.

@@ -55,7 +55,7 @@ struct DSRRenderer {
     double present_ts;
     id<MTLRenderPipelineState> graph_pso; const float *g_a, *g_b; int g_ha, g_hb, g_on;
     /* the game's own shader pairs (DSR_MSL_CREATE; Fallout: New Vegas): see "game shaders" below */
-    struct GP *gp; uint32_t gp_cur; uint8_t vcb[8192], pcb[8192]; uint32_t vcb_len, pcb_len; float atest[4]; int32_t scissor[4];
+    struct GP *gp; uint32_t gp_cur; uint8_t vcb[65536], pcb[16384];   /* MojoShader repeats a relative-addressed array from its base to c255: The Sims 2's skinning shaders take ~17 KB */ uint32_t vcb_len, pcb_len; float atest[4]; int32_t scissor[4];
     uint64_t gpso_k[4096]; id<MTLRenderPipelineState> gpso_v[4096]; int gpso_n;
     uint64_t gdso_k[256]; id<MTLDepthStencilState> gdso_v[256]; int gdso_n;
     id<MTLBuffer> vb[DSR_VBUFS]; uint64_t vb_use[DSR_VBUFS];   /* kept vertex/index buffers (DSR_VBUF_DATA); the command buffer that last used each */
@@ -858,7 +858,7 @@ static void trace_cmd(DSRRenderer *r, uint32_t op, const uint32_t *p, uint32_t s
 #define GP_MAX 16384u
 #define VB_FIRST 2                                   /* vertex buffer indices: 0 constants, 1 pixel-centre offset, 2.. streams */
 #define VB_DEFAULTS 29                               /* (0, 0, 0, 1) for the registers a draw doesn't supply */
-typedef struct GP { __strong id<MTLFunction> vs, fs; uint32_t hash; int ok; uint8_t slot_reg[16]; uint16_t in_regs; uint8_t samp[16]; } GP;   /* slot_reg: register + 1; samp: 1 2D, 2 cube, 3 3D */
+typedef struct GP { __strong id<MTLFunction> vs, fs; uint32_t hash; int ok; uint8_t slot_reg[32]; uint16_t in_regs; uint8_t samp[16]; } GP;   /* slot_reg: register + 1; samp: 1 2D, 2 cube, 3 3D */
 static GP *gp_of(DSRRenderer *r, uint32_t id) { return id >= GP_BASE && id - GP_BASE < GP_MAX && r->gp ? &r->gp[id - GP_BASE] : NULL; }
 static uint32_t fnv1a(uint32_t h, const void *p, size_t n) { const uint8_t *b = p; for (size_t k = 0; k < n; k++) h = (h ^ b[k]) * 16777619u; return h; }
 static id<MTLFunction> msl_function(DSRRenderer *r, const char *src, NSString *name, uint32_t pid, const char *what)
@@ -878,7 +878,7 @@ static void msl_create(DSRRenderer *r, const uint32_t *p, uint32_t size)
     GP *g = gp_of(r, pid); if (!g || na > 16 || 16ull + 8ull * na + ((vl + 4) & ~3u) + ((pl + 4) & ~3u) > size) return;
     const char *vs = (const char *)(p + 4 + 2 * na), *ps = vs + ((vl + 4) & ~3u);
     g->hash = fnv1a(fnv1a(2166136261u, vs, vl), ps, pl); memset(g->slot_reg, 0, sizeof g->slot_reg); memset(g->samp, 0, sizeof g->samp); g->in_regs = 0;
-    for (uint32_t k = 0; k < na; k++) if (p[4 + 2 * k] < 16 && p[5 + 2 * k] < 16) g->slot_reg[p[4 + 2 * k]] = (uint8_t)(p[5 + 2 * k] + 1);
+    for (uint32_t k = 0; k < na; k++) if (p[4 + 2 * k] < 32 && p[5 + 2 * k] < 16) g->slot_reg[p[4 + 2 * k]] = (uint8_t)(p[5 + 2 * k] + 1);
     for (const char *q = vs; (q = strstr(q, "[[attribute(")); q += 12) { int reg = atoi(q + 12); if (reg >= 0 && reg < 16) g->in_regs |= (uint16_t)(1u << reg); }
     for (const char *q = ps; (q = strstr(q, "[[texture(")); q += 10) {               /* each sampler's texture type */
         int st = atoi(q + 10); const char *ln = q; while (ln > ps && ln[-1] != '\n') ln--;
@@ -903,7 +903,7 @@ static void shader_consts(DSRRenderer *r, const uint32_t *p, uint32_t size)
     uint32_t nf[2] = {vf, pf}, ni[2] = {vi, pi}, nb[2] = {vb, pb};
     for (int st = 0; st < 2; st++) {
         uint8_t *o = st ? r->pcb : r->vcb; uint32_t len = 16 * (nf[st] + ni[st]) + nb[st]; len = (len + 15) & ~15u;
-        if (len > sizeof r->vcb) len = 0;
+        if (len > (st ? sizeof r->pcb : sizeof r->vcb)) { static int w; if (!w++) fprintf(stderr, "dsr: a program's constants (%u bytes) don't fit (left out)\n", len); len = 0; }
         if (len) { memcpy(o, f[st], 16 * nf[st]); memcpy(o + 16 * nf[st], i[st], 16 * ni[st]);
                    for (uint32_t k = 0; k < nb[st]; k++) o[16 * (nf[st] + ni[st]) + k] = b[st][k] != 0; }
         if (st) r->pcb_len = len; else r->vcb_len = len;
@@ -1020,7 +1020,7 @@ static void gdraw(DSRRenderer *r, const uint32_t *p, uint32_t size, int vb)
         const uint32_t *e = p + 9;
         for (uint32_t k = 0; k < p[8] && k < 16; k++, e += 5) {
             uint32_t slot = e[0], bid = e[1], off = e[2], stride = e[3]; MTLVertexFormat f = decl_format(e[4]);
-            if (slot >= 16 || !g->slot_reg[slot] || bid >= DSR_VBUFS || !r->vb[bid] || f == MTLVertexFormatInvalid) continue;
+            if (slot >= 32 || !g->slot_reg[slot] || bid >= DSR_VBUFS || !r->vb[bid] || f == MTLVertexFormatInvalid) continue;
             uint32_t reg = g->slot_reg[slot] - 1u; if (!(g->in_regs >> reg & 1) || (have >> reg & 1)) continue;
             uint32_t aoff = stride ? off % stride : 0, boff = off - aoff; int l = 0;
             while (l < nl && !(lbuf[l] == r->vb[bid] && loff[l] == boff && lay[l].stride == stride)) l++;
@@ -1029,7 +1029,7 @@ static void gdraw(DSRRenderer *r, const uint32_t *p, uint32_t size, int vb)
         }
     } else if (ns) {
         lay[0].stride = ns * 16; lay[0].step = 0; lbuf[0] = nil; loff[0] = 0; nl = 1;
-        for (uint32_t sl = 0, c = 0; sl < 16; sl++) if (mask >> sl & 1) {
+        for (uint32_t sl = 0, c = 0; sl < 32; sl++) if (mask >> sl & 1) {
             uint32_t reg = g->slot_reg[sl] ? g->slot_reg[sl] - 1u : 99;
             if (reg < 16 && (g->in_regs >> reg & 1) && !(have >> reg & 1)) { at[na++] = (GAttr){reg, MTLVertexFormatFloat4, c * 16, VB_FIRST}; have |= (uint16_t)(1u << reg); }
             c++;
