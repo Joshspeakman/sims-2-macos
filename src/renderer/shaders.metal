@@ -19,6 +19,10 @@ struct Uniforms {
     int4 xrgb;           // stage 0/1 texture has no alpha channel
     float4x4 tex1;       // texture-1 transform
     int4 s1;             // stage 1: texcoordindex, texturetransformflags, unused, unused
+    float4x4 tex2;       // texture-2 transform
+    int4 c2;             // stage 2: colorop, colorarg1, colorarg2, alphaop
+    int4 a2;             // stage 2: alphaarg1, alphaarg2, unused, unused
+    int4 s2;             // stage 2: texcoordindex, texturetransformflags, has a texture, XRGB
 };
 
 struct VIn {
@@ -33,6 +37,8 @@ struct VOut {
     float2 uv1;                      // stage 1 coordinates
     float3 tcproj;                   // projected texgen (camera-space position * tex0)
     float3 tcproj1;                  // the same for stage 1 (* tex1): The Sims 2's water reads a depth gradient this way
+    float2 uv2;                      // stage 2 coordinates
+    float3 tcproj2;                  // and its camera-space texgen (* tex2): projected shadows and lights
     float fogf;
 };
 
@@ -56,7 +62,7 @@ vertex VOut vs_main(VIn in [[stage_in]], constant Uniforms &u [[buffer(1)]])
         float y = 1.0 - (in.pos.y + 0.5 - u.vp.y) / u.vp.w * 2.0;
         o.pos = float4(x * w, y * w, in.pos.z * w, w);
         o.fogf = 1.0;
-        o.tcproj = float3(0, 0, 1); o.tcproj1 = float3(0, 0, 1);
+        o.tcproj = float3(0, 0, 1); o.tcproj1 = float3(0, 0, 1); o.tcproj2 = float3(0, 0, 1);
     } else {
         float4 p = float4(in.pos.xyz, 1.0);
         o.pos = u.wvp * p;
@@ -64,11 +70,12 @@ vertex VOut vs_main(VIn in [[stage_in]], constant Uniforms &u [[buffer(1)]])
         o.pos.y -= o.pos.w / u.vp.w;
         float4 cam = u.wv * p;
         o.fogf = u.fog.z != 0 ? clamp((u.fog.y - cam.z) / (u.fog.y - u.fog.x), 0.0, 1.0) : 1.0;
-        o.tcproj = (u.tex0 * cam).xyz; o.tcproj1 = (u.tex1 * cam).xyz;
+        o.tcproj = (u.tex0 * cam).xyz; o.tcproj1 = (u.tex1 * cam).xyz; o.tcproj2 = (u.tex2 * cam).xyz;
     }
     o.diffuse = in.diffuse;
     o.uv = ttf(in.uv, u.tex0, u.a0.z, u.a0.w);
     o.uv1 = ttf(in.uv, u.tex1, u.s1.x, u.s1.y);
+    o.uv2 = ttf(in.uv, u.tex2, u.s2.x, u.s2.y);
     return o;
 }
 
@@ -107,7 +114,8 @@ static float4 op(int o, float4 x, float4 y, float4 diffuse, float4 texel, float4
 constant bool kAlphaTest [[function_constant(0)]];
 fragment float4 fs_main(VOut in [[stage_in]], constant Uniforms &u [[buffer(1)]],
                         texture2d<float> t0 [[texture(0)]], sampler s0 [[sampler(0)]],
-                        texture2d<float> t1 [[texture(1)]], sampler s1 [[sampler(1)]])
+                        texture2d<float> t1 [[texture(1)]], sampler s1 [[sampler(1)]],
+                        texture2d<float> t2 [[texture(2)]], sampler smp2 [[sampler(2)]])
 {
     float4 diffuse = in.diffuse, current = diffuse;
     float2 uv0 = in.uv;
@@ -126,6 +134,15 @@ fragment float4 fs_main(VOut in [[stage_in]], constant Uniforms &u [[buffer(1)]]
             float4 c1 = op(u.c1.x, arg(u.c1.y, diffuse, current, texel1, u.tfactor), arg(u.c1.z, diffuse, current, texel1, u.tfactor), diffuse, texel1, u.tfactor, current);
             float4 a1 = u.c1.w == 1 ? current : op(u.c1.w, arg(u.a1.x, diffuse, current, texel1, u.tfactor), arg(u.a1.y, diffuse, current, texel1, u.tfactor), diffuse, texel1, u.tfactor, current);
             current = float4(c1.rgb, a1.a);
+            if (u.c2.x > 1) {                            // stage 2 (D3D stops at the first DISABLE)
+                float2 uv2 = in.uv2;
+                if ((u.s2.x & 0xffff0000) == 0x20000) uv2 = (u.s2.y & 0x100) ? in.tcproj2.xy / in.tcproj2.z : in.tcproj2.xy;
+                float4 texel2 = u.s2.z ? t2.sample(smp2, uv2) : float4(1);
+                if (u.s2.w) texel2.a = 1;
+                float4 c2 = op(u.c2.x, arg(u.c2.y, diffuse, current, texel2, u.tfactor), arg(u.c2.z, diffuse, current, texel2, u.tfactor), diffuse, texel2, u.tfactor, current);
+                float4 a2 = u.c2.w == 1 ? current : op(u.c2.w, arg(u.a2.x, diffuse, current, texel2, u.tfactor), arg(u.a2.y, diffuse, current, texel2, u.tfactor), diffuse, texel2, u.tfactor, current);
+                current = float4(c2.rgb, a2.a);
+            }
         }
     }
     if (kAlphaTest && u.at.z != 0) {                     // alpha test (D3DCMP_*)

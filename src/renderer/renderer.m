@@ -24,6 +24,9 @@ typedef struct {   // must match shaders.metal Uniforms
     int32_t xrgb[4];     // texture stage 0/1 is XRGB (alpha reads as 1)
     float tex1[16];      // texture-1 transform
     int32_t s1[4];       // stage 1: texcoordindex, texturetransformflags
+    float tex2[16];      // texture-2 transform
+    int32_t c2[4], a2[4];   // stage 2: colorop, colorarg1, colorarg2, alphaop / alphaarg1, alphaarg2
+    int32_t s2[4];       // stage 2: texcoordindex, texturetransformflags, has a texture, XRGB
 } Uniforms;
 
 struct DSRRenderer {
@@ -42,7 +45,7 @@ struct DSRRenderer {
     uint64_t dso_k[64]; id<MTLDepthStencilState> dso_v[64];
     uint32_t smp_k[1024]; id<MTLSamplerState> smp_v[1024]; int pso_n, dso_n, smp_n; uint32_t pso_last;   // filled at most 3/4, then uncached
     /* the current render encoder's state, so unchanged state isn't set again (cleared with each new encoder) */
-    struct { __unsafe_unretained id pso, dso, tex[2], smp[2]; int cull, ring_bound; uint32_t sref; MTLViewport vp; } es;
+    struct { __unsafe_unretained id pso, dso, tex[3], smp[3]; int cull, ring_bound; uint32_t sref; MTLViewport vp; } es;
     id<MTLRenderPipelineState> quad_pso, quad_over_pso, zclear_pso, present_pso; id<MTLTexture> scratch, gamma_lut; uint16_t gamma[3][256]; int gamma_dirty; id<MTLDepthStencilState> zclear_ds, nodepth_ds, zsclear_ds[4];
     id<MTLSamplerState> point_clamp, linear_clamp; id<MTLTexture> dummy;
     /* effect programs (DSR_PROG_*): Metal compiled from the game's HLSL effects (runtime/win32/hlsl.c) */
@@ -501,6 +504,9 @@ static void draw(DSRRenderer *r, const uint32_t *p, uint32_t size)
     Uniforms u; memset(&u, 0, sizeof u);
     float wv[16]; mat_mul(wv, r->xf[1], r->xf[2]); mat_mul(u.wvp, wv, r->xf[3]); memcpy(u.wv, wv, 64); memcpy(u.tex0, r->xf[16], 64); memcpy(u.tex1, r->xf[17], 64);
     u.s1[0] = r->tss[1][11]; u.s1[1] = r->tss[1][24];
+    memcpy(u.tex2, r->xf[18], 64);   /* stage 2 (The Sims 2's projected shadows and lights: a third stage, camera-space texgen) */
+    u.c2[0] = r->tss[2][1]; u.c2[1] = r->tss[2][2]; u.c2[2] = r->tss[2][3]; u.c2[3] = r->tss[2][4]; u.a2[0] = r->tss[2][5]; u.a2[1] = r->tss[2][6];
+    u.s2[0] = r->tss[2][11]; u.s2[1] = r->tss[2][24];
     u.vp[0] = r->vp[0]; u.vp[1] = r->vp[1]; u.vp[2] = r->vp[2] ? r->vp[2] : rt->w; u.vp[3] = r->vp[3] ? r->vp[3] : rt->h;
     { float fs, fe; memcpy(&fs, &r->rs[36], 4); memcpy(&fe, &r->rs[37], 4); u.fog[0] = fs; u.fog[1] = fe; u.fog[2] = r->rs[28] && r->rs[140] == 3 && fe != fs ? 1 : 0; }
     uint32_t fc = r->rs[34]; u.fogcolor[0] = ((fc >> 16) & 255) / 255.0f; u.fogcolor[1] = ((fc >> 8) & 255) / 255.0f; u.fogcolor[2] = (fc & 255) / 255.0f; u.fogcolor[3] = 1;
@@ -511,6 +517,7 @@ static void draw(DSRRenderer *r, const uint32_t *p, uint32_t size)
     Surf *t0 = surf(r, r->tex[0]), *t1 = surf(r, r->tex[1]);
     u.misc[0] = (fvf & 0xe) == 4; u.misc[1] = (fvf & 0x40) != 0; u.misc[2] = t0 != NULL; u.misc[3] = t1 != NULL;
     u.xrgb[0] = t0 && t0->fmt == 2; u.xrgb[1] = t1 && t1->fmt == 2;
+    Surf *t2 = u.c1[0] > 1 && u.c2[0] > 1 ? surf(r, r->tex[2]) : NULL; u.s2[2] = t2 != NULL; u.s2[3] = t2 && t2->fmt == 2;
     uint32_t uoff; memcpy(ring_alloc(r, sizeof u, &uoff), &u, sizeof u);   // one copy, read by both stages
     e = enc_for(r, r->rt, r->ds);                                         // (ring_alloc may have flushed)
     id<MTLDepthStencilState> dso = depth_for(r);
@@ -531,6 +538,9 @@ static void draw(DSRRenderer *r, const uint32_t *p, uint32_t size)
     if (r->es.smp[0] != s0) { [e setFragmentSamplerState:s0 atIndex:0]; r->es.smp[0] = s0; }
     if (r->es.tex[1] != x1) { [e setFragmentTexture:x1 atIndex:1]; r->es.tex[1] = x1; }
     if (r->es.smp[1] != s1) { [e setFragmentSamplerState:s1 atIndex:1]; r->es.smp[1] = s1; }
+    if (t2) { id<MTLTexture> x2 = tex2d(t2); id<MTLSamplerState> s2 = sampler_for(r, 2);
+        if (r->es.tex[2] != x2) { [e setFragmentTexture:x2 atIndex:2]; r->es.tex[2] = x2; }
+        if (r->es.smp[2] != s2) { [e setFragmentSamplerState:s2 atIndex:2]; r->es.smp[2] = s2; } }
     MTLPrimitiveType pt; uint32_t count = ni ? ni : nv;
     switch (prim) { case 1: pt = MTLPrimitiveTypePoint; break; case 2: pt = MTLPrimitiveTypeLine; break; case 3: pt = MTLPrimitiveTypeLineStrip; break;
                     case 5: pt = MTLPrimitiveTypeTriangleStrip; break; default: pt = MTLPrimitiveTypeTriangle; }
