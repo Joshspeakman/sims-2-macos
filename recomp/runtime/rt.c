@@ -1,5 +1,6 @@
 /* Runtime core for recompiled code: guest memory, indirect calls, faults, x87 helpers. */
 #include "rt.h"
+#include <pthread.h>
 #include "edition.h"
 #include <fenv.h>
 #include <stdio.h>
@@ -12,6 +13,10 @@
 uint8_t *G_MEM;
 
 struct rt_fn { uint32_t addr; GuestFn fn; };
+/* a full-avalanche 32-bit mix (lowbias32): guest code addresses are aligned, so the low bits of a plain multiply
+ * crowd them into a few slots of a power-of-two table */
+static inline uint32_t rt_mix(uint32_t h) { h ^= h >> 16; h *= 0x7feb352du; h ^= h >> 15; h *= 0x846ca68bu; h ^= h >> 16; return h; }
+
 extern const struct rt_fn rt_fntab[];
 extern const unsigned rt_fntab_n;
 struct rt_imp { uint32_t iat; const char *name; };
@@ -122,6 +127,17 @@ GuestFn rt_lookup(uint32_t addr)
     GuestFn cached = rt_bw_lookup(addr);
     if (cached) return cached;
 #endif
+#ifndef DS2_BROKEN_WORLD
+    {   /* every indirect call and virtual method comes here: a hash of the function table (built once, below) before
+         * the binary search, which costs about 17 scattered reads over 100,000 functions */
+        extern struct rt_fn *rt_fn_hash; extern uint32_t rt_fn_mask;
+        if (rt_fn_hash) {
+            uint32_t j = rt_mix(addr) & rt_fn_mask;
+            while (rt_fn_hash[j].fn) { if (rt_fn_hash[j].addr == addr) return rt_fn_hash[j].fn; j = (j + 1) & rt_fn_mask; }
+            return 0;
+        }
+    }
+#endif
     unsigned lo = 0, hi = rt_fntab_n;
     while (lo < hi) {
         unsigned mid = (lo + hi) / 2;
@@ -130,6 +146,22 @@ GuestFn rt_lookup(uint32_t addr)
     }
     return 0;
 }
+#ifndef DS2_BROKEN_WORLD
+struct rt_fn *rt_fn_hash; uint32_t rt_fn_mask;
+__attribute__((constructor)) static void rt_prepare_fn_hash(void)
+{
+    uint32_t n = 1;
+    while (n < rt_fntab_n * 2u) n <<= 1;
+    struct rt_fn *h = calloc(n, sizeof *h);
+    if (!h) return;                                           /* the sorted table remains a correct fallback */
+    for (unsigned i = 0; i < rt_fntab_n; i++) {
+        uint32_t j = rt_mix(rt_fntab[i].addr) & (n - 1);
+        while (h[j].fn) j = (j + 1) & (n - 1);
+        h[j] = rt_fntab[i];
+    }
+    rt_fn_mask = n - 1; rt_fn_hash = h;
+}
+#endif
 #ifdef DS2_BROKEN_WORLD
 static struct rt_fn *bw_functions;
 static uint32_t bw_mask;
@@ -158,7 +190,34 @@ GuestFn rt_bw_lookup(uint32_t addr)
 }
 #endif
 static __thread RtSehPad *seh_pads;
-void rt_seh_push(RtSehPad *p) { p->next = seh_pads; seh_pads = p; }
+/* every __except handler address ever registered (a set only added to): an indirect call looks at the thread's
+ * landing pads only when its target is one of them, instead of walking every pad's handlers on every call */
+#define SEH_SET (1u << 16)
+static uint32_t seh_set[SEH_SET]; static pthread_mutex_t seh_set_lock = PTHREAD_MUTEX_INITIALIZER; static unsigned seh_set_n;
+static int seh_known(uint32_t h)
+{
+    for (uint32_t j = rt_mix(h) & (SEH_SET - 1); ; j = (j + 1) & (SEH_SET - 1)) {
+        uint32_t v = __atomic_load_n(&seh_set[j], __ATOMIC_RELAXED);
+        if (v == h) return 1;
+        if (!v) return 0;
+    }
+}
+static void seh_add(uint32_t h)
+{
+    if (!h || seh_known(h)) return;
+    pthread_mutex_lock(&seh_set_lock);
+    if (seh_set_n < SEH_SET / 2) {
+        uint32_t j = rt_mix(h) & (SEH_SET - 1);
+        while (seh_set[j] && seh_set[j] != h) j = (j + 1) & (SEH_SET - 1);
+        if (!seh_set[j]) { __atomic_store_n(&seh_set[j], h, __ATOMIC_RELEASE); seh_set_n++; }
+    } else seh_set_n = SEH_SET;                               /* full: every call checks the pads, as before */
+    pthread_mutex_unlock(&seh_set_lock);
+}
+void rt_seh_push(RtSehPad *p)
+{
+    for (const uint32_t *h = p->handlers; *h; h++) seh_add(*h);
+    p->next = seh_pads; seh_pads = p;
+}
 void rt_seh_pop(RtSehPad *p)
 {
     for (RtSehPad **q = &seh_pads; *q; q = &(*q)->next) if (*q == p) { *q = p->next; return; }
@@ -173,6 +232,7 @@ void rt_call(Ctx *c, uint32_t t)
     uint32_t ret = rt_r32(G_MEM, c->esp);
 again:
 #endif
+    if (seh_set_n >= SEH_SET || seh_known(t))
     for (RtSehPad *p = seh_pads; p; p = p->next)              /* control transfer to an __except block? */
         for (const uint32_t *h = p->handlers; *h; h++) if (*h == t) {
             Ctx *dst = p->c;

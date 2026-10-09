@@ -83,10 +83,12 @@ void w32_crash_wait_begin(int kind, uint32_t obj, uint32_t ms)
 }
 void w32_crash_wait_end(void) { if (w32_ti) w32_ti->wkind = W_NONE; }
 void w32_crash_record_call(uint32_t index) { ThreadInfo *t = w32_ti; if (t) t->ring[t->rpos++ & 31] = (uint16_t)index; }
+static ThreadInfo *volatile frame_ti;                          /* the thread that presents frames (the stall profiler's) */
 void w32_crash_heartbeat(int which)
 {
     if (which == 1 && !is_game_main) return;                  /* responsiveness = the game's main (window) thread */
     hb[which] = now_ns(); hb_count[which]++;
+    if (which == 0) frame_ti = w32_ti;
 }
 
 /* ---- safe reads of guest memory (it may be protected) ---- */
@@ -323,6 +325,45 @@ void w32_crash_runtime_fault(Ctx *c, const char *what)
     w32_crash_report("crash", r, c, 0);
 }
 
+/* ---- development: DS_STALL_MS=<ms> profiles each stall, a frame later than that: the presenting thread's stack is
+ * taken every 10 ms while it lasts, and when it ends the stall's length and its most common stacks go to the log ---- */
+static void *stall_profiler(void *arg)
+{
+    double limit = atof((const char *)arg); w32_crash_thread("stall profiler"); signal(SIGUSR2, on_bt);
+    enum { NS = 400, DEPTH = 10 };
+    static char stacks[NS][600]; int ns = 0; uint64_t since = 0;
+    for (;;) {
+        usleep(10000);
+        uint64_t b = hb[0], now = now_ns(); ThreadInfo *t = frame_ti;
+        if (!t || !b) continue;
+        double age = now > b ? (now - b) / 1e6 : 0;
+        if (age > limit) {
+            if (!since) { since = b; ns = 0; }
+            t->nbt = 0; t->bt_req = 1;
+            if (pthread_kill(t->pt, SIGUSR2)) { t->bt_req = 0; continue; }
+            for (int spin = 0; spin < 50 && t->bt_req; spin++) usleep(200);
+            if (t->bt_req || ns >= NS) continue;
+            char *o = stacks[ns++]; o[0] = 0; int shown = 0;
+            for (int i = 0; i < t->nbt && shown < DEPTH; i++) {
+                Dl_info di; const char *nm = 0;
+                if (dladdr(t->bt[i], &di) && di.dli_sname) nm = di.dli_sname;
+                if (!nm || !strcmp(nm, "on_bt") || !strcmp(nm, "_sigtramp")) continue;
+                size_t l = strlen(o); snprintf(o + l, 600 - l, "%s%s", shown ? " < " : "", nm); shown++;
+            }
+        } else if (since) {
+            double ms = (b - since) / 1e6;
+            fprintf(stderr, "stall: %.0f ms without a frame, %d samples\n", ms, ns);
+            for (int k = 0; k < ns; k++) {                      /* the distinct stacks, most frequent first (a few) */
+                if (!stacks[k][0]) continue; int c = 1;
+                for (int j = k + 1; j < ns; j++) if (!strcmp(stacks[j], stacks[k])) { c++; stacks[j][0] = 0; }
+                if (c * 10 >= ns || c >= 3) fprintf(stderr, "  %3d x %s\n", c, stacks[k]);
+            }
+            since = 0;
+        }
+    }
+    return 0;
+}
+
 /* ---- the watchdog ---- */
 static void *watchdog(void *arg)
 {
@@ -385,6 +426,7 @@ void w32_crash_init(const char *data_dir, const char *build)
     struct sigaction sa; memset(&sa, 0, sizeof sa); sa.sa_sigaction = crash_signal; sa.sa_flags = SA_SIGINFO | SA_ONSTACK; sigemptyset(&sa.sa_mask);
     sigaction(SIGABRT, &sa, 0); sigaction(SIGILL, &sa, 0); sigaction(SIGFPE, &sa, 0); sigaction(SIGTRAP, &sa, 0);
     pthread_t t; pthread_create(&t, 0, watchdog, 0); pthread_detach(t);
+    if (getenv("DS_STALL_MS") && atof(getenv("DS_STALL_MS")) > 0) { pthread_t s; pthread_create(&s, 0, stall_profiler, (void *)getenv("DS_STALL_MS")); pthread_detach(s); }
 }
 /* Ctrl-T / kill -INFO: a report on demand (also printed to the log) */
 static void on_info(int sig) { (void)sig; w32_crash_report("snapshot", "Requested (Ctrl-T / SIGINFO): the state of every thread.", 0, 0); }

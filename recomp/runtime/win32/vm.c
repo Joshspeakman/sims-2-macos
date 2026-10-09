@@ -74,10 +74,26 @@ uint32_t vm_alloc(uint32_t addr, uint32_t size, uint32_t type, uint32_t prot)
         uint32_t base = addr & ~0xffffu, end = (addr ? addr + size : 0) , span;
         uint32_t psz = addr ? ((end + 0xfff) & ~0xfffu) - base : (size + 0xfff) & ~0xfffu;
         span = (psz + 0xffff) & ~0xffffu;
-        if (!addr) {
-            if (type & MEM_TOP_DOWN) { for (base = (VM_HI - span) & ~0xffffu; base >= VM_LO && !range_free(base, span); base -= 0x10000) ; }
-            else { for (base = VM_LO; base + span <= VM_HI && !range_free(base, span); base += 0x10000) ; }
-            if (base < VM_LO || base + span > VM_HI) goto out;
+        if (!addr) {   /* the first (or, top-down, last) gap of span bytes between the regions, which are sorted by base */
+            uint64_t found = 0; int ok = 0;
+            if (type & MEM_TOP_DOWN) {
+                uint64_t hi = VM_HI;
+                for (int k = nR; k >= 0; k--) {
+                    uint64_t lo = k ? ((uint64_t)R[k - 1].base + R[k - 1].size + 0xffff) & ~0xffffull : VM_LO;
+                    if (lo < VM_LO) lo = VM_LO;
+                    if (hi >= lo + span) { found = (hi - span) & ~0xffffull; if (found >= lo) { ok = 1; break; } }
+                    if (k) { uint64_t b = R[k - 1].base & ~0xffffull; if (b < hi) hi = b; }
+                }
+            } else {
+                uint64_t lo = VM_LO;
+                for (int k = 0; k <= nR; k++) {
+                    uint64_t hi = k < nR ? (R[k].base & ~0xffffull) : VM_HI;
+                    if (hi > lo && hi - lo >= span) { found = lo; ok = 1; break; }
+                    if (k < nR) { uint64_t e = ((uint64_t)R[k].base + R[k].size + 0xffff) & ~0xffffull; if (e > lo) lo = e; }
+                }
+            }
+            if (!ok || found < VM_LO || found + span > VM_HI) goto out;
+            base = (uint32_t)found;
         } else if (!range_free(base, psz)) goto out;
         int k = insert(base, psz, 0x20000 /* MEM_PRIVATE */, prot);
         if (type & MEM_COMMIT) {
@@ -96,7 +112,8 @@ uint32_t vm_alloc(uint32_t addr, uint32_t size, uint32_t type, uint32_t prot)
     }
 out:
     pthread_mutex_unlock(&vm_lock);
-    if (getenv("W32_VMLOG")) fprintf(stderr, "w32: VirtualAlloc(%08x, %x, %x, %x) -> %08x\n", addr, size, type, prot, r);
+    static int vmlog = -1; if (vmlog < 0) vmlog = getenv("W32_VMLOG") != 0;
+    if (vmlog) fprintf(stderr, "w32: VirtualAlloc(%08x, %x, %x, %x) -> %08x\n", addr, size, type, prot, r);
     return r;
 }
 int vm_free(uint32_t addr, uint32_t size, uint32_t type)
