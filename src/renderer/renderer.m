@@ -866,8 +866,11 @@ static id<MTLFunction> msl_function(DSRRenderer *r, const char *src, NSString *n
     MTLCompileOptions *o = [MTLCompileOptions new]; NSError *err = nil;
     if (@available(macOS 11.0, *)) o.preserveInvariance = YES;   /* the position is [[invariant]]: multi-pass lighting draws with depth EQUAL */
     if (@available(macOS 15.0, *)) o.mathMode = MTLMathModeSafe; else { _Pragma("clang diagnostic push") _Pragma("clang diagnostic ignored \"-Wdeprecated-declarations\"") o.fastMathEnabled = NO; _Pragma("clang diagnostic pop") }   /* Direct3D's arithmetic: no reassociation, NaN and infinity kept */
+    double t0 = CACurrentMediaTime();
     id<MTLLibrary> lib = [r->dev newLibraryWithSource:@(src) options:o error:&err];
     id<MTLFunction> f = lib ? [lib newFunctionWithName:name] : nil;
+    static int log = -1; if (log < 0) log = getenv("DSR_PSOLOG") != 0;
+    if (log) fprintf(stderr, "dsr: game shader %u (%s) compiled in %.1f ms (frame %d)\n", pid, what, (CACurrentMediaTime() - t0) * 1000, dsr_frame);
     if (!f) { static int n; if (n++ < 20) fprintf(stderr, "dsr: game shader %u (%s): %s\n", pid, what, err ? err.localizedDescription.UTF8String : "no entry point"); }
     return f;
 }
@@ -910,17 +913,42 @@ static void shader_consts(DSRRenderer *r, const uint32_t *p, uint32_t size)
     }
     memcpy(r->atest, b[1] + pb, 16);
 }
-/* kept vertex and index buffers (DSR_VBUF_DATA): written in place unless the GPU may still read them, then a copy */
+/* kept vertex and index buffers (DSR_VBUF_DATA): written in place unless the GPU may still read them. The record's
+ * top byte carries the game's lock flags (d3d9.c buf_locked): 1 every lock was NOOVERWRITE (in place: the game wrote
+ * nothing the GPU still reads), 2 one was DISCARD (another buffer, without the old contents). Otherwise a buffer the
+ * GPU may still read is replaced by a copy. Replaced buffers wait in a pool until the GPU is done with them, then are
+ * used again: a game that rewrites part of a large buffer many times a frame no longer makes and frees buffers. */
+#define VB_POOL 64
+static id<MTLBuffer> vb_pool[VB_POOL]; static uint64_t vb_pool_serial[VB_POOL]; static int vb_pool_n;
+static id<MTLBuffer> vb_get(DSRRenderer *r, uint32_t len)
+{
+    uint64_t done = __atomic_load_n(&r->done_serial, __ATOMIC_ACQUIRE);
+    for (int k = 0; k < vb_pool_n; k++)
+        if (vb_pool[k].length == len && vb_pool_serial[k] <= done) {
+            id<MTLBuffer> b = vb_pool[k]; vb_pool[k] = vb_pool[--vb_pool_n]; vb_pool_serial[k] = vb_pool_serial[vb_pool_n]; vb_pool[vb_pool_n] = nil;
+            return b;
+        }
+    return [r->dev newBufferWithLength:len options:MTLResourceStorageModeShared];
+}
+static void vb_retire(id<MTLBuffer> b, uint64_t serial)
+{
+    if (!b) return;
+    if (vb_pool_n == VB_POOL) {                                  /* full: the oldest goes */
+        int o = 0; for (int k = 1; k < VB_POOL; k++) if (vb_pool_serial[k] < vb_pool_serial[o]) o = k;
+        vb_pool[o] = vb_pool[--vb_pool_n]; vb_pool_serial[o] = vb_pool_serial[vb_pool_n]; vb_pool[vb_pool_n] = nil;
+    }
+    vb_pool[vb_pool_n] = b; vb_pool_serial[vb_pool_n++] = serial;
+}
 static void vbuf_data(DSRRenderer *r, const uint32_t *p, uint32_t size)
 {
-    uint32_t bid = p[0], total = p[1], off = p[2], n = p[3];
+    uint32_t bid = p[0] & 0xffffff, how = p[0] >> 24, total = p[1], off = p[2], n = p[3];
     if (bid >= DSR_VBUFS || !total || 16ull + n > size || (uint64_t)off + n > total) return;
     id<MTLBuffer> b = r->vb[bid];
-    if (!b || b.length != total) { r->vb[bid] = b = [r->dev newBufferWithLength:total options:MTLResourceStorageModeShared]; r->vb_use[bid] = 0; }
-    else if (r->vb_use[bid] > __atomic_load_n(&r->done_serial, __ATOMIC_ACQUIRE)) {   /* in use: a new copy (the command buffer keeps the old) */
-        id<MTLBuffer> c = [r->dev newBufferWithLength:total options:MTLResourceStorageModeShared];
-        if (off || n != total) memcpy(c.contents, b.contents, total);
-        r->vb[bid] = b = c; r->vb_use[bid] = 0;
+    if (!b || b.length != total) { vb_retire(b, r->vb_use[bid]); r->vb[bid] = b = vb_get(r, total); r->vb_use[bid] = 0; }
+    else if (!(how & 1) && r->vb_use[bid] > __atomic_load_n(&r->done_serial, __ATOMIC_ACQUIRE)) {   /* in use: another buffer (the command buffer keeps the old) */
+        id<MTLBuffer> c = vb_get(r, total);
+        if (!(how & 2) && (off || n != total)) memcpy(c.contents, b.contents, total);
+        vb_retire(b, r->vb_use[bid]); r->vb[bid] = b = c; r->vb_use[bid] = 0;
     }
     if (n) memcpy((uint8_t *)b.contents + off, p + 4, n);
 }

@@ -25,7 +25,7 @@ for f in "$HERE"/third_party/mojoshader/mojoshader.c "$HERE"/third_party/mojosha
   clang -c -O2 -w "${MOJO[@]}" -o "$OUT/obj/rt/mojo/$(basename "$f" .c).o" "$f" &
 done
 for f in "$HERE"/runtime/rt.c "$HERE"/runtime/win32/*.c "$OUT/imptab.c"; do
-  opt=-O1; [ "$(basename "$f")" = native.c ] && opt=-O3   # the native hot loops: optimised
+  opt=-O2; [ "$(basename "$f")" = native.c ] && opt=-O3   # the runtime sits under every frame (indirect calls, Direct3D): optimised; native.c's hot loops most
   clang -c $opt -g -ffp-contract=off -fno-strict-aliasing -Wall -Wno-unused-function ${EDITION_FLAGS[@]+"${EDITION_FLAGS[@]}"} -I "$HERE/runtime" -I "$HERE/runtime/win32" \
     -I "$HERE/third_party/mojoshader" -I "$HERE/third_party/minimp3" -o "$OUT/obj/rt/$(basename "$f" .c).o" "$f" &
 done; wait

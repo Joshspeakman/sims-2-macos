@@ -59,6 +59,16 @@ static void resolve(const char *root, char **parts, int from, int np, char *out,
 int w32_host_path(const char *win, char *out, size_t cap, int mode)
 {
     char full[2048], norm[2048];
+#ifdef SIMS2_EDITION
+    {   /* SIMS2_SKIP_INTRO=1 (the launch window's Intro Movies): the EA logo and the intro look missing, so the game goes
+         * straight to its loading screen, as with the movies removed. The game folder is not touched. */
+        static int skip = -1; if (skip < 0) skip = getenv("SIMS2_SKIP_INTRO") && atoi(getenv("SIMS2_SKIP_INTRO"));
+        if (skip) {
+            const char *b = win; for (const char *q = win; *q; q++) if (*q == '\\' || *q == '/') b = q + 1;
+            if (!strcasecmp(b, "ealogo_audio.movie") || !strcasecmp(b, "intro_eng_audio.movie")) return -1;
+        }
+    }
+#endif
     if (((win[0] | 32) >= 'a' && (win[0] | 32) <= 'z') && win[1] == ':') snprintf(full, sizeof full, "%s", win);
     else if (win[0] == '\\' || win[0] == '/') snprintf(full, sizeof full, "C:%s", win);
     else snprintf(full, sizeof full, "%s\\%s", w32_cwd, win);

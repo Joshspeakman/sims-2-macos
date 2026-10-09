@@ -239,10 +239,15 @@ static uint32_t vbid_alloc(void)
     pthread_mutex_unlock(&vb_lock); return id;
 }
 static void range_add(uint32_t *lo, uint32_t *hi, uint32_t a, uint32_t b) { if (*lo >= *hi) { *lo = a; *hi = b; } else { if (a < *lo) *lo = a; if (b > *hi) *hi = b; } }
-static void buf_locked(Buf9 *b, uint32_t off, uint32_t n)       /* Lock: the range the game may write */
+static void buf_locked(Buf9 *b, uint32_t off, uint32_t n, uint32_t flags)   /* Lock: the range the game may write */
 {
     if (off > b->len) return; if (!n || n > b->len - off) n = b->len - off;
-    pthread_mutex_lock(&vb_lock); range_add(&b->llo, &b->lhi, off, off + n); pthread_mutex_unlock(&vb_lock);
+    pthread_mutex_lock(&vb_lock); range_add(&b->llo, &b->lhi, off, off + n);
+    /* the lock's promise, sent with the data: NOOVERWRITE (0x1000) writes nothing the GPU may still read, so the
+     * renderer writes in place; DISCARD (0x2000) gives up the old contents, so it needs no copy of them */
+    if (b->lnoov == 2) b->lnoov = (flags & 0x1000) != 0; else if (!(flags & 0x1000)) b->lnoov = 0;
+    if (flags & 0x2000) b->ldisc = 1;
+    pthread_mutex_unlock(&vb_lock);
 }
 static void buf_unlocked(Buf9 *b)                                /* Unlock: what was locked is written, to be sent */
 {
@@ -253,10 +258,11 @@ static void buf_sync_locked(Buf9 *b)                  /* send what was written s
     while (b->dlo < b->dhi) {
         uint32_t n = b->dhi - b->dlo; if (n > (4u << 20)) n = 4u << 20;
         uint32_t *p = cmd_begin(DSR_VBUF_DATA, 16 + ((n + 3) & ~3u));
-        p[0] = b->gid; p[1] = b->len; p[2] = b->dlo; p[3] = n; memcpy(p + 4, G_MEM + b->mem + b->dlo, n); cmd_end();
-        b->dlo += n;
+        p[0] = b->gid | (b->lnoov == 1 ? 1u << 24 : 0) | (b->ldisc ? 2u << 24 : 0); p[1] = b->len; p[2] = b->dlo; p[3] = n;
+        memcpy(p + 4, G_MEM + b->mem + b->dlo, n); cmd_end();
+        b->dlo += n; b->ldisc = 0;
     }
-    b->dlo = b->dhi = 0;
+    b->dlo = b->dhi = 0; b->lnoov = 2;
 }
 static void buf_sync(Buf9 *b) { pthread_mutex_lock(&vb_lock); buf_sync_locked(b); pthread_mutex_unlock(&vb_lock); }
 static uint32_t buf_release(Buf9 *b)
@@ -282,7 +288,7 @@ OK_M(bf_PreLoad, 1)
 M(bf_GetType, 1) BUF_ME RET(me->index ? RT_INDEXBUFFER : RT_VERTEXBUFFER, 1); END
 M(bf_Lock, 5) BUF_ME                                   /* (offset, size, void **data, flags) */
     uint32_t off = ARG(1); if (off > me->len) RET(D3DERR_INVALIDCALL, 5);
-    if (me->gid) buf_locked(me, off, ARG(2));
+    if (me->gid) buf_locked(me, off, ARG(2), ARG(4));
     rt_w32(G_MEM, ARG(3), me->mem + off); RET(D3D_OK, 5);
 END
 M(bf_Unlock, 1) BUF_ME if (me->gid) buf_unlocked(me); RET(D3D_OK, 1); END
@@ -886,7 +892,7 @@ M(dv_CreateCubeTexture, 8) DEV_ME RET(create_tex(me, O9_CUBE, ARG(1), ARG(1), 1,
 static uint32_t create_buf(Dev9 *d, int index, uint32_t len, uint32_t usage, uint32_t fmt, uint32_t pool, uint32_t out)
 {
     if (!len || len > (256u << 20)) return D3DERR_INVALIDCALL;
-    Buf9 *b = calloc(1, sizeof *b); b->ref = 1; b->dev = d; b->index = index; b->len = len; b->usage = usage; b->fmt = fmt; b->pool = pool; b->mem = gmem(len);
+    Buf9 *b = calloc(1, sizeof *b); b->ref = 1; b->lnoov = 2; b->dev = d; b->index = index; b->len = len; b->usage = usage; b->fmt = fmt; b->pool = pool; b->mem = gmem(len);
     if (gpu_vb()) { b->gid = vbid_alloc(); b->dlo = 0; b->dhi = len; }
     b->g = make_iface(index ? O9_IB : O9_VB, b); rt_w32(G_MEM, out, b->g); return D3D_OK;
 }
