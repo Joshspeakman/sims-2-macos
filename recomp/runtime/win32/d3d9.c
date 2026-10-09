@@ -7,6 +7,7 @@
  * with a vertex shader are skipped; with only a pixel shader they are drawn fixed-function).
  * D3D9_LOG=1: every method's first calls; any method not written yet says so once. */
 #include "d3d9_priv.h"
+#include "d3d9_vsinterp.h"
 #include "edition.h"
 #include "../../../src/dsr/dsr_shm.h"
 #include <pthread.h>
@@ -1051,7 +1052,74 @@ M(dv_DrawIndexedPrimitiveUP, 9) DEV_ME                 /* (type, min index, vert
     uint32_t ni = prim_verts(ARG(1), ARG(4)), stride = ARG(8);
     (me->prog ? prog_draw_indexed : draw_indexed)(me, ARG(1), 0, ARG(2), ARG(3), G_MEM + ARG(5), ARG(6) == 102, ni, G_MEM + ARG(7) + ARG(2) * stride, stride); RET(D3D_OK, 9);
 END
-TODO_M(dv_ProcessVertices, 7, D3DERR_INVALIDCALL)
+/* ProcessVertices (src start, dest index, count, dest VB, dest declaration, flags): the current vertex shader run on
+ * the CPU (d3d9_vsinterp.c) over the bound streams, its outputs written into the destination buffer as the destination
+ * declaration lays them out. The Sims 2 poses its Sims this way for thumbnails. Fixed-function processing (no vertex
+ * shader) and shaders with control flow are refused, as before. */
+static void vtx_read(uint32_t t, const uint8_t *p, float v[4])
+{
+    v[0] = v[1] = v[2] = 0; v[3] = 1;
+    switch (t) {
+    case 0: case 1: case 2: case 3: memcpy(v, p, 4u * (t + 1)); break;
+    case 4: v[0] = p[2] / 255.0f; v[1] = p[1] / 255.0f; v[2] = p[0] / 255.0f; v[3] = p[3] / 255.0f; break;   /* D3DCOLOR: B, G, R, A in memory */
+    case 5: for (int k = 0; k < 4; k++) v[k] = p[k]; break;
+    case 8: for (int k = 0; k < 4; k++) v[k] = p[k] / 255.0f; break;
+    case 6: case 7: for (int k = 0; k < (t == 6 ? 2 : 4); k++) { int16_t x; memcpy(&x, p + 2 * k, 2); v[k] = x; } break;
+    case 9: case 10: for (int k = 0; k < (t == 9 ? 2 : 4); k++) { int16_t x; memcpy(&x, p + 2 * k, 2); v[k] = x < -32767 ? -1.0f : x / 32767.0f; } break;
+    case 11: case 12: for (int k = 0; k < (t == 11 ? 2 : 4); k++) { uint16_t x; memcpy(&x, p + 2 * k, 2); v[k] = x / 65535.0f; } break;
+    default: break;
+    }
+}
+static void vtx_write(uint32_t t, uint8_t *p, const float v[4])
+{
+    switch (t) {
+    case 0: case 1: case 2: case 3: memcpy(p, v, 4u * (t + 1)); break;
+    case 4: { uint8_t c[4]; const float s[4] = {v[2], v[1], v[0], v[3]};
+        for (int k = 0; k < 4; k++) { float x = s[k] < 0 ? 0 : s[k] > 1 ? 1 : s[k]; c[k] = (uint8_t)lrintf(x * 255); } memcpy(p, c, 4); break; }
+    case 5: for (int k = 0; k < 4; k++) { float x = v[k] < 0 ? 0 : v[k] > 255 ? 255 : v[k]; p[k] = (uint8_t)x; } break;
+    default: break;
+    }
+}
+M(dv_ProcessVertices, 7) DEV_ME
+    uint32_t start = ARG(1), dest = ARG(2), count = ARG(3);
+    Buf9 *db = obj(ARG(4), O9_VB); Decl9 *od = ARG(5) ? obj(ARG(5), O9_DECL) : 0;
+    static int warned;
+    if (!me->vs || !me->decl || !db || !od) { if (!warned++) fprintf(stderr, "d3d9: ProcessVertices without a vertex shader or declarations: not done\n"); RET(D3DERR_INVALIDCALL, 7); }
+    const uint32_t *code = (const uint32_t *)GP(me->vs->mem); size_t ntok = me->vs->len / 4;
+    D9VsIO io; if (d9_vs_parse(code, ntok, &io)) { if (!warned++) fprintf(stderr, "d3d9: ProcessVertices: shader %08x is not interpretable\n", code[0]); RET(D3DERR_INVALIDCALL, 7); }
+    uint32_t stride = 0;
+    for (int k = 0; k < od->n; k++) if (od->e[k].stream == 0) { uint32_t e = od->e[k].off + (uint32_t)dtype_size(od->e[k].type); if (e > stride) stride = e; }
+    if (!stride || (uint64_t)(dest + count) * stride > db->len) RET(D3DERR_INVALIDCALL, 7);
+    D9VsEnv env = {&io, me->vsc_sw ? (const float (*)[4])me->vsc_sw : (const float (*)[4])me->vsc, me->vsc_sw ? 8192u : 256u, (const int32_t (*)[4])me->vsi, 0};
+    for (uint32_t v = 0; v < count; v++) {
+        float in[16][4], out[16][4];
+        for (int r = 0; r < 16; r++) {
+            in[r][0] = in[r][1] = in[r][2] = 0; in[r][3] = 1;
+            if (io.in_usage[r] == 0xff) continue;
+            for (int k = 0; k < me->decl->n; k++) {
+                const DElem *e = &me->decl->e[k];
+                if (e->usage != io.in_usage[r] || e->uidx != io.in_index[r] || e->stream >= 16) continue;
+                Buf9 *b = me->vb[e->stream]; if (!b) break;
+                uint64_t at = (uint64_t)me->vb_off[e->stream] + (uint64_t)(start + v) * me->vb_stride[e->stream] + e->off;
+                if (at + (uint64_t)dtype_size(e->type) <= b->len) vtx_read(e->type, G_MEM + b->mem + at, in[r]);
+                break;
+            }
+        }
+        env.in = (const float (*)[4])in;
+        if (d9_vs_run(code, ntok, &io, &env, out)) { if (!warned++) fprintf(stderr, "d3d9: ProcessVertices: shader %08x stopped\n", code[0]); RET(D3DERR_INVALIDCALL, 7); }
+        uint8_t *dst = G_MEM + db->mem + (dest + v) * stride;
+        for (int k = 0; k < od->n; k++) {
+            const DElem *e = &od->e[k]; if (e->stream != 0) continue;
+            int reg = -1;
+            if (io.major >= 3) { for (int r = 0; r < 16; r++) if (io.out_usage[r] == e->usage && io.out_index[r] == e->uidx) { reg = r; break; } }
+            else reg = e->usage == 0 ? 0 : e->usage == 10 ? 1 + (e->uidx & 1) : e->usage == 5 ? 3 + (e->uidx & 7) : -1;   /* POSITION, COLOR, TEXCOORD */
+            if (reg >= 0) vtx_write(e->type, dst + e->off, out[reg]);
+        }
+    }
+    if (db->gid) { buf_locked(db, dest * stride, count * stride, 0); buf_unlocked(db); }   /* to the renderer's copy */
+    { static int n; if (getenv("D3D9_PVLOG") && n++ < 20) fprintf(stderr, "d3d9: ProcessVertices %u vertices with shader %08x (%d inputs)\n", count, code[0], me->decl->n); }
+    RET(D3D_OK, 7);
+END
 M(dv_CreateVertexDeclaration, 3) DEV_ME
     uint32_t e = ARG(1), n = 0; while (n < 64 && rt_r16(G_MEM, e + 8 * n) != 0xff) n++;
     Decl9 *d = calloc(1, sizeof *d); d->ref = 1; d->dev = me; d->nraw = n + 1; d->raw = gmem(8 * (n + 1)); memcpy(GP(d->raw), GP(e), 8 * (n + 1));
@@ -1092,8 +1160,24 @@ static uint32_t set_consts(float (*dst)[4], uint32_t max, uint32_t start, uint32
     if (get) memcpy(GP(data), dst[start], 16 * n); else memcpy(dst[start], GP(data), 16 * n);
     return D3D_OK;
 }
-M(dv_SetVertexShaderConstantF, 4) DEV_ME RET(set_consts(me->vsc, 256, ARG(1), ARG(2), ARG(3), 0), 4); END
-M(dv_GetVertexShaderConstantF, 4) DEV_ME RET(set_consts(me->vsc, 256, ARG(1), ARG(2), ARG(3), 1), 4); END
+/* software vertex processing has 8192 vertex shader constants (ProcessVertices reads them); the GPU's draws, 256 */
+static int swvp_capable(const Dev9 *d) { return (d->behavior & 0xa0) != 0; }   /* SOFTWARE_ or MIXED_VERTEXPROCESSING */
+M(dv_SetVertexShaderConstantF, 4) DEV_ME
+    uint32_t start = ARG(1), data = ARG(2), n = ARG(3);
+    if (start + n > 256) {
+        if (!swvp_capable(me) || start + n > 8192) RET(D3DERR_INVALIDCALL, 4);
+        if (!me->vsc_sw) { me->vsc_sw = calloc(8192, 16); memcpy(me->vsc_sw, me->vsc, sizeof me->vsc); }
+        memcpy(me->vsc_sw[start], GP(data), 16 * n);
+        if (start < 256) memcpy(me->vsc[start], GP(data), 16 * (256 - start));
+        RET(D3D_OK, 4);
+    }
+    if (me->vsc_sw) memcpy(me->vsc_sw[start], GP(data), 16 * n);
+    RET(set_consts(me->vsc, 256, start, data, n, 0), 4);
+END
+M(dv_GetVertexShaderConstantF, 4) DEV_ME
+    if (ARG(1) + ARG(3) > 256 && me->vsc_sw && ARG(1) + ARG(3) <= 8192) { memcpy(GP(ARG(2)), me->vsc_sw[ARG(1)], 16 * ARG(3)); RET(D3D_OK, 4); }
+    RET(set_consts(me->vsc, 256, ARG(1), ARG(2), ARG(3), 1), 4);
+END
 static uint32_t set_iconsts(int32_t (*dst)[4], uint32_t start, uint32_t data, uint32_t n, int get)
 {
     if (start + n > 16) return D3DERR_INVALIDCALL;
