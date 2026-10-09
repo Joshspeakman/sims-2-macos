@@ -45,6 +45,8 @@ enum {
     DSR_MSL_CREATE,        /* u32 id, u32 nattr, u32 vs length, u32 ps length, {u32 slot, u32 input register}[nattr], vertex MSL
                               (function vsmain), pixel MSL (function psmain), each NUL-terminated and padded to 4: the game's
                               own shader pair for Metal (d3d9_shader.c); constants as DSR_SHADER_CONST */
+    DSR_CURSOR,            /* i32 x, y (the hotspot, in the presented surface's pixels), u32 shown [, u32 w, h, hotspot x, y,
+                              premultiplied BGRA pixels[w*h]: a new picture]: the Windows cursor, drawn over the frame as shown */
 };
 #define DSR_VBUFS 65536
 #endif

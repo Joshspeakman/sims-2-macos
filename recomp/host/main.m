@@ -99,6 +99,12 @@ static void *render_thread(void *arg)
                         }
                         if ((long)fno == shot_at) {
                             id<MTLTexture> tex = dsr_renderer_presented(r); dsr_renderer_flush(r, 1);
+                            if (tex && getenv("DS_SHOT_AS_SHOWN")) {   /* the picture as it goes to the screen (the cursor drawn) */
+                                MTLTextureDescriptor *sd = [MTLTextureDescriptor texture2DDescriptorWithPixelFormat:MTLPixelFormatBGRA8Unorm width:tex.width height:tex.height mipmapped:NO];
+                                sd.usage = MTLTextureUsageRenderTarget | MTLTextureUsageShaderRead; sd.storageMode = MTLStorageModePrivate;
+                                id<MTLTexture> t = [layer.device newTextureWithDescriptor:sd];
+                                if (dsr_renderer_present_to(r, t)) { dsr_renderer_flush(r, 1); tex = t; }
+                            }
                             if (tex && tex.pixelFormat == MTLPixelFormatBGRA8Unorm) {
                                 NSUInteger tw = tex.width, th = tex.height;
                                 id<MTLBuffer> buf = [layer.device newBufferWithLength:tw * th * 4 options:MTLResourceStorageModeShared];
@@ -339,10 +345,14 @@ static void capture(int on);
  * (AppKit would move this borderless window below the notch without making it shorter, its bottom off the screen). */
 static int windowed(void) { static int v = -1; if (v < 0) v = getenv("DS_WINDOWED") && atoi(getenv("DS_WINDOWED")); return v; }   /* the launcher's Window row */
 static int notch_around(void) { static int v = -1; if (v < 0) v = getenv("DS_NOTCH") && !strcmp(getenv("DS_NOTCH"), "around"); return v; }
+/* macOS full screen keeps a window below the camera housing whatever it asks for, so around the notch the game is a
+ * screen-sized borderless window instead (the Dock and menu bar hidden while it is in front; no Game Mode) */
+static int borderless(void) { return !windowed() && (getenv("DS_BORDERLESS") || notch_around()); }
 @interface GameWindow : NSWindow @end
 @implementation GameWindow
 - (BOOL)canBecomeKeyWindow { return YES; }
 - (BOOL)canBecomeMainWindow { return YES; }
+- (NSRect)constrainFrameRect:(NSRect)r toScreen:(NSScreen *)sc { return borderless() ? r : [super constrainFrameRect:r toScreen:sc]; }   /* over the menu bar and notch */
 - (NSRect)gameFrame
 {
     NSRect f = (self.screen ?: NSScreen.mainScreen).frame;
@@ -434,6 +444,7 @@ static void capture(int on)
     if (test_mode) return;
     if (on == captured) return;
     captured = on;
+    extern volatile int w32_cursor_host_hidden; w32_cursor_host_hidden = !on;   /* the game's cursor (drawn over the frame) or the Mac's */
     if (on) { [NSCursor hide]; CGAssociateMouseAndMouseCursorPosition(false); }
     else { CGAssociateMouseAndMouseCursorPosition(true); [NSCursor unhide]; }
 }
@@ -485,8 +496,12 @@ static void window_changed(uint32_t hwnd, int x, int y, int w, int h, int visibl
             else {
                 [win makeKeyAndOrderFront:nil]; [NSApp activateIgnoringOtherApps:YES]; capture(1);
                 if (windowed()) ;                                         /* the launcher's Window row */
-                else if (getenv("DS_BORDERLESS")) [NSApp setPresentationOptions:NSApplicationPresentationHideDock | NSApplicationPresentationHideMenuBar];   /* the old way: a screen-sized window */
+                else if (borderless()) {                                  /* a screen-sized window: around the notch, or DS_BORDERLESS */
+                    [NSApp setPresentationOptions:NSApplicationPresentationHideDock | NSApplicationPresentationHideMenuBar];
+                    [win setFrame:(win.screen ?: NSScreen.mainScreen).frame display:YES];
+                }
                 else enter_fullscreen();
+                if (getenv("DS_WINLOG")) fprintf(stderr, "win: frame %s, screen %s\n", NSStringFromRect(win.frame).UTF8String, NSStringFromRect((win.screen ?: NSScreen.mainScreen).frame).UTF8String);
             }
         }
         else if (!visible && win.visible) { leave_fullscreen(); [win orderOut:nil]; capture(0); }

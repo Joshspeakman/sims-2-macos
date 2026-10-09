@@ -48,6 +48,7 @@ struct DSRRenderer {
     struct { __unsafe_unretained id pso, dso, tex[3], smp[3]; int cull, ring_bound; uint32_t sref; MTLViewport vp; } es;
     id<MTLRenderPipelineState> quad_pso, quad_over_pso, zclear_pso, present_pso; id<MTLTexture> scratch, gamma_lut; uint16_t gamma[3][256]; int gamma_dirty; id<MTLDepthStencilState> zclear_ds, nodepth_ds, zsclear_ds[4];
     id<MTLSamplerState> point_clamp, linear_clamp; id<MTLTexture> dummy;
+    id<MTLTexture> cur_tex; int32_t cur_x, cur_y, cur_hx, cur_hy, cur_show;   /* DSR_CURSOR */
     /* effect programs (DSR_PROG_*): Metal compiled from the game's HLSL effects (runtime/win32/hlsl.c) */
     struct { id<MTLFunction> vs, fs; uint32_t kinds; } prog[1024]; uint32_t cur_prog;
     float pconst[4096 * 4]; uint32_t npconst;
@@ -746,6 +747,16 @@ id<MTLCommandBuffer> dsr_renderer_present_to(DSRRenderer *r, id<MTLTexture> dst)
     [e setFragmentTexture:s->tex atIndex:0]; [e setFragmentTexture:r->gamma_lut atIndex:1];
     [e setFragmentSamplerState:(dst.width == s->tex.width && dst.height == s->tex.height) ? r->point_clamp : r->linear_clamp atIndex:0];
     [e drawPrimitives:MTLPrimitiveTypeTriangle vertexStart:0 vertexCount:3];
+    if (r->cur_show && r->cur_tex && s->w && s->h) {   /* the Windows cursor, over the frame; as large as the game's pixels */
+        struct { float dst[4], src[4], color[4]; int32_t mode[4]; } q = {{0}};
+        float x0 = (float)(r->cur_x - r->cur_hx), y0 = (float)(r->cur_y - r->cur_hy), sc = (float)dst.width / s->w;
+        q.dst[0] = x0 / s->w; q.dst[1] = y0 / s->h; q.dst[2] = (x0 + r->cur_tex.width) / s->w; q.dst[3] = (y0 + r->cur_tex.height) / s->h;
+        q.src[2] = q.src[3] = 1;
+        [e setRenderPipelineState:r->quad_over_pso]; [e setVertexBytes:&q length:sizeof q atIndex:0]; [e setFragmentBytes:&q length:sizeof q atIndex:0];
+        [e setFragmentTexture:r->cur_tex atIndex:0]; [e setFragmentSamplerState:fabsf(sc - roundf(sc)) < 0.01f ? r->point_clamp : r->linear_clamp atIndex:0];
+        [e drawPrimitives:MTLPrimitiveTypeTriangleStrip vertexStart:0 vertexCount:4];
+        [e setRenderPipelineState:r->present_pso]; [e setFragmentTexture:s->tex atIndex:0]; [e setFragmentTexture:r->gamma_lut atIndex:1];
+    }
     if (r->fl_on) {   /* DSR_FLASHLOG: the frame as shown, sampled 32x32, checked when the GPU is done */
         [e endEncoding];
         int i = r->fl_i++ & 3;
@@ -1219,6 +1230,15 @@ int dsr_renderer_exec(DSRRenderer *r, uint32_t op, const uint8_t *pl, uint32_t s
     case DSR_QUERY: if (size >= 12) query(r, p); break;
     case DSR_SCISSOR: if (size >= 16) memcpy(r->scissor, p, 16); break;
     case DSR_MODE: r->mode_w = p[0]; r->mode_h = p[1]; break;
+    case DSR_CURSOR: if (size >= 12) { r->cur_x = (int32_t)p[0]; r->cur_y = (int32_t)p[1]; r->cur_show = (int32_t)p[2]; }
+        if (size >= 28 && p[3] && p[4] && p[3] <= 256 && p[4] <= 256 && 28 + 4ull * p[3] * p[4] <= size) {
+            MTLTextureDescriptor *d = [MTLTextureDescriptor texture2DDescriptorWithPixelFormat:MTLPixelFormatBGRA8Unorm width:p[3] height:p[4] mipmapped:NO];
+            d.usage = MTLTextureUsageShaderRead; d.storageMode = MTLStorageModeShared;
+            id<MTLTexture> t = [r->dev newTextureWithDescriptor:d];
+            [t replaceRegion:MTLRegionMake2D(0, 0, p[3], p[4]) mipmapLevel:0 withBytes:p + 7 bytesPerRow:4 * p[3]];
+            r->cur_tex = t; r->cur_hx = (int32_t)p[5]; r->cur_hy = (int32_t)p[6];
+        }
+        break;
     case DSR_GAMMA: if (size >= 1536) { memcpy(r->gamma, p, 1536); r->gamma_dirty = 1; } break;
     default: break;
     }
