@@ -17,7 +17,8 @@ DSR_TEXTURE_CACHE_DIR="$TMP" "$OUT/texture_cache" reuse
 python3 recomp/tests/runtime_build_test.py
 clang -fsyntax-only -fobjc-arc -DSIMS2_EDITION -I recomp/runtime recomp/host/main.m
 cp src/renderer/shaders.metal "$OUT/"
-clang -O1 -g -fobjc-arc recomp/tests/metal_renderer_test.m -framework Metal -framework Foundation -framework QuartzCore -o "$OUT/metal_renderer"
+clang -O1 -g -I recomp/runtime -I recomp/third_party/mojoshader -c recomp/tests/ff_shader_fixture.c -o "$OUT/ff_shader_fixture.o"
+clang -O1 -g -fobjc-arc -Wl,-dead_strip recomp/tests/metal_renderer_test.m "$OUT/ff_shader_fixture.o" -framework Metal -framework Foundation -framework QuartzCore -o "$OUT/metal_renderer"
 set +e
 DSR_CACHE_DIR="$TMP/metal" "$OUT/metal_renderer"
 RC=$?
