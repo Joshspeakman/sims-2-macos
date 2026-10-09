@@ -98,6 +98,15 @@ int rt_override(Ctx *c, uint32_t addr)
 #elif defined(SIMS2_EDITION)
     case 0xa0c2b206u:                                     /* crashpad setup (cdecl, three string pointers, result unused) */
         c->esp += 4; return 1;
+    case 0xa09cc611u: {   /* RefPack compression (cdecl: source, length, destination, window, flag; returns the stream's length):
+                           * natively (refpack.c); the game sizes the destination at 1.5 x length + 1024. SIMS2_LIFTED_REFPACK=1:
+                           * the game's own */
+        static int lifted = -1; if (lifted < 0) lifted = getenv("SIMS2_LIFTED_REFPACK") != 0;
+        if (lifted) return 0;
+        uint32_t refpack_compress(const uint8_t *src, uint32_t len, uint8_t *dst, uint32_t window);
+        uint32_t src = rt_r32(G_MEM, c->esp + 4), len = rt_r32(G_MEM, c->esp + 8), dst = rt_r32(G_MEM, c->esp + 12), win = rt_r32(G_MEM, c->esp + 16);
+        c->eax = refpack_compress(G_MEM + src, len, G_MEM + dst, win);
+        c->esp += 4; return 1; }
 #else
     case 0x007663b0u: return keep_multiplayer_button(c);
 #endif
