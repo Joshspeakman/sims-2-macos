@@ -8,6 +8,8 @@
  * D3D9_LOG=1: every method's first calls; any method not written yet says so once. */
 #include "d3d9_priv.h"
 #include "d3d9_vsinterp.h"
+#include <unistd.h>
+#include <math.h>
 #include "edition.h"
 #include "../../../src/dsr/dsr_shm.h"
 #include <pthread.h>
@@ -59,11 +61,21 @@ static void surf_upload(Surf9 *s, uint32_t y0, uint32_t y1)
         cmd_end();
     }
 }
+static void rb_log(const char *what, uint32_t w, uint32_t h, uint32_t fmt, int ok, const uint8_t *p, uint32_t pitch)
+{
+    static int lg = -1, n; if (lg < 0) lg = getenv("D3D9_RBLOG") != 0; if (!lg || (w <= 16 && h <= 16) || n++ > 200) return;
+    uint32_t white = 0, tot = 0; if (p && ok) for (uint32_t y = 0; y < h; y += 4) for (uint32_t x = 0; x < w; x += 4) { const uint8_t *q = p + y * pitch + 4 * x; tot++; white += q[0] > 240 && q[1] > 240 && q[2] > 240; }
+    fprintf(stderr, "rblog: %s %ux%u fmt %u ok %d white %u/%u\n", what, w, h, fmt, ok, white, tot);
+    if (getenv("D3D9_RBDUMP") && p && ok) { char fn[600]; snprintf(fn, sizeof fn, "%s/rb%03d_%ux%u.bgra", getenv("D3D9_RBDUMP"), n, w, h);
+        FILE *f = fopen(fn, "wb"); if (f) { for (uint32_t y = 0; y < h; y++) fwrite(p + y * pitch, 4, w, f); fclose(f); } }
+}
+static int dtrace;                                     /* (the draw trace, below) */
 static void surf_readback(Surf9 *s)                    /* GPU -> CPU copy (render targets the game locks) */
 {
+    if (s->gpu_newer && d9_fmt_bytes(s->fmt) != 4) rb_log("lock skipped", s->w, s->h, s->fmt, 0, 0, 0);
     if (!s->gpu_newer || d9_fmt_bytes(s->fmt) != 4) return;
     int32_t r[4] = {0, 0, (int32_t)s->w, (int32_t)s->h};
-    cmd_readback(s->id, r, G_MEM + s->mem, s->pitch, 4);
+    int ok = cmd_readback(s->id, r, G_MEM + s->mem, s->pitch, 4); rb_log("lock", s->w, s->h, s->fmt, ok, G_MEM + s->mem, s->pitch);
     if (s->fmt == 22) for (uint32_t y = 0; y < s->h; y++) for (uint32_t x = 0; x < s->w; x++) G_MEM[s->mem + y * s->pitch + 4 * x + 3] = 0xff;
     s->gpu_newer = 0;
 }
@@ -544,6 +556,76 @@ static uint32_t prim_verts(uint32_t prim, uint32_t n)
 }
 static uint8_t *staging(Dev9 *d, size_t n) { if (n > d->vbuf_cap) { d->vbuf_cap = n + n / 2; d->vbuf = realloc(d->vbuf, d->vbuf_cap); } return d->vbuf; }
 /* vertices [first, first + nv) of the current streams into FVF layout; 0 if they can't be (out of range, unsupported) */
+/* Direct3D's fixed-function lighting (D3DRS_LIGHTING), done here per vertex: the renderer's fixed-function path has
+ * none (it began with Dungeon Siege's unlit Direct3D 7 drawing). The lit colour replaces the vertex's diffuse, as the
+ * lighting stage does, so a draw lit by lamps and the sun keeps its texture's colours: The Sims 2 draws its roofs
+ * this way (MODULATE2X with a lit diffuse near 0.4: unlit, white). Directional, point and spot lights, the material
+ * and its colour sources (D3DRS_COLORVERTEX, *MATERIALSOURCE), global ambient. Specular is left out (the renderer has
+ * no specular input). Positions XYZ or XYZBn (blending ignored: world matrix 0). */
+static uint8_t *lit_buf; static size_t lit_cap;
+static void argb(uint32_t c, float o[4]) { o[0] = ((c >> 16) & 255) / 255.0f; o[1] = ((c >> 8) & 255) / 255.0f; o[2] = (c & 255) / 255.0f; o[3] = (c >> 24) / 255.0f; }
+static const uint8_t *ff_lit(Dev9 *d, uint8_t *in, uint32_t nv, uint32_t fvf, uint32_t *fvf_out)
+{
+    *fvf_out = fvf;
+    static int off = -1; if (off < 0) off = getenv("D3D9_NO_FFLIGHT") != 0;
+    uint32_t pos = fvf & 0xe;
+    if (off || !d->rs[137] || pos == 4 || !pos || (fvf & 0x4000)) return in;          /* LIGHTING off, or transformed vertices */
+    uint32_t ps = pos == 2 ? 12 : pos == 6 ? 16 : pos == 8 ? 20 : pos == 0xa ? 24 : pos == 0xc ? 28 : 32;
+    uint32_t has_n = fvf & 0x10, has_d = fvf & 0x40, has_s = fvf & 0x80, ofs = fvf_stride(fvf);
+    uint32_t nfvf = fvf | 0x40, nfs = fvf_stride(nfvf);
+    uint32_t o_n = ps, o_d = ps + (has_n ? 12 : 0) + ((fvf & 0x20) ? 4 : 0), o_s = o_d + (has_d ? 4 : 0);
+    if ((size_t)nfs * nv > lit_cap) { lit_cap = (size_t)nfs * nv * 2; lit_buf = realloc(lit_buf, lit_cap); }
+    const float *W = d->xf[256]; float m[17]; memcpy(m, d->material, 68);
+    float ga[4]; argb(d->rs[139], ga);
+    int cv = d->rs[141] != 0;                                                         /* COLORVERTEX */
+    uint32_t dsrc = d->rs[145], asrc = d->rs[147], esrc = d->rs[148];
+    struct { int type; float dif[4], amb[3], p[3], dir[3], range, falloff, a0, a1, a2, theta, phi; } L[8]; int nl = 0;
+    for (int l = 0; l < 8; l++) if (d->light_on[l]) {
+        uint32_t ty; float f[25]; memcpy(&ty, d->light[l], 4); memcpy(f, d->light[l] + 4, 100);
+        L[nl].type = (int)ty; memcpy(L[nl].dif, f, 16); memcpy(L[nl].amb, f + 8, 12); memcpy(L[nl].p, f + 12, 12); memcpy(L[nl].dir, f + 15, 12);
+        L[nl].range = f[18]; L[nl].falloff = f[19]; L[nl].a0 = f[20]; L[nl].a1 = f[21]; L[nl].a2 = f[22]; L[nl].theta = f[23]; L[nl].phi = f[24];
+        float dl = sqrtf(L[nl].dir[0] * L[nl].dir[0] + L[nl].dir[1] * L[nl].dir[1] + L[nl].dir[2] * L[nl].dir[2]);
+        if (dl > 0) for (int k = 0; k < 3; k++) L[nl].dir[k] /= dl;
+        nl++;
+    }
+    for (uint32_t v = 0; v < nv; v++) {
+        const uint8_t *s = in + (size_t)v * ofs; uint8_t *o = lit_buf + (size_t)v * nfs;
+        float vd[4] = {1, 1, 1, 1}, vs[4] = {0, 0, 0, 0}, P[3], N[3] = {0, 0, 0}, x[3];
+        if (has_d) { uint32_t c; memcpy(&c, s + o_d, 4); argb(c, vd); }
+        if (has_s) { uint32_t c; memcpy(&c, s + o_s, 4); argb(c, vs); }
+        memcpy(x, s, 12);
+        for (int k = 0; k < 3; k++) P[k] = x[0] * W[k] + x[1] * W[4 + k] + x[2] * W[8 + k] + W[12 + k];
+        if (has_n) { float n[3]; memcpy(n, s + o_n, 12); for (int k = 0; k < 3; k++) N[k] = n[0] * W[k] + n[1] * W[4 + k] + n[2] * W[8 + k];
+            float l = sqrtf(N[0] * N[0] + N[1] * N[1] + N[2] * N[2]); if (l > 0) for (int k = 0; k < 3; k++) N[k] /= l; }
+        const float *cd = cv && dsrc == 1 && has_d ? vd : cv && dsrc == 2 && has_s ? vs : m;
+        const float *ca = cv && asrc == 1 && has_d ? vd : cv && asrc == 2 && has_s ? vs : m + 4;
+        const float *ce = cv && esrc == 1 && has_d ? vd : cv && esrc == 2 && has_s ? vs : m + 12;
+        float col[3]; for (int k = 0; k < 3; k++) col[k] = ce[k] + ca[k] * ga[k];
+        for (int l = 0; l < nl; l++) {
+            float Ld[3], att = 1, spot = 1;
+            if (L[l].type == 3) { for (int k = 0; k < 3; k++) Ld[k] = -L[l].dir[k]; }
+            else {
+                float dv[3] = {L[l].p[0] - P[0], L[l].p[1] - P[1], L[l].p[2] - P[2]}, dist = sqrtf(dv[0] * dv[0] + dv[1] * dv[1] + dv[2] * dv[2]);
+                if (L[l].range > 0 && dist > L[l].range) continue;
+                for (int k = 0; k < 3; k++) Ld[k] = dist > 0 ? dv[k] / dist : 0;
+                float a = L[l].a0 + L[l].a1 * dist + L[l].a2 * dist * dist; att = a > 0 ? 1.0f / a : 1;
+                if (L[l].type == 2) {
+                    float rho = -(Ld[0] * L[l].dir[0] + Ld[1] * L[l].dir[1] + Ld[2] * L[l].dir[2]), ct = cosf(L[l].theta / 2), cp = cosf(L[l].phi / 2);
+                    spot = rho > ct ? 1 : rho <= cp ? 0 : (ct - cp > 0 ? powf((rho - cp) / (ct - cp), L[l].falloff) : 1);
+                }
+            }
+            float nd = N[0] * Ld[0] + N[1] * Ld[1] + N[2] * Ld[2]; if (nd < 0) nd = 0;
+            for (int k = 0; k < 3; k++) col[k] += att * spot * (cd[k] * L[l].dif[k] * nd + ca[k] * L[l].amb[k]);
+        }
+        uint8_t c4[4];
+        for (int k = 0; k < 3; k++) { float x2 = col[k] < 0 ? 0 : col[k] > 1 ? 1 : col[k]; c4[2 - k] = (uint8_t)lrintf(x2 * 255); }
+        { float a = cd[3] < 0 ? 0 : cd[3] > 1 ? 1 : cd[3]; c4[3] = (uint8_t)lrintf(a * 255); }
+        /* the new layout: position, normal, psize as before, then the lit diffuse, then the rest */
+        uint32_t head = o_d, tail = ofs - o_d - (has_d ? 4 : 0);
+        memcpy(o, s, head); memcpy(o + head, c4, 4); memcpy(o + head + 4, s + o_d + (has_d ? 4 : 0), tail);
+    }
+    *fvf_out = nfvf; return lit_buf;
+}
 static const uint8_t *gather(Dev9 *d, uint32_t first, uint32_t nv, uint32_t *fvf_out, const uint8_t *up, uint32_t up_stride)
 {
     static int warned_decl, warned_range;
@@ -564,7 +646,7 @@ static const uint8_t *gather(Dev9 *d, uint32_t first, uint32_t nv, uint32_t *fvf
         (void)avail;
         if (stride == fs) { memcpy(out, src, (size_t)fs * nv); }
         else for (uint32_t v = 0; v < nv; v++) memcpy(out + (size_t)v * fs, src + (size_t)v * stride, fs < stride ? fs : stride);
-        *fvf_out = fvf; return out;
+        return ff_lit(d, out, nv, fvf, fvf_out);
     }
     memset(out, 0, (size_t)fs * nv);
     for (int k = 0; k < d->decl->n; k++) {
@@ -581,7 +663,7 @@ static const uint8_t *gather(Dev9 *d, uint32_t first, uint32_t nv, uint32_t *fvf
         (void)len;
         for (uint32_t v = 0; v < nv; v++) memcpy(out + (size_t)v * fs + e->dst, src + (size_t)v * stride + e->off, e->size);
     }
-    *fvf_out = fvf; return out;
+    return ff_lit(d, out, nv, fvf, fvf_out);
 }
 static void emit(Dev9 *d, uint32_t prim, uint32_t fvf, const uint8_t *v, uint32_t nv, const uint16_t *idx, uint32_t ni)
 {
@@ -857,7 +939,35 @@ static void dev_present(Ctx *c, Dev9 *d)
         if (!t0) t0 = t; else if (t - t0 >= 2) { fprintf(stderr, "d3d9: %.1f fps\n", n / (t - t0)); t0 = t; n = 0; }
     }
 }
-M(dv_Present, 5) DEV_ME dev_present(c, me); RET(D3D_OK, 5); END
+/* development: D3D9_DRAWTRACE_ON=<file>: when the file appears (it is removed), the next frame's draws are listed (what
+ * draws them, the textures and stage states, and whether the draw was skipped) */
+static uint32_t shash(Shader9 *s) { if (!s) return 0; uint32_t h = 2166136261u; for (uint32_t k = 0; k < s->len; k++) h = (h ^ G_MEM[s->mem + k]) * 16777619u; return h; }
+static void trace_draw(Dev9 *d, const char *kind, uint32_t prim, uint32_t n, const char *skip)
+{
+    if (!dtrace) return;
+    fprintf(stderr, "draw: %s prim %u n %u vs %08x ps %s%08x fvf %x%s | rt %ux%u | z %u/%u cull %u blend %u (%u,%u) atest %u/%u ref %u",
+            kind, prim, n, shash(d->vs), d->ps ? "" : "FF:", shash(d->ps), d->fvf, d->decl ? " decl" : "", d->rt ? d->rt->w : 0, d->rt ? d->rt->h : 0,
+            d->rs[7], d->rs[23], d->rs[22], d->rs[27], d->rs[19], d->rs[20], d->rs[15], d->rs[25], d->rs[24]);
+    for (int st = 0; st < 8; st++) {
+        if (!d->tex[st] && (st >= 1 || d->tss[st][1] == 1)) { if (d->tss[st][1] == 1) break; }
+        Tex9 *t = d->tex[st];
+        fprintf(stderr, " | s%d %s", st, t ? "" : "-");
+        if (t) fprintf(stderr, "%ux%u f%u", t->w, t->h, t->fmt);
+        if (!d->ps) fprintf(stderr, " op %u(%x,%x) aop %u(%x,%x) tci %x ttf %x", d->tss[st][1], d->tss[st][2], d->tss[st][3], d->tss[st][4], d->tss[st][5], d->tss[st][6], d->tss[st][11], d->tss[st][24]);
+    }
+    if (!d->vs) {
+        fprintf(stderr, " | lit %u amb %08x dmat %u col %u", d->rs[137], d->rs[139], d->rs[145], d->rs[141]);
+        if (d->decl) for (int k = 0; k < d->decl->n; k++) fprintf(stderr, " [s%d+%d t%d u%d/%d]", d->decl->e[k].stream, d->decl->e[k].off, d->decl->e[k].type, d->decl->e[k].usage, d->decl->e[k].uidx);
+        if (d->rs[137]) { float m[17]; memcpy(m, d->material, 68); fprintf(stderr, " mat d(%.2f %.2f %.2f) a(%.2f %.2f %.2f) e(%.2f %.2f %.2f) lights", m[0], m[1], m[2], m[4], m[5], m[6], m[12], m[13], m[14]);
+            for (int l = 0; l < 8; l++) if (d->light_on[l]) { uint32_t ty; float lf[26]; memcpy(&ty, d->light[l], 4); memcpy(lf, d->light[l] + 4, 100); fprintf(stderr, " %d:t%u d(%.2f %.2f %.2f) a(%.2f %.2f %.2f)", l, ty, lf[0], lf[1], lf[2], lf[8], lf[9], lf[10]); } }
+    }
+    fprintf(stderr, "%s%s\n", skip ? " SKIPPED: " : "", skip ? skip : "");
+}
+M(dv_Present, 5) DEV_ME
+    { static int grtd = -1; if (grtd < 0) grtd = getenv("D3D9_DRAWTRACE_GRTD") != 0; if (dtrace && !grtd) { dtrace = 0; fprintf(stderr, "draw: end of frame\n"); } }
+    { static const char *on; static int read; if (!read) { read = 1; on = getenv("D3D9_DRAWTRACE_ON"); }
+      if (on && !access(on, F_OK)) { unlink(on); dtrace = 1; fprintf(stderr, "draw: frame trace\n"); } }
+    dev_present(c, me); RET(D3D_OK, 5); END
 M(dv_GetBackBuffer, 5) DEV_ME                          /* (swap chain, index, type, surface) */
     if (ARG(1) || ARG(2)) RET(D3DERR_INVALIDCALL, 5);
     rt_w32(G_MEM, ARG(4), me->back->g); surf_addref(me->back); RET(D3D_OK, 5);
@@ -924,8 +1034,11 @@ M(dv_UpdateTexture, 3)
     RET(D3D_OK, 3);
 END
 M(dv_GetRenderTargetData, 3)
-    Surf9 *s = obj(ARG(1), O9_SURF), *t = obj(ARG(2), O9_SURF); if (!s || !t || d9_fmt_bytes(t->fmt) != 4) RET(D3DERR_INVALIDCALL, 3);
-    int32_t r[4] = {0, 0, (int32_t)s->w, (int32_t)s->h}; cmd_readback(s->id, r, G_MEM + t->mem, t->pitch, 4); RET(D3D_OK, 3);
+    Surf9 *s = obj(ARG(1), O9_SURF), *t = obj(ARG(2), O9_SURF);
+    if (!s || !t || d9_fmt_bytes(t->fmt) != 4) { rb_log("GetRenderTargetData refused", s ? s->w : 0, s ? s->h : 0, t ? t->fmt : 0, 0, 0, 0); RET(D3DERR_INVALIDCALL, 3); }
+    { static int n; if (getenv("D3D9_DRAWTRACE_GRTD") && n < 24) { n++; fprintf(stderr, "draw: --- readback %d (%ux%u)\n", n, s->w, s->h); dtrace = n < 24; } }
+    int32_t r[4] = {0, 0, (int32_t)s->w, (int32_t)s->h}; int ok = cmd_readback(s->id, r, G_MEM + t->mem, t->pitch, 4);
+    rb_log("GetRenderTargetData", s->w, s->h, t->fmt, ok, G_MEM + t->mem, t->pitch); RET(D3D_OK, 3);
 END
 M(dv_GetFrontBufferData, 3) DEV_ME
     Surf9 *t = obj(ARG(2), O9_SURF); if (!t) RET(D3DERR_INVALIDCALL, 3);
@@ -1025,6 +1138,7 @@ static int shader_bind(Dev9 *d)
     d9_program_use(d, id); d9_shader_consts(d, id); return 1;
 }
 M(dv_DrawPrimitive, 4) DEV_ME                          /* (type, start vertex, primitives) */
+    if (dtrace) trace_draw(me, "DP", ARG(1), ARG(3), me->vs && !d9_shader_program(me) ? "no program" : (!me->vs && !me->prog && !can_draw(me)) ? "can't draw" : 0);
     if (me->vs) { if (shader_bind(me) && !prog_draw_vb(me, ARG(1), (int32_t)ARG(2), 0, prim_verts(ARG(1), ARG(3)), 0, 0)) prog_draw(me, ARG(1), ARG(2), prim_verts(ARG(1), ARG(3)), 0, 0, 0, 0); RET(D3D_OK, 4); }
     if (me->prog) { prog_draw(me, ARG(1), ARG(2), prim_verts(ARG(1), ARG(3)), 0, 0, 0, 0); RET(D3D_OK, 4); }
     if (!can_draw(me)) RET(D3D_OK, 4);
@@ -1032,6 +1146,7 @@ M(dv_DrawPrimitive, 4) DEV_ME                          /* (type, start vertex, p
     if (v) emit(me, ARG(1), fvf, v, nv, 0, 0); RET(D3D_OK, 4);
 END
 M(dv_DrawIndexedPrimitive, 7) DEV_ME                   /* (type, base vertex, min index, vertices, start index, primitives) */
+    if (dtrace) trace_draw(me, "DIP", ARG(1), ARG(6), !me->ib ? "no index buffer" : me->vs && !d9_shader_program(me) ? "no program" : (!me->vs && !me->prog && !can_draw(me)) ? "can't draw" : 0);
     if (me->vs && (!me->ib || !shader_bind(me))) RET(D3D_OK, 7);
     if ((!me->prog && !can_draw(me)) || !me->ib) RET(D3D_OK, 7);
     uint32_t ni = prim_verts(ARG(1), ARG(6)), is = me->ib->fmt == 102 ? 4 : 2;
@@ -1040,6 +1155,7 @@ M(dv_DrawIndexedPrimitive, 7) DEV_ME                   /* (type, base vertex, mi
     (me->prog ? prog_draw_indexed : draw_indexed)(me, ARG(1), (int32_t)ARG(2), ARG(3), ARG(4), G_MEM + me->ib->mem + ARG(5) * is, is == 4, ni, 0, 0); RET(D3D_OK, 7);
 END
 M(dv_DrawPrimitiveUP, 5) DEV_ME                        /* (type, primitives, data, stride) */
+    if (dtrace) trace_draw(me, "DPUP", ARG(1), ARG(2), me->vs && !d9_shader_program(me) ? "no program" : (!me->vs && !me->prog && !can_draw(me)) ? "can't draw" : 0);
     if (me->vs) { if (shader_bind(me)) prog_draw(me, ARG(1), 0, prim_verts(ARG(1), ARG(2)), 0, 0, G_MEM + ARG(3), ARG(4)); RET(D3D_OK, 5); }
     if (me->prog) { prog_draw(me, ARG(1), 0, prim_verts(ARG(1), ARG(2)), 0, 0, G_MEM + ARG(3), ARG(4)); RET(D3D_OK, 5); }
     if (!can_draw(me)) RET(D3D_OK, 5);
@@ -1047,6 +1163,7 @@ M(dv_DrawPrimitiveUP, 5) DEV_ME                        /* (type, primitives, dat
     if (v) emit(me, ARG(1), fvf, v, nv, 0, 0); RET(D3D_OK, 5);
 END
 M(dv_DrawIndexedPrimitiveUP, 9) DEV_ME                 /* (type, min index, vertices, primitives, indices, index format, data, stride) */
+    if (dtrace) trace_draw(me, "DIPUP", ARG(1), ARG(4), me->vs && !d9_shader_program(me) ? "no program" : (!me->vs && !me->prog && !can_draw(me)) ? "can't draw" : 0);
     if (me->vs && !shader_bind(me)) RET(D3D_OK, 9);
     if (!me->prog && !can_draw(me)) RET(D3D_OK, 9);
     uint32_t ni = prim_verts(ARG(1), ARG(4)), stride = ARG(8);
