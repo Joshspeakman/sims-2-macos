@@ -141,7 +141,9 @@ What it took, beyond the imports (all 438 are implemented):
      thread nor the render thread is busy (about 55% and 45%), so the loading is paced by frames or sleeps:
      profile with `W32_PROFILE`.
 2. **The Mac**: see "The Mac (2026-10-09)" below.
-3. **C++ catch continuations**: a `throw` that the game catches can't resume yet (`lift.py` registers `__except`
+3. **C++ catch continuations** (done on the Mac, 2026-10-09: `lift.py` `cxx_continuations` makes the address each catch
+   funclet returns a landing-pad target, for both `push stub` and `__EH_prolog` prologues; `rt_call` takes the pad
+   whose registration node is in ebx). Before: a `throw` that the game catches can't resume yet (`lift.py` registers `__except`
    blocks only). None was needed to reach the menu. A known case: with a data folder left by earlier broken runs
    (kept as `~/.local/share/sims2-linux-badstate`), a curve property reaches its parser empty, and
    `std::length_error` ("vector too long") ends the game about a minute in. It would on Windows too, so the bad
@@ -153,9 +155,11 @@ What it took, beyond the imports (all 438 are implemented):
 
 ## The Mac (2026-10-09)
 
-Built and run on an M1 Pro (32 GB; the analysis was copied from the Linux build, see below). Test mode reaches the
-neighbourhood chooser in about 140 s, Desiderata Valley about 150 s later, and the Contrary family's lot in live mode
-about 150 s after that, at 60 fps with no faults. What it took:
+Built and run on an M1 Pro (32 GB; the analysis was copied from the Linux build, see below). Test mode at 1280x720,
+intro movies skipped: the neighbourhood chooser in about 25 s, Desiderata Valley within 45 s of choosing it, the
+Contrary family's lot in about 20 s; a neighbourhood about 100 fps uncapped (2,000 draws a frame), live play 65-110
+fps uncapped, 85-90 at twice the resolution (DSR_RENDER_SCALE=2). 15 minutes of speed-3 play: no faults, 11 C++
+exceptions caught, memory 1.1-1.3 GB with no growth. What it took:
 
 - **Shader constants**: the renderer dropped a program's constants above 8 KB (`renderer.m` `vcb`). MojoShader lays
   out each relative-addressed array from its base to c255, so the Sims' skinning shaders (arrays at c18, c26, c56,
@@ -178,12 +182,32 @@ about 150 s after that, at 60 fps with no faults. What it took:
 - **Interface size**: the game runs at the resolution divided by the size and the renderer draws at the full
   resolution (`DSR_RENDER_SCALE`), as in the Fallout NV port.
 - **Zoom**: the wheel and the X/Z keys zoom the game's camera; a trackpad pinch sends wheel steps.
+- **Performance** (2026-10-09; the neighbourhood was 42 fps, live play 40-50, start-up to the chooser 140 s):
+  - `rt_call`, under every virtual call, walked all the thread's SEH landing pads (now only when the target is a
+    registered handler: a set filled by `rt_seh_push`) and binary-searched 110,000 functions (now a hash).
+  - Vertex and index buffers: a partial update of a buffer the GPU was reading made a new `MTLBuffer` and copied the
+    whole old one. The game's lock flags now reach the renderer (NOOVERWRITE: in place; DISCARD: no copy), and
+    replaced buffers are pooled until the GPU is done.
+  - `VirtualAlloc` found free space by probing every 64 KB against every region (now one pass over the gaps).
+  - The runtime is built at -O2 (was -O1); the intro movies can be skipped (`SIMS2_SKIP_INTRO`, the launch window).
+  - RefPack compression, which the game does while it plays (saving Sims' data): natively (`refpack.c`, checked
+    against 15,685 of the game's own compressed resources and by round trips); as recompiled code it took up to 3 s.
+  - Every guest memory access is ordered (RT_TSO: acquire loads, which clang already makes `ldapr` on Apple
+    Silicon, and release stores); about twice the cost of plain accesses in a memory-bound loop, not changed.
+- **C++ catch blocks** (the game froze about 2.5 minutes into speed-3 play): see item 3 of the list above, now done.
+- **Fixed-function**: lighting is done per vertex on the CPU (`ff_lit`; the house pictures the game redraws after a
+  build edit had white roofs), stage 1 camera-space texgen and a third texture stage (projected shadows and lights).
+- **ProcessVertices** runs the vertex shader on the CPU (`d3d9_vsinterp.c`): the families' thumbnails were red
+  unposed figures.
 
 Build on the Mac without the 26 GB analysis: copy `recomp/work/sims2/analysis.json` from a machine that made it and
 `touch` it (`build_sims2.sh` keeps an analysis newer than `analyze.py`).
 
-Not yet on the Mac: the game's own Graphics menu has not been opened (its resolution list), build/buy and
-Create-a-Sim are untested, audio is muted in tests, and the Sim thumbnails of the families panel were not checked.
+Checked on the Mac (test mode): Create-a-Sim (a new family made and moved into the bin), build and buy (an object
+bought, undone, sold; a wall and a floor), the game's own Graphics options (applied), saving (a purchase still there
+after saving and coming back), the families' thumbnails, audio (recorded with `W32_AUDIO_DUMP` while muted: music in
+the menus and neighbourhood, sounds and music in a lot). Not yet: the Create-a-Sim mirror (it shows a plain surface),
+the real (non-test) launch, and long sessions beyond 15 minutes.
 
 ### Neighbourhood water (open, 2026-10-09)
 
@@ -199,6 +223,23 @@ Next: compare against a Windows screenshot of the same view; check where program
 transformed positions) and whether its depth test or colour writes reject it.
 Tools: D3D9_DRAWTRACE_ON=<file> (program, shaders, samplers incl. cube maps), D3D9_SKIP_SHADER=<hash,...>,
 D3D9_PAINT_MSL=<text>, D3D9_MSL_DUMP=<dir>.
+
+### Stalls when new content appears (open, 2026-10-09)
+
+Frames 0.5-1.2 s late in live play when Sims or objects first appear, and an 11 s stall while a neighbourhood first
+loads (DS_STALL_MS=<ms> profiles them). The presenting thread's stacks all run through EA's texture image manager
+(f_a016b2a0 / f_a016b0d0, which reference GZGraphic4ImageManager's source path) into a statically linked image library
+at low addresses (f_a001d57c < f_a0036c3b < f_a003480a, rows of 16-byte colours; f_a00416a2 / f_a0084dcb /
+f_a0084173 on 4x4 blocks of colours: format conversion and block compression), written with x87 floating point,
+which the recompiled code runs much slower than the CPU would. Refusing DXT formats (an experiment) didn't change
+them. Options: a native replacement for that library's conversion routines (rt_override), or faster x87 code from
+the lifter (the stack and status word live in Ctx; every op goes through memory).
+
+### Checked and not bugs (2026-10-09)
+
+- Sim portraits: the 128x128 readbacks are the two halves of each portrait (the game renders them as tiles); the
+  portraits in the interface are centred.
+- Roofs are hidden in live mode on the ground floor with walls up, as in the game.
 
 ## Tests
 
