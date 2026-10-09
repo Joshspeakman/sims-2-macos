@@ -7,6 +7,9 @@
  * with a vertex shader are skipped; with only a pixel shader they are drawn fixed-function).
  * D3D9_LOG=1: every method's first calls; any method not written yet says so once. */
 #include "d3d9_priv.h"
+
+/* Release-runtime debug muting has no graphics side effects and no arguments. */
+IMPL(d3d9, DebugSetMute) { RET(0, 0); }
 #include "d3d9_vsinterp.h"
 #include <unistd.h>
 #include <math.h>
@@ -459,7 +462,7 @@ static void set_ss(Dev9 *d, uint32_t sm, uint32_t t, uint32_t v)   /* sampler st
     if (sm >= 16 || t >= 14) return;
     if (d->rec) { RecEnt e = {REC_SS, sm << 8 | t, v}; rec_put(d->rec, e); return; }
     d->ss[sm][t] = v;
-    static const uint8_t map[14] = {0, 13, 14, 0, 15, 16, 17, 18, 19, 20, 21, 0, 0, 0};
+    static const uint8_t map[14] = {0, 13, 14, 25, 15, 16, 17, 18, 19, 20, 21, 29, 0, 0};
     if (sm < 16 && map[t]) { uint32_t *p = cmd_begin(DSR_TSS, 12); p[0] = sm; p[1] = map[t]; p[2] = t == 7 ? v + 1 : v; cmd_end(); }   /* mip filter: D3D9 0-2, D3D7 1-3; all 16 pixel samplers */
 }
 static uint32_t tex_id(Tex9 *t) { return t && t->lv[0][0] ? t->lv[0][0]->id : 0; }
@@ -904,7 +907,9 @@ int d9_shaders_on(void) {
 static void dev_defaults(Dev9 *d);
 M(dv_QueryInterface, 3) DEV_ME rt_w32(G_MEM, ARG(2), me->g); me->ref++; RET(D3D_OK, 3); END
 M(dv_AddRef, 1) DEV_ME RET((uint32_t)++me->ref, 1); END
-M(dv_Release, 1) DEV_ME RET((uint32_t)(me->ref > 0 ? --me->ref : 0), 1); END   /* the device itself is kept */
+M(dv_Release, 1) DEV_ME
+    if (me->ref > 0 && !--me->ref) { free(me->cursor); me->cursor = NULL; me->cursor_show = 0; }
+    RET((uint32_t)me->ref, 1); END   /* the device itself is kept */
 M(dv_TestCooperativeLevel, 1) RET(D3D_OK, 1); END
 M(dv_GetAvailableTextureMem, 1) RET(1024u << 20, 1); END
 OK_M(dv_EvictManagedResources, 1)
@@ -917,10 +922,23 @@ END
 M(dv_GetCreationParameters, 2) DEV_ME
     uint32_t v[4] = {0, 1, me->hwnd, me->behavior}; memcpy(GP(ARG(1)), v, 16); RET(D3D_OK, 2);
 END
-M(dv_SetCursorProperties, 4) DEV_ME                     /* (hotspot x, y, surface): the image is kept for Present */
+static uint32_t cursor_copy(Dev9 *d, Surf9 *s, uint32_t hx, uint32_t hy)
+{
+    if (!s || s->fmt != 21 || !s->w || !s->h || (s->w & (s->w - 1)) || (s->h & (s->h - 1)) ||
+        s->w > (uint32_t)w32_screen_w || s->h > (uint32_t)w32_screen_h || hx >= s->w || hy >= s->h)
+        return D3DERR_INVALIDCALL;
+    uint32_t *px = malloc((size_t)s->w * s->h * 4);
+    if (!px) return 0x8007000eu;
+    surf_readback(s);
+    for (uint32_t y = 0; y < s->h; y++) memcpy(px + (size_t)y * s->w, G_MEM + s->mem + (size_t)y * s->pitch, (size_t)s->w * 4);
+    free(d->cursor); d->cursor = px; d->cursor_w = s->w; d->cursor_h = s->h;
+    d->cursor_hx = (int)hx; d->cursor_hy = (int)hy;
+    return D3D_OK;
+}
+M(dv_SetCursorProperties, 4) DEV_ME                     /* D3D copies the image; callers may immediately release it. */
     Surf9 *s = obj(ARG(3), O9_SURF); if (!s) RET(D3DERR_INVALIDCALL, 4);
     if (getenv("W32_CURLOG")) fprintf(stderr, "cur: d3d SetCursorProperties fmt %u %ux%u\n", s->fmt, s->w, s->h);
-    me->cursor = s; me->cursor_hx = (int)ARG(1); me->cursor_hy = (int)ARG(2); RET(D3D_OK, 4);
+    RET(cursor_copy(me, s, ARG(1), ARG(2)), 4);
 END
 M(dv_SetCursorPosition, 4) DEV_ME me->cursor_x = (int)ARG(1); me->cursor_y = (int)ARG(2); RET(0, 4); END
 M(dv_ShowCursor, 2) DEV_ME if (getenv("W32_CURLOG")) fprintf(stderr, "cur: d3d ShowCursor(%u)\n", ARG(1)); int o = me->cursor_show; me->cursor_show = ARG(1) != 0; RET((uint32_t)o, 2); END
@@ -1399,8 +1417,8 @@ static void win32_cursor(void)
 }
 static void cursor_overlay(Dev9 *d)
 {
-    Surf9 *s = d->cursor; if (!d->cursor_show || !s || d9_fmt_bytes(s->fmt) != 4) { win32_cursor(); return; }
-    int32_t x = d->cursor_x - d->cursor_hx, y = d->cursor_y - d->cursor_hy, w = (int32_t)s->w, h = (int32_t)s->h;
+    if (!d->cursor_show || !d->cursor) { win32_cursor(); return; }
+    int32_t x = d->cursor_x - d->cursor_hx, y = d->cursor_y - d->cursor_hy, w = (int32_t)d->cursor_w, h = (int32_t)d->cursor_h;
     int32_t x0 = x < 0 ? -x : 0, y0 = y < 0 ? -y : 0, x1 = x + w > (int32_t)d->back->w ? (int32_t)d->back->w - x : w, y1 = y + h > (int32_t)d->back->h ? (int32_t)d->back->h - y : h;
     if (x1 <= x0 || y1 <= y0) return;
     uint32_t cw = (uint32_t)(x1 - x0), ch = (uint32_t)(y1 - y0), row = cw * 4;
@@ -1408,8 +1426,8 @@ static void cursor_overlay(Dev9 *d)
     p[0] = d->back->id; p[1] = (uint32_t)(x + x0); p[2] = (uint32_t)(y + y0); p[3] = cw; p[4] = ch; p[5] = row;
     uint8_t *o = (uint8_t *)(p + 6);
     for (uint32_t r = 0; r < ch; r++) for (uint32_t k = 0; k < cw; k++) {
-        uint32_t v; memcpy(&v, G_MEM + s->mem + (uint32_t)(y0 + (int32_t)r) * s->pitch + 4u * (uint32_t)(x0 + (int32_t)k), 4);
-        uint32_t a = s->fmt == 22 ? 255 : v >> 24;                /* premultiplied for the "over" composite */
+        uint32_t v = d->cursor[(size_t)(y0 + (int32_t)r) * d->cursor_w + x0 + k];
+        uint32_t a = v >> 24;                                  /* premultiplied for the "over" composite */
         uint32_t pm = a << 24 | ((v >> 16 & 255) * a / 255) << 16 | ((v >> 8 & 255) * a / 255) << 8 | (v & 255) * a / 255;
         memcpy(o + r * row + 4 * k, &pm, 4);
     }
@@ -1431,7 +1449,7 @@ static void dev_defaults(Dev9 *d)                      /* Direct3D 9's initial s
         set_tss(d, st, 4, st ? 1 : 2); set_tss(d, st, 5, 2); set_tss(d, st, 6, 1);
         set_tss(d, st, 11, st); set_tss(d, st, 24, 0); set_tss(d, st, 26, 1); set_tss(d, st, 27, 1); set_tss(d, st, 28, 1);
     }
-    for (uint32_t sm = 0; sm < 16; sm++) { set_ss(d, sm, 1, 1); set_ss(d, sm, 2, 1); set_ss(d, sm, 3, 1); set_ss(d, sm, 4, 0); set_ss(d, sm, 5, 1); set_ss(d, sm, 6, 1); set_ss(d, sm, 7, 0); set_ss(d, sm, 10, 1); }
+    for (uint32_t sm = 0; sm < 16; sm++) { set_ss(d, sm, 1, 1); set_ss(d, sm, 2, 1); set_ss(d, sm, 3, 1); set_ss(d, sm, 4, 0); set_ss(d, sm, 5, 1); set_ss(d, sm, 6, 1); set_ss(d, sm, 7, 0); set_ss(d, sm, 8, 0); set_ss(d, sm, 9, 0); set_ss(d, sm, 10, 1); set_ss(d, sm, 11, 0); }
     for (uint32_t st = 0; st < 16; st++) set_tex(d, st, 0);
     set_xf(d, 256, ident); set_xf(d, 2, ident); set_xf(d, 3, ident); for (uint32_t t = 16; t < 24; t++) set_xf(d, t, ident);
     uint32_t vp[6] = {0, 0, d->back->w, d->back->h, 0, u32f(1.0f)}; set_vp(d, vp);
@@ -1462,6 +1480,7 @@ static void dev_surfaces(Dev9 *d, uint32_t pp)          /* back buffer (and the 
 }
 static uint32_t dev_reset(Dev9 *d, uint32_t pp)
 {
+    free(d->cursor); d->cursor = NULL; d->cursor_show = 0;
     if (d->rt) surf_release(d->rt); if (d->ds) surf_release(d->ds);
     d->rt = d->ds = 0;
     if (d->back) surf_release(d->back); if (d->depth) surf_release(d->depth);
@@ -1526,11 +1545,10 @@ M(d9_CheckDeviceFormat, 7)                             /* (adapter, type, adapte
     if (getenv("D3D9_RTLOG")) fprintf(stderr, "rtlog: CheckDeviceFormat(usage %x, resource %u, format %u) -> %s\n", usage, ARG(5), f, ok ? "ok" : "no");
     RET(ok ? D3D_OK : D3DERR_NOTAVAILABLE, 7);
 END
-/* (adapter, type, format, windowed, multisample type, quality levels). Multisampling is offered to the game only with
- * D3D9_GAME_MSAA=1: its MSAA path then draws the scene into a multisampled target with no depth buffer bound (the depth
- * it pairs with it is never created here). Antialiasing is the renderer's instead (DSR_MSAA, DSR_FXAA). */
+/* The renderer uses single-sample targets. Do not advertise an MSAA mode that
+ * cannot be rendered/resolved correctly, even when an old debug switch is set. */
 M(d9_CheckDeviceMultiSampleType, 7)
-    uint32_t t = ARG(5); int ok = t == 0 || ((t == 2 || t == 4 || t == 8) && getenv("D3D9_GAME_MSAA"));
+    uint32_t t = ARG(5); int ok = t == 0;
     if (getenv("D3D9_RTLOG")) fprintf(stderr, "rtlog: CheckDeviceMultiSampleType(devtype %u, format %u, windowed %u, type %u) -> %s\n", ARG(2), ARG(3), ARG(4), t, ok ? "ok" : "no");
     if (ARG(6)) rt_w32(G_MEM, ARG(6), ok ? 1 : 0); RET(ok ? D3D_OK : D3DERR_NOTAVAILABLE, 7);
 END

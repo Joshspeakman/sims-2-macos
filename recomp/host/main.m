@@ -35,10 +35,11 @@ extern char dsr_snapshot_path[1024];
 
 static DsrShmHeader *H; static uint8_t *ring;
 static CAMetalLayer *layer; static NSWindow *win; static uint32_t game_hwnd;
-static volatile int game_running = 1;
+static int game_running = 1, renderer_finished;
 static const char *script_tick(uint32_t fno);
 static int test_mode;                  // DS_TEST=1: ordinary background window, never captures the mouse or takes focus
 #include "frame_trace.h"
+#include "log_rotation.h"
 static DSFrameTrace frame_trace;       // DS_FRAME_TRACE=<file.csv>: every presented frame's timing, written when the game ends (the Linux port's format)
 static int lab_mode;                   // DS_TEST_LAB=1: the game in an ordinary window beside the Test Lab's; a click captures the mouse, F12 releases it
 
@@ -57,7 +58,10 @@ static void *render_thread(void *arg)
         __atomic_store_n(&H->host_ready, 1, __ATOMIC_RELEASE);
         for (;;) {
             uint32_t wpos = __atomic_load_n(&H->write_pos, __ATOMIC_ACQUIRE);
-            if (rpos == wpos) { if (++spins < 2000) { __asm__ volatile("yield"); continue; } usleep(50); continue; }
+            if (rpos == wpos) {
+                if (!__atomic_load_n(&game_running, __ATOMIC_ACQUIRE)) { dsr_renderer_save_cache(r, 1); __atomic_store_n(&renderer_finished, 1, __ATOMIC_RELEASE); return NULL; }
+                if (!(spins % 2000)) { @autoreleasepool { dsr_renderer_save_cache(r, 0); } }
+                if (++spins < 2000) { __asm__ volatile("yield"); continue; } usleep(50); continue; }
             spins = 0;
             @autoreleasepool {
                 while (rpos != wpos) {
@@ -708,7 +712,8 @@ static void *game_thread(void *arg)
     uint32_t code = w32_run(msg, sizeof msg);
     fprintf(stderr, HOST_NAME ": game ended: %s\n", msg);
     usleep(100000); ds_trace_save(&frame_trace); frame_trace.samples = NULL;
-    game_running = 0;
+    __atomic_store_n(&game_running, 0, __ATOMIC_RELEASE);
+    for (int n = 0; n < 200 && !__atomic_load_n(&renderer_finished, __ATOMIC_ACQUIRE); n++) usleep(10000);
     const char *rp = !strncmp(msg, "fault", 5) ? w32_crash_last_path() : 0;
     NSString *path = rp ? @(rp) : nil;
     dispatch_async(dispatch_get_main_queue(), ^{
@@ -867,10 +872,21 @@ int main(int argc, char **argv)
         H = m; ring = (uint8_t *)m + DSR_HEADER_SIZE; H->magic = DSR_SHM_MAGIC; H->version = 1;
         dsr_attach_consumer(H);
         w32_host_window_created = window_created; w32_host_window_changed = window_changed;
+#ifdef SIMS2_EDITION
+        {
+            NSString *cacheDir = getenv("DSR_TEXTURE_CACHE_DIR") ? @(getenv("DSR_TEXTURE_CACHE_DIR")) :
+                [NSSearchPathForDirectoriesInDomains(NSCachesDirectory, NSUserDomainMask, YES).firstObject stringByAppendingPathComponent:@"io.github.sims-2-macos/Textures"];
+            if ([NSFileManager.defaultManager createDirectoryAtPath:cacheDir withIntermediateDirectories:YES attributes:nil error:nil])
+                setenv("DSR_TEXTURE_CACHE_DIR", cacheDir.fileSystemRepresentation, 1);
+        }
+#endif
         if (w32_prepare(exe, game, drive_c, overlay)) { fprintf(stderr, HOST_NAME ": cannot load %s\n", exe); return 1; }
         { void w32_lab_init(const char *); w32_lab_init(data); }      /* DS_TEST_LAB=1: the Test Lab's bridge (runtime/win32/test_lab.c) */
         if (!test_mode) report_from_last_session(data);
-        [NSTimer scheduledTimerWithTimeInterval:0.5 repeats:YES block:^(NSTimer *tm) { (void)tm; w32_crash_heartbeat(2); }];   /* UI thread alive */
+        [NSTimer scheduledTimerWithTimeInterval:0.5 repeats:YES block:^(NSTimer *tm) {
+            (void)tm; w32_crash_heartbeat(2);
+            ds_rotate_log(stderr, getenv("DS_LOG_FILE"), 5000000);
+        }];   /* UI thread alive; bound the log during long sessions too */
         if (test_mode && getenv("DS_CRASHTEST") && !strncmp(getenv("DS_CRASHTEST"), "uihang", 6))
             dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(atof(getenv("DS_CRASHTEST") + 7) * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{ sleep(14); });
 

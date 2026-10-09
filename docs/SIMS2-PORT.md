@@ -209,20 +209,18 @@ after saving and coming back), the families' thumbnails, audio (recorded with `W
 the menus and neighbourhood, sounds and music in a lot). Not yet: the Create-a-Sim mirror (it shows a plain surface),
 the real (non-test) launch, and long sessions beyond 15 minutes.
 
-### Neighbourhood water (open, 2026-10-09)
+### Neighbourhood pond (reference checked, 2026-10-09)
 
-Belladonna Cove's Central Park pond draws as the lake bed (dark green), with no water surface over it. What's known:
-- The pond's pixels are identical with the cube-mapped water program skipped (vs 0376492c / ps 0d292ba2, program 65551
-  in that session: a 434-vertex mesh plus small ones, sampler 2 a DXT1 cube map): it runs, translates and binds
-  without errors, yet leaves nothing on screen there (D3D9_PAINT_MSL=texturecube paints only the lot markers).
-- The terrain is program 65546 (17,514-triangle mesh, diffuse + normal map); 47 fixed-function draws blend its
-  layers (A8 alpha map + DXT1, z EQUAL). Four 2-triangle fixed-function draws use a 512x512 DXT1 texture and a 1x64
-  gradient through stage-1 camera-space texgen, now implemented (shaders.metal tcproj1) with no visible change.
-- No off-screen render targets in a neighbourhood frame (no reflection pass).
-Next: compare against a Windows screenshot of the same view; check where program 65551's geometry lands (its
-transformed positions) and whether its depth test or colour writes reject it.
-Tools: D3D9_DRAWTRACE_ON=<file> (program, shaders, samplers incl. cube maps), D3D9_SKIP_SHADER=<hash,...>,
-D3D9_PAINT_MSL=<text>, D3D9_MSL_DUMP=<dir>.
+The dark Central Park pond is Apartment Life's decorative neighbourhood pond. Its silhouette, islands, lily pads,
+painted ripples and dark green surface match the original-object picture published by the creator of
+[AL Neighborhood Deco Pond, Recolored](https://db.modthesims.info/d/442741/al-neighborhood-deco-pond-recolored.html).
+The live-lot view also clearly shows those painted ripples. The earlier claim that these pixels were a lake bed
+missing a water pass was not supported; a reflection render target is not required to draw this decoration.
+This reference comparison does not establish correctness of every ocean, pool or mirror effect.
+
+Earlier shader experiments painted lot markers with the cube-sampling shader (vs 0376492c / ps 0d292ba2),
+not this pond. Do not change those markers' shader to repair the pond. For other effects, use
+`D3D9_DRAWTRACE_ON=<file>`, `D3D9_SKIP_SHADER=<hash,...>`, `D3D9_PAINT_MSL=<text>` and `D3D9_MSL_DUMP=<dir>`.
 
 ### Stalls when new content appears (open, 2026-10-09)
 
@@ -232,8 +230,47 @@ loads (DS_STALL_MS=<ms> profiles them). The presenting thread's stacks all run t
 at low addresses (f_a001d57c < f_a0036c3b < f_a003480a, rows of 16-byte colours; f_a00416a2 / f_a0084dcb /
 f_a0084173 on 4x4 blocks of colours: format conversion and block compression), written with x87 floating point,
 which the recompiled code runs much slower than the CPU would. Refusing DXT formats (an experiment) didn't change
-them. Options: a native replacement for that library's conversion routines (rt_override), or faster x87 code from
-the lifter (the stack and status word live in Ctx; every op goes through memory).
+them. The audit fixes now memoize successful BC1 blocks at `f_a0084dcb`, retaining the original compressor on
+misses. The key includes every input byte, flags and x87 control word; collisions compare the full input.
+The known edition's constants are unchanged. Entries have checksums and an edition/version-specific disk format.
+This avoids repeating expensive work, including across launches; unique blocks and other image conversions still
+run in lifted code. It does not eliminate all first-appearance/loading stalls. `SIMS2_TEXTURE_CACHE_VERIFY=1`
+executes the original compressor on hits and reports byte mismatches at exit; use it when changing this hook.
+
+### Mac audit fixes (2026-10-09)
+
+- Cursor images are copied at `SetCursorProperties`; source surfaces may be released or changed safely.
+- `SuspendThread` parks the calling guest thread with a counted condition-variable wait, also supports a
+  not-yet-started thread, and reports unsupported instead of pretending to suspend another active thread.
+  `ResumeThread` uses the same lock. Shutdown no longer floods the log with false-success warnings.
+- Samplers honor anisotropy (when requested), W addressing, maximum mip level, sRGB reads, and Metal's three
+  native border colours. LOD bias uses Metal's descriptor on macOS 26+ with a sufficiently new SDK. Every
+  descriptor state participates in the sampler cache key; texture views are released with their surfaces.
+  Arbitrary coloured D3D border values and LOD bias on older macOS still need shader emulation. MSAA remains
+  unavailable until multisample surfaces and resolves are implemented; the debug switch no longer falsely
+  advertises it. Do not force it on in the game's configuration.
+- Identical Metal source/entry pairs reuse compiled functions. Previous-session sources are warmed at renderer
+  startup. Compatible colour pipelines use a persistent Metal archive keyed by GPU, OS and compile policy;
+  depth-only pipelines stay in memory because some drivers cannot serialize them. The tested macOS 27.2 beta
+  also rejected some colour pipelines during archive serialization. On a write failure, a per-device/OS marker
+  disables further archive writes across launches; the last good archive remains readable and shader-source
+  warmup continues. Removing the cache retries writes. Corrupt/unwritable caches fall back to ordinary compilation.
+  A valid NSError pointer is always supplied on archive writes.
+- The frame limiter waits on a Mach deadline instead of spinning through the last 2 ms. It retains the game's
+  existing cadence; this is not a new display-synchronization implementation or a promise to remove loading hitches.
+- `DebugSetMute` is a supported zero-argument release-runtime no-op. Other missing exports log the first call and
+  powers of two. The active app log rotates at 5 MB, checked twice per second, retaining `.previous` alongside
+  the existing launch-time `.old.log`.
+- Runtime compilation has bounded parallel jobs (`SIMS2_BUILD_JOBS`), checks every child result, and stages objects
+  and the linked library before replacing a successful build. A compile failure preserves the previous build.
+- `recomp/tests/check_macos.sh` runs native CPU, failure-injection, host compilation and synthetic Metal pixel tests.
+  `.github/workflows/macos.yml` runs it on macOS. A CI VM without a GPU reports an explicit Metal execution skip;
+  the local Mac check requires the GPU tests to pass. No game assets are needed for these tests.
+
+Local caches live in `~/Library/Caches/io.github.sims-2-macos/{Metal,Textures}` and may be removed with the game
+closed. `DSR_SHADER_CACHE=0` disables persistent shader caching; `SIMS2_TEXTURE_CACHE=0` disables block caching.
+Development overrides: `DSR_CACHE_DIR`, `DSR_TEXTURE_CACHE_DIR`, `DSR_PSOLOG`, `SIMS2_TEXTURE_CACHE_LOG` and
+`SIMS2_TEXTURE_CACHE_VERIFY` (verification costs the original compression time).
 
 ### Checked and not bugs (2026-10-09)
 

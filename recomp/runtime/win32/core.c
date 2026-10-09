@@ -92,6 +92,28 @@ IMPL(kernel32, LoadLibraryExA)
     RET(MODULE_BASE + 0x100000u * (uint32_t)k, 3);
 }
 IMPL(kernel32, FreeLibrary) { RET(1, 1); }
+/* Missing optional exports can be probed on every draw. Keep their diagnostic
+ * useful without doing thousands of writes per second. This never caches the
+ * lookup result: a module/export may become available later. */
+static void missing_export_log(const char *dll, const char *name)
+{
+    static pthread_mutex_t lock = PTHREAD_MUTEX_INITIALIZER;
+    static struct { uint64_t key, count; } seen[256];
+    uint64_t key = 14695981039346656037ull;
+    for (const char *s = dll; *s; s++) key = (key ^ (uint8_t)*s) * 1099511628211ull;
+    key = (key ^ 0xff) * 1099511628211ull;
+    for (const char *s = name; *s; s++) key = (key ^ (uint8_t)*s) * 1099511628211ull;
+    if (!key) key = 1;
+    pthread_mutex_lock(&lock);
+    unsigned h = (unsigned)key & 255, n = 0;
+    while (seen[h].key && seen[h].key != key && ++n < 256) h = (h + 1) & 255;
+    static uint64_t overflow;
+    uint64_t count;
+    if (n == 256) count = ++overflow;
+    else { seen[h].key = key; count = ++seen[h].count; }
+    if (!(count & (count - 1))) fprintf(stderr, "w32: GetProcAddress(%s, %s) -> not available (%llu calls; repeats throttled)\n", dll, name, (unsigned long long)count);
+    pthread_mutex_unlock(&lock);
+}
 IMPL(kernel32, GetProcAddress)
 {
     uint32_t h = ARG(0), n = ARG(1); char ord[16]; const char *name = ord;
@@ -101,7 +123,7 @@ IMPL(kernel32, GetProcAddress)
     if (h < MODULE_BASE || k >= sizeof known_dlls / sizeof *known_dlls - 1) { w32_set_last_error(c, 127); RET(0, 2); }
     extern int w32_thunk_implemented(uint32_t);
     uint32_t t = w32_thunk_for(known_dlls[k], name);
-    if (!t || !w32_thunk_implemented(t)) { fprintf(stderr, "w32: GetProcAddress(%s, %s) -> not available\n", known_dlls[k], name); w32_set_last_error(c, 127); RET(0, 2); }
+    if (!t || !w32_thunk_implemented(t)) { missing_export_log(known_dlls[k], name); w32_set_last_error(c, 127); RET(0, 2); }
     RET(t, 2);
 }
 IMPL(kernel32, GetModuleFileNameA)
@@ -355,7 +377,7 @@ IMPL(kernel32, Sleep)
 }
 
 /* ---- synchronisation objects ---- */
-typedef struct Sync { pthread_mutex_t m; pthread_cond_t cv; int manual, signaled, count; uint32_t owner; char name[64]; int waiters, closed; } Sync;   /* same in core.c and threads.c */
+#include "thread_state.h"
 static Sync *sync_new(int manual, int signaled)
 {
     Sync *s = calloc(1, sizeof *s); pthread_mutex_init(&s->m, 0); pthread_cond_init(&s->cv, 0);
@@ -593,7 +615,6 @@ IMPL(kernel32, GetConsoleTitleA) { RET(0, 2); }
 IMPL(kernel32, SetConsoleTitleA) { RET(1, 1); }
 
 /* ---- thread objects: one per guest thread (TEB), signalled when the thread ends ---- */
-typedef struct ThreadObj { Sync s; uint32_t teb, tid, exit_code, suspended; pthread_t pt; } ThreadObj;
 static ThreadObj *thread_objs[MAX_THREADS];
 ThreadObj *w32_thread_obj(uint32_t teb)
 {
@@ -601,7 +622,7 @@ ThreadObj *w32_thread_obj(uint32_t teb)
     if (k >= MAX_THREADS) return 0;
     if (!thread_objs[k]) {
         ThreadObj *t = calloc(1, sizeof *t); pthread_mutex_init(&t->s.m, 0); pthread_cond_init(&t->s.cv, 0);
-        t->s.manual = 1; t->teb = teb; t->tid = rt_r32(G_MEM, teb + 0x24); t->exit_code = 0x103;   /* STILL_ACTIVE */
+        t->s.manual = 1; t->teb = teb; t->tid = rt_r32(G_MEM, teb + 0x24); t->exit_code = 0x103; t->started = 1;   /* STILL_ACTIVE; CreateThread overrides started before publishing it */
         thread_objs[k] = t;
     }
     return thread_objs[k];

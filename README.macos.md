@@ -43,6 +43,17 @@ work), sharing the same neighbourhoods and settings.
 
 In the game: pinch on a trackpad, or scroll, to zoom; push the pointer against a screen edge to scroll.
 
+## Performance and diagnostics
+
+The Mac build reuses compiled shader functions and previously compressed texture blocks. It keeps disposable
+caches in `~/Library/Caches/io.github.sims-2-macos/`; clearing them with the game closed forces rebuilding on the
+next launch. New content can still cause loading hitches. Choose the frame cap for your preferred power use and
+smoothness: a 60 FPS cap does not remove content-loading stalls. Unsupported in-game multisampling stays disabled.
+
+Logs rotate during a session at approximately 5 MB. The previous segment is `<app-log>.previous`; the existing
+launch-time `.old.log` is retained. Developer checks are available with `bash recomp/tests/check_macos.sh`
+(no game assets required); limits and cache controls are documented in [the port notes](docs/SIMS2-PORT.md).
+
 ## How it works
 
 `recomp/` holds the recompiler (x86 → C, then clang) and the runtime: a macOS implementation of the Windows APIs the

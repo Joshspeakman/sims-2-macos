@@ -75,7 +75,7 @@ struct Dev9 {
     Shader9 *vs, *ps; float vsc[256][4], psc[224][4]; int32_t vsi[16][4], psi[16][4]; uint32_t vsb[16], psb[16];
     float clip[6][4]; int32_t scissor[4];
     SB9 *rec;                                           /* recording a state block (BeginStateBlock) */
-    Surf9 *cursor; int cursor_x, cursor_y, cursor_hx, cursor_hy, cursor_show;
+    uint32_t *cursor; uint32_t cursor_w, cursor_h; int cursor_x, cursor_y, cursor_hx, cursor_hy, cursor_show;
     uint8_t *vbuf; size_t vbuf_cap;                     /* draw-time staging */
     uint32_t prog;                                      /* an effect pass's Metal program (d3dx9_fx.c), 0 if none */
 };

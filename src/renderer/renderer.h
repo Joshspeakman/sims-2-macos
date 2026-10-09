@@ -7,6 +7,7 @@ DSRRenderer *dsr_renderer_create(id<MTLDevice> dev);
 int dsr_renderer_exec(DSRRenderer *r, uint32_t op, const uint8_t *payload, uint32_t size);
 // The texture last presented (gamma not yet applied), and the command buffer that produced it.
 id<MTLTexture> dsr_renderer_presented(DSRRenderer *r);
+void dsr_renderer_save_cache(DSRRenderer *r, int force);
 void dsr_renderer_flush(DSRRenderer *r, int wait);
 id<MTLCommandBuffer> dsr_renderer_present_to(DSRRenderer *r, id<MTLTexture> dst);
 void dsr_renderer_presented_size(DSRRenderer *r, uint32_t *w, uint32_t *h);
