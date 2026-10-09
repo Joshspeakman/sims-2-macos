@@ -484,8 +484,18 @@ void w32_move_cursor(int dx, int dy, int w, int h, int *ox, int *oy)
     pthread_mutex_unlock(&cursor_lock);
 }
 void w32_get_cursor(int *x, int *y) { pthread_mutex_lock(&cursor_lock); *x = cursor_x; *y = cursor_y; pthread_mutex_unlock(&cursor_lock); }
-IMPL(user32, ShowCursor) { w32_cursor_visible_count += ARG(0) ? 1 : -1; RET((uint32_t)w32_cursor_visible_count, 1); }
-IMPL(user32, SetCursor) { static uint32_t cur; uint32_t o = cur; cur = ARG(0); RET(o, 1); }
+/* the cursor shown (SetCursor; drawn over the frame at Present: sims2_imports.c w32_cursor_now) */
+static int curlog(void) { static int v = -1; if (v < 0) v = getenv("W32_CURLOG") != 0; return v; }
+static uint32_t cur_now = 0x30000u + 32512;
+uint32_t w32_cursor_handle(void) { return cur_now; }
+volatile int w32_cursor_host_hidden;                  /* the host's: the Mac's pointer is out (the game not in front) */
+IMPL(user32, ShowCursor)
+{
+    w32_cursor_visible_count += ARG(0) ? 1 : -1;
+    if (curlog()) fprintf(stderr, "cur: ShowCursor(%u) -> %d\n", ARG(0), w32_cursor_visible_count);
+    RET((uint32_t)w32_cursor_visible_count, 1);
+}
+IMPL(user32, SetCursor) { uint32_t o = cur_now; cur_now = ARG(0); if (curlog() && cur_now != o) fprintf(stderr, "cur: SetCursor(%#x) shown=%d\n", cur_now, w32_cursor_visible_count >= 0); RET(o, 1); }
 IMPL(user32, LoadCursorA) { RET(0x30000 + (ARG(1) & 0xffff), 2); }
 IMPL(user32, LoadIconA) { RET(0x31000 + (ARG(1) & 0xffff), 2); }
 IMPL(user32, GetDoubleClickTime) { RET(500, 0); }

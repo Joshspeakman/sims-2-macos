@@ -919,10 +919,11 @@ M(dv_GetCreationParameters, 2) DEV_ME
 END
 M(dv_SetCursorProperties, 4) DEV_ME                     /* (hotspot x, y, surface): the image is kept for Present */
     Surf9 *s = obj(ARG(3), O9_SURF); if (!s) RET(D3DERR_INVALIDCALL, 4);
+    if (getenv("W32_CURLOG")) fprintf(stderr, "cur: d3d SetCursorProperties fmt %u %ux%u\n", s->fmt, s->w, s->h);
     me->cursor = s; me->cursor_hx = (int)ARG(1); me->cursor_hy = (int)ARG(2); RET(D3D_OK, 4);
 END
 M(dv_SetCursorPosition, 4) DEV_ME me->cursor_x = (int)ARG(1); me->cursor_y = (int)ARG(2); RET(0, 4); END
-M(dv_ShowCursor, 2) DEV_ME int o = me->cursor_show; me->cursor_show = ARG(1) != 0; RET((uint32_t)o, 2); END
+M(dv_ShowCursor, 2) DEV_ME if (getenv("W32_CURLOG")) fprintf(stderr, "cur: d3d ShowCursor(%u)\n", ARG(1)); int o = me->cursor_show; me->cursor_show = ARG(1) != 0; RET((uint32_t)o, 2); END
 TODO_M(dv_CreateAdditionalSwapChain, 3, D3DERR_INVALIDCALL)
 M(dv_GetSwapChain, 3) DEV_ME if (ARG(1)) RET(D3DERR_INVALIDCALL, 3); rt_w32(G_MEM, ARG(2), me->g_swap); me->ref++; RET(D3D_OK, 3); END
 M(dv_GetNumberOfSwapChains, 1) RET(1, 1); END
@@ -1378,9 +1379,27 @@ M(sw_GetDevice, 2) rt_w32(G_MEM, ARG(1), the_dev->g); the_dev->ref++; RET(D3D_OK
 M(sw_GetPresentParameters, 2) memcpy(GP(ARG(1)), the_dev->pp, 56); RET(D3D_OK, 2); END
 
 /* ---- the hardware cursor (SetCursorProperties): composited over the frame at Present ---- */
+/* ---- the Windows cursor (SetCursor: The Sims 2's .cur files, sims2_imports.c): the renderer draws it over the frame as
+ * it goes to the screen, so it is never in the game's own pictures; a picture is sent when it changes ---- */
+__attribute__((weak)) int w32_cursor_now(uint32_t *key, const uint8_t **bgra, int *w, int *h, int *hx, int *hy)
+{ (void)key; (void)bgra; (void)w; (void)h; (void)hx; (void)hy; return 0; }
+static void win32_cursor(void)
+{
+    extern volatile int w32_cursor_host_hidden; void w32_get_cursor(int *x, int *y);
+    static uint32_t sent; static int shown; uint32_t key; const uint8_t *px; int w, h, hx, hy, x, y;
+    if (w32_cursor_host_hidden || !w32_cursor_now(&key, &px, &w, &h, &hx, &hy)) {
+        if (shown) { uint32_t *p = cmd_begin(DSR_CURSOR, 12); p[0] = p[1] = p[2] = 0; cmd_end(); shown = 0; }
+        return;
+    }
+    w32_get_cursor(&x, &y); int img = key != sent;
+    uint32_t *p = cmd_begin(DSR_CURSOR, 12 + (img ? 16 + 4u * (uint32_t)(w * h) : 0));
+    p[0] = (uint32_t)x; p[1] = (uint32_t)y; p[2] = 1;
+    if (img) { p[3] = (uint32_t)w; p[4] = (uint32_t)h; p[5] = (uint32_t)hx; p[6] = (uint32_t)hy; memcpy(p + 7, px, 4u * (uint32_t)(w * h)); sent = key; }
+    cmd_end(); shown = 1;
+}
 static void cursor_overlay(Dev9 *d)
 {
-    Surf9 *s = d->cursor; if (!d->cursor_show || !s || d9_fmt_bytes(s->fmt) != 4) return;
+    Surf9 *s = d->cursor; if (!d->cursor_show || !s || d9_fmt_bytes(s->fmt) != 4) { win32_cursor(); return; }
     int32_t x = d->cursor_x - d->cursor_hx, y = d->cursor_y - d->cursor_hy, w = (int32_t)s->w, h = (int32_t)s->h;
     int32_t x0 = x < 0 ? -x : 0, y0 = y < 0 ? -y : 0, x1 = x + w > (int32_t)d->back->w ? (int32_t)d->back->w - x : w, y1 = y + h > (int32_t)d->back->h ? (int32_t)d->back->h - y : h;
     if (x1 <= x0 || y1 <= y0) return;

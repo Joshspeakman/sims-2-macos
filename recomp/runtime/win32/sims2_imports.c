@@ -3,6 +3,8 @@
  * crashpad (named pipes, a child process, security descriptors) and WinINet telemetry. The game's own code needs the
  * Steam interfaces, files, cursors, monitors and rectangles; the rest gets "not available" answers. */
 #include "w32.h"
+#include <pthread.h>
+#include <strings.h>
 #include <sys/stat.h>
 #ifdef __linux__
 #include <sys/random.h>
@@ -346,13 +348,176 @@ IMPL(user32, GetWindowPlacement)                       /* (window, WINDOWPLACEME
     RET(1, 2);
 }
 /* cursors: the game's animated .cur files are not drawn yet; it gets the arrow (LoadCursorA's handles) */
-IMPL(user32, LoadCursorFromFileA) { RET(0x30000 + 32512, 1); }
+/* ---- cursors: Windows draws a game's cursors, so this layer does: the game loads its own (TSData/Res/UI/Cursors, .cur
+ * and the animated hourglass .ani) and picks one with SetCursor; Present (d3d9.c) asks w32_cursor_now for the picture
+ * and draws it over the frame. Handles 0x40000 + n; system cursors are 0x30000 + IDC_* (user32.c). ---- */
+typedef struct { uint8_t *bgra; int w, h, hx, hy; } CurImg;      /* premultiplied BGRA */
+typedef struct { int used, loaded; char path[1024]; CurImg *img; int nimg, nstep, *seq, *jiffies; } Cur;
+static Cur curs[256]; static pthread_mutex_t cur_lock = PTHREAD_MUTEX_INITIALIZER;
+static int curlog(void) { static int v = -1; if (v < 0) v = getenv("W32_CURLOG") != 0; return v; }
+static uint32_t le32(const uint8_t *p) { return p[0] | p[1] << 8 | p[2] << 16 | (uint32_t)p[3] << 24; }
+static uint16_t le16(const uint8_t *p) { return (uint16_t)(p[0] | p[1] << 8); }
+/* one .cur/.ico file's best picture (32x32 if there is one, then the most colours): a BITMAPINFOHEADER, a palette, the
+ * colour rows and the AND mask rows, both bottom-up. AND 1 with colour 0 is transparent; AND 1 with colour is
+ * Windows' inverted pixel, drawn black here; 32-bit pictures carry alpha. */
+static int cur_decode(const uint8_t *d, size_t n, CurImg *out)
+{
+    if (n < 6 || le16(d) != 0 || (le16(d + 2) != 1 && le16(d + 2) != 2)) return 0;
+    int cnt = le16(d + 4), best = -1, bscore = -1;
+    for (int k = 0; k < cnt && 6 + 16 * (size_t)(k + 1) <= n; k++) {
+        const uint8_t *e = d + 6 + 16 * k; uint32_t off = le32(e + 12);
+        if (off + 40 > n) continue;
+        int w = e[0] ? e[0] : 256, bpp = le16(d + off + 14), sc = (w == 32) * 1000 + bpp;
+        if (sc > bscore) { bscore = sc; best = k; }
+    }
+    if (best < 0) return 0;
+    const uint8_t *e = d + 6 + 16 * best; uint32_t off = le32(e + 12), sz = le32(e + 8);
+    if (off > n || sz > n - off || sz < 40) return 0;
+    const uint8_t *bi = d + off; int hsz = (int)le32(bi), w = (int)le32(bi + 4), h = (int)le32(bi + 8) / 2, bpp = le16(bi + 14);
+    if (le32(bi + 16) != 0 || w <= 0 || h <= 0 || w > 256 || h > 256 || (bpp != 1 && bpp != 4 && bpp != 8 && bpp != 24 && bpp != 32)) return 0;
+    uint32_t ncol = bpp <= 8 ? (le32(bi + 32) ? le32(bi + 32) : 1u << bpp) : 0;
+    const uint8_t *pal = bi + hsz, *xr = pal + 4 * ncol; size_t xs = (size_t)((w * bpp + 31) / 32) * 4, as = (size_t)((w + 31) / 32) * 4;
+    const uint8_t *an = xr + xs * h;
+    if ((size_t)(an + as * h - bi) > sz) return 0;
+    uint8_t *o = calloc((size_t)w * h, 4); int alpha = 0;
+    if (bpp == 32) for (int y = 0; y < h && !alpha; y++) for (int x = 0; x < w; x++) if (xr[y * xs + 4 * x + 3]) { alpha = 1; break; }
+    for (int y = 0; y < h; y++) {
+        const uint8_t *row = xr + (size_t)(h - 1 - y) * xs, *arow = an + (size_t)(h - 1 - y) * as;
+        for (int x = 0; x < w; x++) {
+            uint8_t b, g, r, A; int and_ = (arow[x / 8] >> (7 - x % 8)) & 1;
+            if (bpp <= 8) {
+                uint32_t i = bpp == 8 ? row[x] : bpp == 4 ? (row[x / 2] >> (x & 1 ? 0 : 4)) & 15 : (row[x / 8] >> (7 - x % 8)) & 1;
+                if (i >= ncol) i = 0;
+                b = pal[4 * i]; g = pal[4 * i + 1]; r = pal[4 * i + 2];
+            } else { const uint8_t *q = row + (size_t)x * (bpp / 8); b = q[0]; g = q[1]; r = q[2]; }
+            if (alpha) A = row[4 * x + 3];
+            else if (!and_) A = 255;
+            else if (b | g | r) { b = g = r = 0; A = 255; }                          /* inverted: black */
+            else A = 0;
+            uint8_t *t = o + 4 * ((size_t)y * w + x);
+            t[0] = (uint8_t)(b * A / 255); t[1] = (uint8_t)(g * A / 255); t[2] = (uint8_t)(r * A / 255); t[3] = A;
+        }
+    }
+    out->bgra = o; out->w = w; out->h = h;
+    out->hx = le16(d + 2) == 2 ? le16(e + 4) : 0; out->hy = le16(d + 2) == 2 ? le16(e + 6) : 0;
+    if (out->hx >= w) out->hx = 0; if (out->hy >= h) out->hy = 0;
+    return 1;
+}
+/* a RIFF ACON (.ani): anih (frames, steps, jiffies a step, flags), optional rate and seq (one each a step), and a
+ * LIST fram of icon chunks, each a .cur file */
+static void cur_load(Cur *k)
+{
+    k->loaded = 1; FILE *f = fopen(k->path, "rb"); if (!f) return;
+    fseek(f, 0, SEEK_END); long n = ftell(f); fseek(f, 0, SEEK_SET);
+    uint8_t *d = n > 0 && n < (8 << 20) ? malloc((size_t)n) : NULL;
+    if (!d || fread(d, 1, (size_t)n, f) != (size_t)n) { fclose(f); free(d); return; }
+    fclose(f);
+    if (n >= 12 && !memcmp(d, "RIFF", 4) && !memcmp(d + 8, "ACON", 4)) {
+        int nframes = 0, nsteps = 0, rate = 10; const uint8_t *seq = NULL, *rt = NULL;
+        k->img = calloc(256, sizeof *k->img);
+        for (long p = 12; p + 8 <= n; ) {
+            uint32_t sz = le32(d + p + 4); if (sz > (uint32_t)(n - p - 8)) break;
+            const uint8_t *c = d + p + 8;
+            if (!memcmp(d + p, "anih", 4) && sz >= 36) { nframes = (int)le32(c + 4); nsteps = (int)le32(c + 8); rate = (int)le32(c + 28); }
+            else if (!memcmp(d + p, "rate", 4)) rt = c;
+            else if (!memcmp(d + p, "seq ", 4)) seq = c;
+            else if (!memcmp(d + p, "LIST", 4) && sz >= 4 && !memcmp(c, "fram", 4)) {
+                for (uint32_t q = 4; q + 8 <= sz && k->nimg < 256; ) {
+                    uint32_t isz = le32(c + q + 4); if (isz > sz - q - 8) break;
+                    if (!memcmp(c + q, "icon", 4) && cur_decode(c + q + 8, isz, &k->img[k->nimg])) k->nimg++;
+                    q += 8 + isz + (isz & 1);
+                }
+            }
+            p += 8 + sz + (sz & 1);
+        }
+        if (nsteps <= 0 || nsteps > 4096) nsteps = k->nimg;
+        if (!k->nimg) { nsteps = 0; } else (void)nframes;
+        k->nstep = nsteps; k->seq = calloc((size_t)nsteps + 1, sizeof(int)); k->jiffies = calloc((size_t)nsteps + 1, sizeof(int));
+        for (int i = 0; i < nsteps; i++) {
+            int fr = seq ? (int)le32(seq + 4 * i) : i; k->seq[i] = fr >= 0 && fr < k->nimg ? fr : 0;
+            int j = rt ? (int)le32(rt + 4 * i) : rate; k->jiffies[i] = j > 0 ? j : 1;
+        }
+    } else {
+        k->img = calloc(1, sizeof *k->img); if (cur_decode(d, (size_t)n, k->img)) k->nimg = 1;
+    }
+    if (curlog()) fprintf(stderr, "cur: %s: %d picture(s), %d step(s)%s\n", k->path, k->nimg, k->nstep, k->nimg ? "" : " (not read)");
+    free(d);
+}
+static uint32_t cur_add(const char *path, CurImg *img)
+{
+    pthread_mutex_lock(&cur_lock);
+    for (int k = 0; k < 256; k++) if (curs[k].used && path && !strcmp(curs[k].path, path)) { pthread_mutex_unlock(&cur_lock); if (img) free(img->bgra), free(img); return 0x40000u + (uint32_t)k; }
+    for (int k = 0; k < 256; k++) if (!curs[k].used) {
+        Cur *c = &curs[k]; memset(c, 0, sizeof *c); c->used = 1; snprintf(c->path, sizeof c->path, "%s", path ? path : "");
+        if (img) { c->img = img; c->nimg = 1; c->loaded = 1; }
+        pthread_mutex_unlock(&cur_lock); return 0x40000u + (uint32_t)k;
+    }
+    pthread_mutex_unlock(&cur_lock); if (img) free(img->bgra), free(img); return 0x30000u + 32512;
+}
+/* a system cursor: the game's own picture of it once loaded (the arrow, the hourglass), else none */
+static Cur *cur_system(uint32_t idc)
+{
+    const char *want = idc == 32514 || idc == 32650 ? "hourglass_8.ani" : "arrow_8.cur";       /* IDC_WAIT, IDC_APPSTARTING */
+    size_t wl = strlen(want);
+    for (int k = 0; k < 256; k++) { size_t l = strlen(curs[k].path); if (curs[k].used && l >= wl && !strcasecmp(curs[k].path + l - wl, want)) return &curs[k]; }
+    if (idc == 32514 || idc == 32650) return cur_system(32512);
+    return NULL;
+}
+/* Present: the cursor shown now (0: none); *key changes whenever the picture does */
+int w32_cursor_now(uint32_t *key, const uint8_t **bgra, int *w, int *h, int *hx, int *hy)
+{
+    extern int w32_cursor_visible_count; uint32_t w32_cursor_handle(void);
+    uint32_t hnd = w32_cursor_handle(); if (w32_cursor_visible_count < 0 || !hnd) return 0;
+    pthread_mutex_lock(&cur_lock);
+    Cur *k = hnd >= 0x40000u && hnd < 0x40100u ? &curs[hnd - 0x40000u] : hnd >= 0x30000u && hnd < 0x40000u ? cur_system(hnd - 0x30000u) : NULL;
+    if (!k || !k->used) { pthread_mutex_unlock(&cur_lock); return 0; }
+    if (!k->loaded) cur_load(k);
+    if (!k->nimg) { pthread_mutex_unlock(&cur_lock); return 0; }
+    int fr = 0;
+    if (k->nstep > 1) {                                                   /* animated: steps of jiffies (1/60 s) */
+        struct timespec ts; clock_gettime(CLOCK_MONOTONIC, &ts);
+        static int64_t tot_cache[256]; int idx = (int)(k - curs);
+        if (!tot_cache[idx]) for (int i = 0; i < k->nstep; i++) tot_cache[idx] += k->jiffies[i];
+        int64_t j = ((int64_t)ts.tv_sec * 60 + ts.tv_nsec / 16666667) % tot_cache[idx];
+        int i = 0; while (i < k->nstep - 1 && j >= k->jiffies[i]) j -= k->jiffies[i++];
+        fr = k->seq[i];
+    }
+    CurImg *m = &k->img[fr];
+    *key = ((uint32_t)(k - curs) + 1) << 12 | (uint32_t)fr; *bgra = m->bgra; *w = m->w; *h = m->h; *hx = m->hx; *hy = m->hy;
+    pthread_mutex_unlock(&cur_lock); return 1;
+}
+static uint32_t cursor_file(const char *win)
+{
+    char p[1024]; if (w32_host_path(win, p, sizeof p, 0)) return 0;
+    FILE *f = fopen(p, "rb"); if (!f) return 0; fclose(f);
+    if (curlog()) fprintf(stderr, "cur: file %s\n", win);
+    return cur_add(p, NULL);
+}
+IMPL(user32, LoadCursorFromFileA) { uint32_t h = ARG(0) ? cursor_file(GS(ARG(0))) : 0; if (!h) w32_set_last_error(c, 2); RET(h, 1); }
 IMPL(user32, LoadImageA)                               /* (instance, name, type, cx, cy, flags) */
 {
-    if (ARG(2) == 2) RET(0x30000 + 32512, 6);          /* IMAGE_CURSOR */
+    if (ARG(2) == 2) {                                 /* IMAGE_CURSOR: from a file (LR_LOADFROMFILE), else the arrow */
+        uint32_t h = (ARG(5) & 0x10) && ARG(1) ? cursor_file(GS(ARG(1))) : 0;
+        RET(h ? h : 0x30000 + 32512, 6);
+    }
     w32_set_last_error(c, 2); RET(0, 6);
 }
-IMPL(user32, CreateCursor) { RET(0x30000 + 32512, 7); }
+/* (instance, hotspot x, y, width, height, AND plane, XOR plane: 1 bit per pixel, rows of whole 16-bit words) */
+IMPL(user32, CreateCursor)
+{
+    int hx = (int)ARG(1), hy = (int)ARG(2), w = (int)ARG(3), h = (int)ARG(4); uint32_t and_ = ARG(5), xor_ = ARG(6);
+    if (w <= 0 || h <= 0 || w > 256 || h > 256 || !and_ || !xor_) RET(0x30000 + 32512, 7);
+    int row = ((w + 15) / 16) * 2; CurImg *m = calloc(1, sizeof *m); m->bgra = calloc((size_t)w * h, 4);
+    m->w = w; m->h = h; m->hx = hx < w ? hx : 0; m->hy = hy < h ? hy : 0;
+    for (int y = 0; y < h; y++) for (int x = 0; x < w; x++) {
+        int a = (G_MEM[and_ + y * row + x / 8] >> (7 - x % 8)) & 1, b = (G_MEM[xor_ + y * row + x / 8] >> (7 - x % 8)) & 1;
+        uint8_t *q = m->bgra + 4 * ((size_t)y * w + x);
+        if (!a) { q[0] = q[1] = q[2] = b ? 255 : 0; q[3] = 255; }                 /* black or white */
+        else if (b) q[3] = 255;                                                   /* inverted: black */
+    }                                                                            /* (AND 1, XOR 0: transparent) */
+    if (curlog()) fprintf(stderr, "cur: CreateCursor %dx%d\n", w, h);
+    RET(cur_add(NULL, m), 7);
+}
 IMPL(user32, CreateIconIndirect) { RET(0x30000 + 32512, 1); }
 IMPL(user32, DestroyCursor) { RET(1, 1); }
 IMPL(user32, GetIconInfo) { RET(0, 2); }
