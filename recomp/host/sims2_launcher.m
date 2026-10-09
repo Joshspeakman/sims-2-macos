@@ -316,7 +316,7 @@ static NSArray<NSDictionary *> *window_choices(void)
 static NSArray<NSDictionary *> *notch_choices(void)
 {
     return @[@{@"value": @"hide", @"label": @"Below the Notch", @"note": @"The picture under the camera, a black band beside it"},
-             @{@"value": @"around", @"label": @"Around the Notch", @"note": @"The whole display; the notch covers a little of the top"}];
+             @{@"value": @"around", @"label": @"Around the Notch", @"note": @"The whole display; the notch covers a little of the top (no Game Mode)"}];
 }
 static NSArray<NSDictionary *> *framerate_choices(void)
 {
