@@ -140,9 +140,7 @@ What it took, beyond the imports (all 438 are implemented):
    - loading is slow (main menu after about 140 s, a neighbourhood about 3 minutes later). Neither the game
      thread nor the render thread is busy (about 55% and 45%), so the loading is paced by frames or sleeps:
      profile with `W32_PROFILE`.
-2. **The Mac**: nothing has been built there yet. `install.sh`, the launch window and `build_app.sh` still make
-   Fallout NV; the Metal side of the fixed-function stages (`FF_MSL_PS`) is written but has never been compiled.
-   `analyze.py` peaks at about 26 GB of memory (tight on a 32 GB Mac).
+2. **The Mac**: see "The Mac (2026-10-09)" below.
 3. **C++ catch continuations**: a `throw` that the game catches can't resume yet (`lift.py` registers `__except`
    blocks only). None was needed to reach the menu. A known case: with a data folder left by earlier broken runs
    (kept as `~/.local/share/sims2-linux-badstate`), a curve property reaches its parser empty, and
@@ -152,6 +150,40 @@ What it took, beyond the imports (all 438 are implemented):
 5. **Build**: every C file was being recompiled after each relink, because `build_linux.sh` rewrote
    `compiler-flags.txt` (making it newer than the objects); it now replaces the file only when it changes. Check
    that the next lifter change recompiles only the affected files.
+
+## The Mac (2026-10-09)
+
+Built and run on an M1 Pro (32 GB; the analysis was copied from the Linux build, see below). Test mode reaches the
+neighbourhood chooser in about 140 s, Desiderata Valley about 150 s later, and the Contrary family's lot in live mode
+about 150 s after that, at 60 fps with no faults. What it took:
+
+- **Shader constants**: the renderer dropped a program's constants above 8 KB (`renderer.m` `vcb`). MojoShader lays
+  out each relative-addressed array from its base to c255, so the Sims' skinning shaders (arrays at c18, c26, c56,
+  c57, c58) need about 17 KB: without them the Sims drew as huge spikes. Now 64 KB (vertex) and 16 KB (pixel).
+- **ps_1_1..1_3 on Metal**: texture registers start out holding their coordinates; GLSL reads built-ins, Metal needs
+  inputs. `mojoshader.c` `ps1x_texcoord_input` registers each t register used as a TEXCOORD attribute (the floors'
+  shaders failed with "use of undeclared identifier 'input'" and the floors were missing).
+- **Vertex slots**: the Sims' declarations carry positions 4-7, normal 4 and blend indices 4 (morph targets): slots
+  16-22 positions 1-7, 23-29 normals 1-7, 30 and 31 blend indices and weights 1-7 (`d3d9.c` `sem_slot`,
+  `d3d9_shader.c` `slot_of`, the renderer's `slot_reg`).
+- **GetContainer**: a surface asked for `IDirect3DBaseTexture9` returned the device, and the game's `GetType` call on
+  it reached `SetCursorProperties` with a junk pointer (a crash entering a lot). It now answers by IID.
+- **Monitor shape**: `GetDeviceCaps(HORZSIZE)` follows the screen's shape; every monitor read as 4:3 before.
+- **Settings**: the game keeps them in `Config/userProps.xml` (`optionShadows` 1-3 and the other Options screen
+  levels, `edgeScrolling`, `horzedgescrollrate`, `CameraDriftCamEnabled`, `activeDeviceDisplayMode`). The host writes
+  the launch window's choices and screen there before the game starts, or into `userStartup.cheat` (as the
+  properties `Graphics Rules.sgr` sets for each level) on a first run, before the file exists.
+- **Camera drift** (item 1): `CameraDriftCamEnabled`, the game's idle drifting camera. The launch window turns it off
+  by default; with it off the neighbourhood camera holds still.
+- **Interface size**: the game runs at the resolution divided by the size and the renderer draws at the full
+  resolution (`DSR_RENDER_SCALE`), as in the Fallout NV port.
+- **Zoom**: the wheel and the X/Z keys zoom the game's camera; a trackpad pinch sends wheel steps.
+
+Build on the Mac without the 26 GB analysis: copy `recomp/work/sims2/analysis.json` from a machine that made it and
+`touch` it (`build_sims2.sh` keeps an analysis newer than `analyze.py`).
+
+Not yet on the Mac: the game's own Graphics menu has not been opened (its resolution list), build/buy and
+Create-a-Sim are untested, audio is muted in tests, and the Sim thumbnails of the families panel were not checked.
 
 ## Tests
 

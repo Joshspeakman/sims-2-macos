@@ -6,11 +6,12 @@ Metal. No Wine, no Rosetta, no emulator. It's built on the recompiler and Window
 [docs/FNV-README.md](docs/FNV-README.md)), which itself comes from the Dungeon Siege ports. Nothing from the game is in
 this repository: the build regenerates everything locally from your Steam files, and the game folder is only read.
 
-**State: runs on Linux into a neighbourhood (2026-10-07).** The Steam executable is unwrapped from its DRM,
-recompiled (all 109,632 functions and the Intel JPEG library) and linked with the Windows runtime. On Linux (the same
-runtime's SDL/OpenGL host) the game starts offline, plays its intro movies, loads every expansion and stuff pack and
-shows the neighbourhood chooser with its 3D Sims, and opens a neighbourhood in 3D. Playing a lot and the Mac app come
-next.
+**State: plays on the Mac into a lot (2026-10-09).** The Steam executable is unwrapped from its DRM, recompiled
+(all 109,632 functions and the Intel JPEG library) and linked with the Windows runtime. On Apple Silicon (Metal) the
+game starts offline, plays its intro, loads every expansion and stuff pack, opens a neighbourhood in 3D and a family's
+lot in live mode with its Sims, at the display's resolution, with a launch window for the display, the game's
+graphics options and the camera. On Linux (SDL/OpenGL) it reaches the neighbourhood. Install on a Mac:
+[README.macos.md](README.macos.md).
 Status and the work list: [docs/SIMS2-PORT.md](docs/SIMS2-PORT.md).
 
 ![Main menu](docs/screenshots/sims2-main-menu.jpg)
