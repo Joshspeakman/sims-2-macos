@@ -45,6 +45,7 @@ if [ -n "$NIGHTLY" ] && [ -z "$AS_NIGHTLY" ]; then
   else mkdir -p "$HERE/build"; git -C "$HERE" worktree add -q -f --detach "$W" origin/nightly; fi
   echo "== nightly: $(git -C "$W" log -1 --format='%h %s')"
   [ -e "$W/recomp/.venv" ] || [ ! -d "$HERE/recomp/.venv" ] || ln -s "$HERE/recomp/.venv" "$W/recomp/.venv"   # share the tools
+  [ -e "$W/recomp/work" ] || { mkdir -p "$HERE/recomp/work"; ln -s "$HERE/recomp/work" "$W/recomp/work"; }   # one build folder (the analysis takes 26 GB to redo)
   if [ -z "$GAME$GOG_EXE" ]; then G="$(installed_game)"; [ -n "$G" ] && ARGS+=(--game-dir "$G"); fi
   exec "$W/install.sh" --as-nightly ${ARGS[@]+"${ARGS[@]}"}
 fi
@@ -93,6 +94,7 @@ if [ -e "\$W/.git" ]; then git -C "\$W" checkout -q -f --detach "origin/\$BRANCH
 else mkdir -p "\$REPO/build"; git -C "\$REPO" worktree add -q -f --detach "\$W" "origin/\$BRANCH"; fi
 echo "== \$BRANCH: \$(git -C "\$W" log -1 --format='%h %s')"
 [ -e "\$W/recomp/.venv" ] || [ ! -d "\$REPO/recomp/.venv" ] || ln -s "\$REPO/recomp/.venv" "\$W/recomp/.venv"   # share the tools
+[ -e "\$W/recomp/work" ] || { mkdir -p "\$REPO/recomp/work"; ln -s "\$REPO/recomp/work" "\$W/recomp/work"; }   # one build folder (the analysis takes 26 GB to redo)
 exec "\$W/install.sh"$( [ -n "$AS_NIGHTLY" ] && echo " --as-nightly" )
 UPDATE
   chmod +x "$A/Contents/MacOS/update"
