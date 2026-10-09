@@ -220,6 +220,13 @@ static const char *script_tick(uint32_t fno)       /* returns a screenshot path 
             if (fno >= a->frame && fno < a->frame + 15) { w32_set_cursor(a->x, a->y); vcur_x = a->x; vcur_y = a->y; post(0x200, mk(), pos_lp()); }   /* hover: the game picks what is under the cursor over a few frames */
             if (fno == a->frame + 15) { w32_keys[1] = 0x80; post(0x201, 1, pos_lp()); }
             if (fno == a->frame + 20) { w32_keys[1] = 0; post(0x202, 0, pos_lp()); }
+        } else if (!strcmp(a->kind, "down") && fno == a->frame) {   /* down:x,y / to:x,y / up:x,y: a drag as the real mouse makes
+                                                              it (the cursor straight there; the button's key state, DirectInput and messages) */
+            w32_set_cursor(a->x, a->y); vcur_x = a->x; vcur_y = a->y; w32_di_mouse_button(0, 1); buttons |= 1; w32_keys[1] = 0x80; post(0x201, mk(), pos_lp());
+        } else if (!strcmp(a->kind, "to") && fno == a->frame) {
+            w32_set_cursor(a->x, a->y); vcur_x = a->x; vcur_y = a->y; post(0x200, mk(), pos_lp());
+        } else if (!strcmp(a->kind, "up") && fno == a->frame) {
+            w32_set_cursor(a->x, a->y); vcur_x = a->x; vcur_y = a->y; w32_di_mouse_button(0, 0); buttons &= ~1u; w32_keys[1] = 0; post(0x202, mk(), pos_lp());
         } else if (!strcmp(a->kind, "press")) {           /* press:x,y: the left button pressed and held (until a later click) */
             if (fno == a->frame) { mot_home = 8; mot_dx = a->x; mot_dy = a->y; }
             if (fno == a->frame + 20) post(0x201, 1, pos_lp());
