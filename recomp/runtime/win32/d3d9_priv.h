@@ -71,6 +71,7 @@ struct Dev9 {
     Tex9 *tex[16]; uint32_t fvf; Decl9 *decl;
     Buf9 *vb[16]; uint32_t vb_off[16], vb_stride[16]; Buf9 *ib;
     uint32_t vp[6]; uint8_t material[68]; uint8_t light[8][104]; int light_on[8];
+    float (*vsc_sw)[4];                                 /* software vertex processing's 8192 vertex shader constants (ProcessVertices), once used */
     Shader9 *vs, *ps; float vsc[256][4], psc[224][4]; int32_t vsi[16][4], psi[16][4]; uint32_t vsb[16], psb[16];
     float clip[6][4]; int32_t scissor[4];
     SB9 *rec;                                           /* recording a state block (BeginStateBlock) */
