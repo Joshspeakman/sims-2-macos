@@ -131,12 +131,11 @@ static void *render_thread(void *arg)
                     uint64_t t_ready = clock_gettime_nsec_np(CLOCK_UPTIME_RAW);
                     id<CAMetalDrawable> d = [layer nextDrawable];
                     id<MTLCommandBuffer> cb = d ? dsr_renderer_present_to(r, d.texture) : nil;
-                    size_t ti = frame_trace.count;
-                    if (frame_trace.samples) ds_trace_add(&frame_trace, t_ready, clock_gettime_nsec_np(CLOCK_UPTIME_RAW), 0, w, h);
+                    size_t ti = ds_trace_add(&frame_trace, t_ready, clock_gettime_nsec_np(CLOCK_UPTIME_RAW), 0, w, h);
                     if (cb) {
                         [cb presentDrawable:d]; w32_crash_heartbeat(3);
                         [cb addCompletedHandler:^(id<MTLCommandBuffer> c) { (void)c; __atomic_store_n(&H->frames_done, fno, __ATOMIC_RELEASE);
-                            if (frame_trace.samples && ti < frame_trace.count) frame_trace.samples[ti].done = clock_gettime_nsec_np(CLOCK_UPTIME_RAW); }];
+                            ds_trace_complete(&frame_trace, ti, clock_gettime_nsec_np(CLOCK_UPTIME_RAW)); }];
                         dsr_renderer_flush(r, 0);
                     } else { dsr_renderer_flush(r, 0); __atomic_store_n(&H->frames_done, fno, __ATOMIC_RELEASE); }
                 }
@@ -712,7 +711,7 @@ static void type_text(NSString *text)
 @implementation AppDelegate
 - (void)applicationDidBecomeActive:(NSNotification *)n { (void)n; dispatch_async(dispatch_get_main_queue(), ^{ finish_game_presentation(); }); if (win.visible && !lab_mode) capture(1); post(0x1c, 1, 0); }
 - (void)applicationDidResignActive:(NSNotification *)n { (void)n; capture(0); w32_di_release_all(); post(0x1c, 0, 0); }
-- (NSApplicationTerminateReply)applicationShouldTerminate:(NSApplication *)s { (void)s; ds_trace_save(&frame_trace); frame_trace.samples = NULL; return NSTerminateNow; }
+- (NSApplicationTerminateReply)applicationShouldTerminate:(NSApplication *)s { (void)s; ds_trace_save(&frame_trace); return NSTerminateNow; }
 @end
 
 /* After a crash: say so, and offer the report (not in test mode). */
@@ -729,7 +728,7 @@ static void *game_thread(void *arg)
     (void)arg; char msg[256];
     uint32_t code = w32_run(msg, sizeof msg);
     fprintf(stderr, HOST_NAME ": game ended: %s\n", msg);
-    usleep(100000); ds_trace_save(&frame_trace); frame_trace.samples = NULL;
+    ds_trace_save(&frame_trace);
     __atomic_store_n(&game_running, 0, __ATOMIC_RELEASE);
     for (int n = 0; n < 200 && !__atomic_load_n(&renderer_finished, __ATOMIC_ACQUIRE); n++) usleep(10000);
     const char *rp = !strncmp(msg, "fault", 5) ? w32_crash_last_path() : 0;

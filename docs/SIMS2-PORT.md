@@ -339,3 +339,8 @@ The normal 256 MB capacity is unchanged. `recomp/tests/renderer_ring_test.sh` ru
 the persistent shader cache for isolation. The old implementation fails before writing; the corrected oversized
 allocation, complete draw reservation, real Metal buffer copy and wrap pass ASAN/UBSAN. This is a stability fix,
 without an average-FPS improvement claim.
+
+Optional frame tracing now synchronizes GPU completion callbacks, additions and shutdown export. The export
+detaches its sample buffer once and omits unfinished/reordered timestamps, avoiding invalid unsigned intervals
+and access to freed storage. `recomp/tests/frame_trace_test.c` passes with ASAN/UBSAN and TSan, including late
+callbacks and concurrent shutdown requests. With tracing disabled this path does not acquire a per-frame lock.
