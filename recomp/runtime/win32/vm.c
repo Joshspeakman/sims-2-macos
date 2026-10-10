@@ -204,3 +204,27 @@ int vm_page_state(uint32_t a)
     pthread_mutex_unlock(&vm_lock);
     return st;
 }
+/* crash reports: what the guest address space holds at a, and the regions on either side (a wild pointer, a stale
+ * pointer into a released region, or a reserved page nobody committed). trylock: the report must not wait. */
+void vm_describe(uint32_t a, char *out, size_t cap)
+{
+    if (pthread_mutex_trylock(&vm_lock)) { snprintf(out, cap, "(the memory map was busy)"); return; }
+    int k = find(a), below = -1;
+    for (int j = 0; j < nR && R[j].base <= a; j++) below = j;
+    #define RTYPE(t) ((t) == 0x1000000 ? "image" : "private")
+    if (k >= 0) {
+        uint32_t pg = ((a & ~0xfffu) - R[k].base) >> 12, n = R[k].size >> 12, run = 0;
+        for (uint32_t p = 0; p < n; p++) run += R[k].commit[p] ? 1 : 0;
+        snprintf(out, cap, "%s, in %s region %08x-%08x (%u of %u pages committed)", R[k].commit[pg] ? "committed" : "reserved, not committed",
+                 RTYPE(R[k].type), R[k].base, R[k].base + R[k].size, run, n);
+    } else {
+        int n = snprintf(out, cap, "free (in no region); nearest below: ");
+        if (below >= 0 && n > 0 && (size_t)n < cap) n += snprintf(out + n, cap - n, "%s %08x-%08x (%#x bytes before it)", RTYPE(R[below].type), R[below].base,
+                                                               R[below].base + R[below].size, a - (R[below].base + R[below].size));
+        else if (n > 0 && (size_t)n < cap) n += snprintf(out + n, cap - n, "none");
+        int above = below + 1;
+        if (above < nR && n > 0 && (size_t)n < cap) snprintf(out + n, cap - n, "; above: %s %08x-%08x", RTYPE(R[above].type), R[above].base, R[above].base + R[above].size);
+    }
+    #undef RTYPE
+    pthread_mutex_unlock(&vm_lock);
+}

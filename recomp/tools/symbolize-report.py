@@ -18,7 +18,7 @@ for line in sec.splitlines()[1:]:
     out = subprocess.run(['atos', '-o', binary, '-l', load] + q, capture_output=True, text=True).stdout.splitlines()
     print('[%s]' % name)
     for o in out:
-        x = re.search(r'\(x86:(\d+)\)', o)
+        x = re.search(r'\(x86:(-?\d+)\)', o)                            # atos prints lines >= 2^31 as negative
         fn = o.split(' (in ')[0]
-        if x: print('   %-28s x86 %08x' % (fn, int(x.group(1))))
+        if x: print('   %-28s x86 %08x' % (fn, int(x.group(1)) & 0xffffffff))
         elif not fn.startswith('0x'): print('   %s' % o)

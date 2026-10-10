@@ -545,3 +545,29 @@ IMPL(kernel32, UnmapViewOfFile)
     RET(0, 1);
 }
 int w32_file_fd(uint32_t h) { HObj *o = h_get(h, H_FILE); return o ? ((File *)o->p)->fd : -1; }
+/* crash reports: the files the game has open (the 24 highest handles that are not empty: which file was being read, and whether
+ * it is shorter than expected) with each one's position and size, then the file mappings' views */
+void w32_files_describe(char *out, size_t cap)
+{
+    static uint32_t hs[4096]; int nh = 0; size_t n = 0; out[0] = 0;
+    for (uint32_t h = 0x104; h < 0x100 + 4 * 4096u; h += 4) {
+        HObj *o = h_get(h, H_FILE); File *f = o ? o->p : 0; struct stat st;
+        if (f && !f->is_dir && f->fd >= 0 && !fstat(f->fd, &st) && st.st_size > 0) hs[nh++] = h;
+    }
+    for (int k = nh > 24 ? nh - 24 : 0; k < nh && n + 1 < cap; k++) {
+        HObj *o = h_get(hs[k], H_FILE); File *f = o ? o->p : 0; struct stat st;
+        if (!f || f->fd < 0 || fstat(f->fd, &st)) continue;
+        const char *p = f->path + strlen(f->path);                     /* the last three parts of the path */
+        for (int parts = 0; p > f->path; p--) if (p[-1] == '/' && ++parts == 3) break;
+        int w = snprintf(out + n, cap - n, "    handle %#x: %s%s, position %lld of %lld bytes\n", hs[k], p > f->path ? ".../" : "", p,
+                         (long long)lseek(f->fd, 0, SEEK_CUR), (long long)st.st_size);
+        if (w < 0 || (size_t)w >= cap - n) { out[n] = 0; break; }
+        n += (size_t)w;
+    }
+    for (int k = 0; k < nviews && n + 1 < cap; k++) {
+        int w = snprintf(out + n, cap - n, "    mapped view %08x-%08x\n", views[k].addr, views[k].addr + views[k].size);
+        if (w < 0 || (size_t)w >= cap - n) { out[n] = 0; break; }
+        n += (size_t)w;
+    }
+    if (!out[0]) snprintf(out, cap, "    (none)\n");
+}

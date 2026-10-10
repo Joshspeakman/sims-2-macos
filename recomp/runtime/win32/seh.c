@@ -183,6 +183,29 @@ static void on_fault(int sig, siginfo_t *si, void *uc)
             return;                                                             /* retry the access */
         }
         fprintf(stderr, "recomp: unhandled access violation (%s %08x) in thread %x\n", write ? "write to" : "read of", ga, w32_tid(c));
+        {   /* for the log and the crash report: the recompiled function that faulted (f_<x86 address>), the host
+             * registers (between calls it keeps the x86 registers in them; the Ctx copy is from its last call), what
+             * the guest address is, and the open files */
+            static char d[6144]; size_t n = 0; Dl_info dp = {0}, dl = {0};
+            #define ADD(...) do { if (n < sizeof d) { int w_ = snprintf(d + n, sizeof d - n, __VA_ARGS__); if (w_ > 0) n = n + (size_t)w_ < sizeof d ? n + (size_t)w_ : sizeof d - 1; } } while (0)
+            const char *ps = dladdr(host_pc, &dp) && dp.dli_sname ? dp.dli_sname : "?", *ls = dladdr(host_lr, &dl) && dl.dli_sname ? dl.dli_sname : "?";
+            uint32_t fn = (!strncmp(ps, "f_", 2) || !strncmp(ps, "b_", 2)) ? (uint32_t)strtoul(ps + 2, 0, 16) : 0;
+            char vmd[400]; void vm_describe(uint32_t, char *, size_t); vm_describe(ga, vmd, sizeof vmd);
+            ADD("  faulting code: %s+%#lx (host pc %p), returns to %s+%#lx (lr %p)\n", ps, dp.dli_saddr ? (long)((char *)host_pc - (char *)dp.dli_saddr) : 0L,
+                host_pc, ls, dl.dli_saddr ? (long)((char *)host_lr - (char *)dl.dli_saddr) : 0L, host_lr);
+            ADD("  %s %08x: %s\n", write ? "wrote" : "read", ga, vmd);
+#if defined(__APPLE__) && defined(__aarch64__)
+            ADD("  host registers (low 32 bits):");
+            for (int r = 0; r < 29; r++) ADD("%s x%-2d %08x", r % 6 ? "" : "\n   ", r, (uint32_t)u->uc_mcontext->__ss.__x[r]);
+            ADD("\n   fp %016llx sp %016llx far %016llx\n", (unsigned long long)u->uc_mcontext->__ss.__fp,
+                (unsigned long long)u->uc_mcontext->__ss.__sp, (unsigned long long)u->uc_mcontext->__es.__far);
+#endif
+            ADD("  open files:\n");
+            if (n < sizeof d - 1) { void w32_files_describe(char *, size_t); w32_files_describe(d + n, sizeof d - n); }
+            #undef ADD
+            fputs(d, stderr);
+            void w32_crash_fault_detail(uint32_t, void *, void *, const char *); w32_crash_fault_detail(fn, host_pc, host_lr, d);
+        }
         rt_unhandled(c, ga, "unhandled access violation");
     }
     void w32_crash_signal_from_seh(int, siginfo_t *, void *);                 /* not the game's: report, then the default */
