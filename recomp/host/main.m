@@ -367,6 +367,14 @@ static int borderless(void) { return !windowed() && (getenv("DS_BORDERLESS") || 
 - (NSRect)_fullScreenTileFrame { return self.gameFrame; }
 - (NSRect)_visibleTileFrameForFullScreen { return self.gameFrame; }
 @end
+/* DirectInput's motion in whole mickeys, the fractions carried to the next event: a trackpad's slow motion comes in
+ * fractions of a point, and rounding each event on its own lost all of it */
+static void di_motion(double dx, double dy)
+{
+    static double fx, fy; fx += dx; fy += dy;
+    int ix = (int)fx, iy = (int)fy; fx -= ix; fy -= iy;
+    if (ix || iy) w32_di_mouse_move(ix, iy);
+}
 @interface GameView : NSView @end
 @implementation GameView
 - (BOOL)acceptsFirstResponder { return YES; }
@@ -380,7 +388,7 @@ static int borderless(void) { return !windowed() && (getenv("DS_BORDERLESS") || 
     uint32_t mw, mh; dsr_mode_size(&mw, &mh);
     double s = fmax(mw / self.bounds.size.width, mh / self.bounds.size.height);
     rel_motion(e.deltaX * s, e.deltaY * s);
-    w32_di_mouse_move((int)lround(e.deltaX), (int)lround(e.deltaY));   /* DirectInput (Fallout: New Vegas): the raw motion, in mickeys */
+    di_motion(e.deltaX, e.deltaY);                                    /* DirectInput (Fallout: New Vegas): the raw motion, in mickeys */
 }
 - (void)mouseMoved:(NSEvent *)e { [self moved:e]; }
 @end
