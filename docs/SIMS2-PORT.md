@@ -329,3 +329,13 @@ python3 recomp/tools/import_gap.py recomp/work/sims2/Sims2EP9.exe
 `fuzz_insn.py` now skips instances whose absolute memory operand falls in the guest NULL page. Those are data decoded
 as code, such as `add byte ptr [0xa001], cl`: they segfaulted the native test library, and they would fault on
 Windows too.
+
+
+### Oversized Metal upload follow-up (2026-10-10)
+
+A single upload larger than the Metal ring previously returned an out-of-bounds range. The renderer now waits
+for prior GPU work and grows the ring for that upload or the full draw reservation, with 64-bit range checks.
+The normal 256 MB capacity is unchanged. `recomp/tests/renderer_ring_test.sh` runs without game assets and disables
+the persistent shader cache for isolation. The old implementation fails before writing; the corrected oversized
+allocation, complete draw reservation, real Metal buffer copy and wrap pass ASAN/UBSAN. This is a stability fix,
+without an average-FPS improvement claim.
