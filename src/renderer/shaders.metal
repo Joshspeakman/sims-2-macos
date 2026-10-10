@@ -23,6 +23,7 @@ struct Uniforms {
     int4 c2;             // stage 2: colorop, colorarg1, colorarg2, alphaop
     int4 a2;             // stage 2: alphaarg1, alphaarg2, unused, unused
     int4 s2;             // stage 2: texcoordindex, texturetransformflags, has a texture, XRGB
+    int4 result;         // stage 0/1/2 result register (CURRENT or TEMP)
 };
 
 struct VIn {
@@ -35,10 +36,10 @@ struct VOut {
     float4 diffuse;
     float2 uv;                       // stage 0 coordinates (after its texture transform)
     float2 uv1;                      // stage 1 coordinates
-    float3 tcproj;                   // projected texgen (camera-space position * tex0)
-    float3 tcproj1;                  // the same for stage 1 (* tex1): The Sims 2's water reads a depth gradient this way
+    float4 tcproj;                   // projected texgen (camera-space position * tex0)
+    float4 tcproj1;                  // the same for stage 1 (* tex1): The Sims 2's water reads a depth gradient this way
     float2 uv2;                      // stage 2 coordinates
-    float3 tcproj2;                  // and its camera-space texgen (* tex2): projected shadows and lights
+    float4 tcproj2;                  // and its camera-space texgen (* tex2): projected shadows and lights
     float fogf;
 };
 
@@ -62,7 +63,7 @@ vertex VOut vs_main(VIn in [[stage_in]], constant Uniforms &u [[buffer(1)]])
         float y = 1.0 - (in.pos.y + 0.5 - u.vp.y) / u.vp.w * 2.0;
         o.pos = float4(x * w, y * w, in.pos.z * w, w);
         o.fogf = 1.0;
-        o.tcproj = float3(0, 0, 1); o.tcproj1 = float3(0, 0, 1); o.tcproj2 = float3(0, 0, 1);
+        o.tcproj = float4(0, 0, 1, 1); o.tcproj1 = float4(0, 0, 1, 1); o.tcproj2 = float4(0, 0, 1, 1);
     } else {
         float4 p = float4(in.pos.xyz, 1.0);
         o.pos = u.wvp * p;
@@ -70,7 +71,7 @@ vertex VOut vs_main(VIn in [[stage_in]], constant Uniforms &u [[buffer(1)]])
         o.pos.y -= o.pos.w / u.vp.w;
         float4 cam = u.wv * p;
         o.fogf = u.fog.z != 0 ? clamp((u.fog.y - cam.z) / (u.fog.y - u.fog.x), 0.0, 1.0) : 1.0;
-        o.tcproj = (u.tex0 * cam).xyz; o.tcproj1 = (u.tex1 * cam).xyz; o.tcproj2 = (u.tex2 * cam).xyz;
+        o.tcproj = u.tex0 * cam; o.tcproj1 = u.tex1 * cam; o.tcproj2 = u.tex2 * cam;
     }
     o.diffuse = in.diffuse;
     o.uv = ttf(in.uv, u.tex0, u.a0.z, u.a0.w);
@@ -79,10 +80,18 @@ vertex VOut vs_main(VIn in [[stage_in]], constant Uniforms &u [[buffer(1)]])
     return o;
 }
 
-static float4 arg(int a, float4 diffuse, float4 current, float4 texel, float4 tfactor)
+/* Generated projection coordinates must retain w through interpolation: COUNT4 divides by w, COUNT3 by z. */
+static float2 project(float4 t, int flags)
+{
+    if (!(flags & 0x100)) return t.xy;
+    int count = flags & 0xff;
+    float q = count == 2 ? t.y : count == 3 ? t.z : t.w;
+    return t.xy / q;
+}
+static float4 arg(int a, float4 diffuse, float4 current, float4 texel, float4 tfactor, float4 temp)
 {
     float4 v;
-    switch (a & 0xf) { case 0: v = diffuse; break; case 1: v = current; break; case 2: v = texel; break; case 3: v = tfactor; break; default: v = diffuse; }
+    switch (a & 0xf) { case 0: v = diffuse; break; case 1: v = current; break; case 2: v = texel; break; case 3: v = tfactor; break; case 5: v = temp; break; default: v = diffuse; }
     if (a & 0x10) v = 1.0 - v;            // D3DTA_COMPLEMENT
     if (a & 0x20) v = float4(v.a);        // D3DTA_ALPHAREPLICATE
     return v;
@@ -117,31 +126,31 @@ fragment float4 fs_main(VOut in [[stage_in]], constant Uniforms &u [[buffer(1)]]
                         texture2d<float> t1 [[texture(1)]], sampler s1 [[sampler(1)]],
                         texture2d<float> t2 [[texture(2)]], sampler smp2 [[sampler(2)]])
 {
-    float4 diffuse = in.diffuse, current = diffuse;
+    float4 diffuse = in.diffuse, current = diffuse, temp = float4(0);
     float2 uv0 = in.uv;
-    if ((u.a0.z & 0xffff0000) == 0x20000) uv0 = (u.a0.w & 0x100) ? in.tcproj.xy / in.tcproj.z : in.tcproj.xy;   // TCI_CAMERASPACEPOSITION
+    if ((u.a0.z & 0xffff0000) == 0x20000) uv0 = project(in.tcproj, u.a0.w);   // TCI_CAMERASPACEPOSITION
     float4 texel = u.misc.z ? t0.sample(s0, uv0) : float4(1);
     if (u.xrgb.x) texel.a = 1;
     if (u.c0.x != 1) {
-        float4 c = op(u.c0.x, arg(u.c0.y, diffuse, current, texel, u.tfactor), arg(u.c0.z, diffuse, current, texel, u.tfactor), diffuse, texel, u.tfactor, current);
-        float4 a = u.c0.w == 1 ? current : op(u.c0.w, arg(u.a0.x, diffuse, current, texel, u.tfactor), arg(u.a0.y, diffuse, current, texel, u.tfactor), diffuse, texel, u.tfactor, current);
-        current = float4(c.rgb, a.a);
+        float4 c = op(u.c0.x, arg(u.c0.y, diffuse, current, texel, u.tfactor, temp), arg(u.c0.z, diffuse, current, texel, u.tfactor, temp), diffuse, texel, u.tfactor, current);
+        float4 a = u.c0.w == 1 ? current : op(u.c0.w, arg(u.a0.x, diffuse, current, texel, u.tfactor, temp), arg(u.a0.y, diffuse, current, texel, u.tfactor, temp), diffuse, texel, u.tfactor, current);
+        if (u.result.x == 5) temp = float4(c.rgb, a.a); else current = float4(c.rgb, a.a);
         if (u.c1.x != 1) {
             float2 uv1 = in.uv1;
-            if ((u.s1.x & 0xffff0000) == 0x20000) uv1 = (u.s1.y & 0x100) ? in.tcproj1.xy / in.tcproj1.z : in.tcproj1.xy;   // TCI_CAMERASPACEPOSITION
+            if ((u.s1.x & 0xffff0000) == 0x20000) uv1 = project(in.tcproj1, u.s1.y);   // TCI_CAMERASPACEPOSITION
             float4 texel1 = u.misc.w ? t1.sample(s1, uv1) : float4(1);
             if (u.xrgb.y) texel1.a = 1;
-            float4 c1 = op(u.c1.x, arg(u.c1.y, diffuse, current, texel1, u.tfactor), arg(u.c1.z, diffuse, current, texel1, u.tfactor), diffuse, texel1, u.tfactor, current);
-            float4 a1 = u.c1.w == 1 ? current : op(u.c1.w, arg(u.a1.x, diffuse, current, texel1, u.tfactor), arg(u.a1.y, diffuse, current, texel1, u.tfactor), diffuse, texel1, u.tfactor, current);
-            current = float4(c1.rgb, a1.a);
+            float4 c1 = op(u.c1.x, arg(u.c1.y, diffuse, current, texel1, u.tfactor, temp), arg(u.c1.z, diffuse, current, texel1, u.tfactor, temp), diffuse, texel1, u.tfactor, current);
+            float4 a1 = u.c1.w == 1 ? current : op(u.c1.w, arg(u.a1.x, diffuse, current, texel1, u.tfactor, temp), arg(u.a1.y, diffuse, current, texel1, u.tfactor, temp), diffuse, texel1, u.tfactor, current);
+            if (u.result.y == 5) temp = float4(c1.rgb, a1.a); else current = float4(c1.rgb, a1.a);
             if (u.c2.x > 1) {                            // stage 2 (D3D stops at the first DISABLE)
                 float2 uv2 = in.uv2;
-                if ((u.s2.x & 0xffff0000) == 0x20000) uv2 = (u.s2.y & 0x100) ? in.tcproj2.xy / in.tcproj2.z : in.tcproj2.xy;
+                if ((u.s2.x & 0xffff0000) == 0x20000) uv2 = project(in.tcproj2, u.s2.y);
                 float4 texel2 = u.s2.z ? t2.sample(smp2, uv2) : float4(1);
                 if (u.s2.w) texel2.a = 1;
-                float4 c2 = op(u.c2.x, arg(u.c2.y, diffuse, current, texel2, u.tfactor), arg(u.c2.z, diffuse, current, texel2, u.tfactor), diffuse, texel2, u.tfactor, current);
-                float4 a2 = u.c2.w == 1 ? current : op(u.c2.w, arg(u.a2.x, diffuse, current, texel2, u.tfactor), arg(u.a2.y, diffuse, current, texel2, u.tfactor), diffuse, texel2, u.tfactor, current);
-                current = float4(c2.rgb, a2.a);
+                float4 c2 = op(u.c2.x, arg(u.c2.y, diffuse, current, texel2, u.tfactor, temp), arg(u.c2.z, diffuse, current, texel2, u.tfactor, temp), diffuse, texel2, u.tfactor, current);
+                float4 a2 = u.c2.w == 1 ? current : op(u.c2.w, arg(u.a2.x, diffuse, current, texel2, u.tfactor, temp), arg(u.a2.y, diffuse, current, texel2, u.tfactor, temp), diffuse, texel2, u.tfactor, current);
+                if (u.result.z == 5) temp = float4(c2.rgb, a2.a); else current = float4(c2.rgb, a2.a);
             }
         }
     }

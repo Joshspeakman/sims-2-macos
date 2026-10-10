@@ -16,6 +16,13 @@ addressing outside every declared array gets such an array of its own instead of
 register file; Fallout NV's skinning shaders declare 18 bones and index 26 or more, and reading past a GLSL array is
 undefined (on NVIDIA: whatever an earlier draw left there, which threw skinned meshes across the screen).
 
+For Metal, relative float constants use one complete register bank, with signed absolute-address bounds checks
+and shader-local `DEF` overrides. Reads below c0 or above c255 (vertex) / c223 (pixel) return zero, including
+unused Sim bone indices of 255 multiplied by three. Previously unchecked packed-array reads could pick up
+unrelated uniforms or NaNs, leaving holes in Sims and their portraits. This also handles shaders without CTAB
+and negative offsets that reach valid registers below an array's declared base. Synthetic GPU coverage lives in
+`recomp/tests/mojo_metal_test.m`.
+
 `profiles/mojoshader_profile_glsl.c`: `nrm`, `pow` and `log` follow Direct3D where GLSL gives NaN: a zero vector
 normalises to zero, `pow(0, 0)` is 1, and `log` is of the absolute value. The NaNs showed as flashing specks on
 skinned characters' specular (Doc Mitchell's gloves in the opening).

@@ -352,6 +352,15 @@ const char *make_METAL_srcarg_string(Context *ctx, const size_t idx,
     {
         if (arg->regtype == REG_TYPE_INPUT)
             regtype_str=get_METAL_input_array_varname(ctx,(char*)alloca(64),64);
+        else if (ctx->metal_relative_constants)
+        {
+            // A short call also fits the source-argument scratch buffers even
+            // with swizzles and source modifiers appended below.
+            char *reader = (char *) alloca(64);
+            snprintf(reader, 64, "%s_read_c", shader_is_vertex(ctx) ? "vs" : "ps");
+            regtype_str = reader;
+            snprintf(rel_offset, sizeof (rel_offset), "uniforms, %d + ", arg->regnum);
+        }
         else
         {
             assert(arg->regtype == REG_TYPE_CONST);
@@ -383,7 +392,8 @@ const char *make_METAL_srcarg_string(Context *ctx, const size_t idx,
             } // else
         } // else
 
-        rel_lbracket = "[";
+        const int checked_constant = arg->regtype == REG_TYPE_CONST && ctx->metal_relative_constants;
+        rel_lbracket = checked_constant ? "(" : "[";
 
         rel_regtype_str = get_METAL_varname_in_buf(ctx, arg->relative_regtype,
                                                   arg->relative_regnum,
@@ -391,7 +401,7 @@ const char *make_METAL_srcarg_string(Context *ctx, const size_t idx,
         rel_swizzle[0] = '.';
         rel_swizzle[1] = swizzle_channels[arg->relative_component];
         rel_swizzle[2] = '\0';
-        rel_rbracket = "]";
+        rel_rbracket = checked_constant ? ")" : "]";
     } // if
 
     char swiz_str[6] = { '\0' };
@@ -556,6 +566,29 @@ void emit_METAL_finalize(Context *ctx)
             output_line(ctx, "bool uniforms_bool[%d];", ctx->uniform_bool_count);
         ctx->indent--;
         output_line(ctx, "};");
+        if (ctx->metal_relative_constants)
+        {
+            const VariableList *var = ctx->metal_relative_constants;
+            output_line(ctx, "float4 %s_read_c(constant %s_Uniforms &u, int i)",
+                        shader_is_vertex(ctx) ? "vs" : "ps", ctx->mainfn);
+            output_line(ctx, "{");
+            ctx->indent++;
+            output_line(ctx, "if (i < 0 || i >= %d) return float4(0.0);", var->count);
+            output_line(ctx, "switch (i) {");
+            for (const ConstantsList *cl = ctx->constants; cl; cl = cl->next)
+            {
+                if (cl->constant.type != MOJOSHADER_UNIFORM_FLOAT) continue;
+                char val[4][32];
+                for (int j = 0; j < 4; j++)
+                    floatstr(ctx, val[j], sizeof (val[j]), cl->constant.value.f[j], 1);
+                output_line(ctx, "case %d: return float4(%s, %s, %s, %s);",
+                            cl->constant.index, val[0], val[1], val[2], val[3]);
+            }
+            output_line(ctx, "default: return u.uniforms_float4[%d + i];", var->emit_position);
+            output_line(ctx, "}");
+            ctx->indent--;
+            output_line(ctx, "}");
+        }
         pop_output(ctx);
 
         output_line(ctx, "constant %s_Uniforms &uniforms [[buffer(0)]]%s", ctx->mainfn, commas ? "," : "");

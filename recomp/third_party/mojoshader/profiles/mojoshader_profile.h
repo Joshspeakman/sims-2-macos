@@ -201,6 +201,7 @@ typedef struct Context
 #endif
 
 #if SUPPORT_PROFILE_METAL
+    VariableList *metal_relative_constants;
     int metal_need_header_common;
     int metal_need_header_math;
     int metal_need_header_relational;
