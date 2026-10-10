@@ -208,7 +208,8 @@ bought, undone, sold; a wall and a floor), the game's own Graphics options (appl
 after saving and coming back), the families' thumbnails, audio (recorded with `W32_AUDIO_DUMP` while muted: music in
 the menus and neighbourhood, sounds and music in a lot). The 2026-10-09 audit follow-up also checked an installed
 build for 26 minutes, a saved household reloaded on an isolated copy, the normal launcher, and the repaired
-Create-a-Sim mirror with a Sim present. Full-screen gameplay and multi-hour sessions remain untested.
+Create-a-Sim mirror with a Sim present. A subsequent native fullscreen check covered all four neighbourhood
+scrolling edges, loading, a household view and quitting (see the geometry fix below). Multi-hour sessions remain untested.
 
 ### Neighbourhood pond (reference checked, 2026-10-09)
 
@@ -240,6 +241,13 @@ executes the original compressor on hits and reports byte mismatches at exit; us
 
 ### Mac audit fixes (2026-10-09)
 
+- Fullscreen edge scrolling: `ShowWindow(SW_MAXIMIZE)` now sizes the guest window to the emulated desktop,
+  saves its normal bounds for restore, and exposes the real maximized state through `IsZoomed` and
+  `GetWindowPlacement`. `WM_SIZE` reports client dimensions; a thin border no longer implies a caption.
+  Previously a 1728x1116 mode left a borderless window at (-3,0), sized 1734x1119. The cursor could travel beyond
+  the right desktop edge without triggering scrolling, and loading/menu frames retained a coloured strip.
+  With the corrected 1728x1116 rectangle at (0,0), an Around the Notch fullscreen check scrolls all four edges.
+  Synthetic maximize/restore and client-coordinate regressions run on both macOS and Linux.
 - A programmable vertex shader followed by fixed-function texture stages now honors `D3DTTFF_PROJECTED`.
   Both GLSL and Metal divide the interpolated coordinates by their fourth component in the fragment shader.
   The COUNT flags belong to fixed-function vertex processing and remain disabled on this path; see
