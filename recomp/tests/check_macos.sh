@@ -5,7 +5,7 @@ ROOT=$(cd "$(dirname "$0")/../.." && pwd)
 cd "$ROOT"
 OUT="$ROOT/build/macos-checks"
 mkdir -p "$OUT"
-for name in thread_suspend cursor_copy host_services texture_cache interlocked frame_pacer display_modes; do
+for name in thread_suspend cursor_copy host_services texture_cache interlocked frame_pacer display_modes window_geometry; do
   clang -O1 -g -ffunction-sections -fdata-sections -Wl,-dead_strip -I recomp/runtime \
     "recomp/tests/${name}_test.c" -o "$OUT/$name"
   if [[ "$name" != texture_cache ]]; then "$OUT/$name"; fi

@@ -42,6 +42,7 @@ IMPL(user32, SetClassLongA) { RET(0, 3); }
 typedef struct Win {
     uint32_t hwnd, parent, owner, style, exstyle, wndproc, userdata, id, hinst, tid; WClass *cls;
     int x, y, w, h, visible, enabled, iconic, invalid; char text[256]; uint32_t extra[16];
+    int normal_x, normal_y, normal_w, normal_h, have_normal;
 } Win;
 #define MAXW 256
 static Win wins[MAXW];
@@ -57,10 +58,23 @@ static uint32_t send(Ctx *c, uint32_t hwnd, uint32_t msg, uint32_t wp, uint32_t 
 static void nc_size(uint32_t style, uint32_t exstyle, int *l, int *t, int *r, int *b)
 {
     (void)exstyle; *l = *t = *r = *b = 0;
-    if (style & 0x00c00000u) *t += 19;                                      /* WS_CAPTION */
+    if ((style & 0x00c00000u) == 0x00c00000u) *t += 19;                     /* WS_CAPTION includes WS_BORDER */
     if (style & 0x00040000u) { *l += 4; *t += 4; *r += 4; *b += 4; }        /* WS_THICKFRAME */
-    else if (style & 0x00c00000u || style & 0x00400000u) { *l += 3; *t += 3; *r += 3; *b += 3; }   /* fixed/dialog frame */
+    else if (style & 0x00400000u) { *l += 3; *t += 3; *r += 3; *b += 3; }   /* fixed/dialog frame */
     else if (style & 0x00800000u) { *l += 1; *t += 1; *r += 1; *b += 1; }   /* WS_BORDER */
+}
+/* WM_SIZE carries client dimensions, not the outer rectangle (also for maximized windows). */
+static void size_message(Ctx *c, Win *w)
+{
+    int l, t, r, b; nc_size(w->style, w->exstyle, &l, &t, &r, &b);
+    int cw = w->w - l - r, ch = w->h - t - b;
+    if (cw < 0) cw = 0; if (ch < 0) ch = 0;
+    send(c, w->hwnd, WM_SIZE, w->iconic ? 1 : (w->style & 0x01000000u) ? 2 : 0,
+         w->iconic ? 0 : ((uint32_t)ch << 16) | ((uint32_t)cw & 0xffff));
+}
+static void save_normal_rect(Win *w)
+{
+    w->normal_x = w->x; w->normal_y = w->y; w->normal_w = w->w; w->normal_h = w->h; w->have_normal = 1;
 }
 IMPL(user32, AdjustWindowRect)
 {
@@ -108,7 +122,7 @@ IMPL(user32, CreateWindowExA)
         if (!wn->parent) {
             active_hwnd = focus_hwnd = wn->hwnd; c->esp -= 0x40;
             send(c, wn->hwnd, WM_SHOWWINDOW, 1, 0); send(c, wn->hwnd, WM_ACTIVATEAPP, 1, 0); send(c, wn->hwnd, WM_ACTIVATE, 1, 0);
-            send(c, wn->hwnd, WM_SETFOCUS, 0, 0); send(c, wn->hwnd, WM_SIZE, 0, ((uint32_t)wn->h << 16) | (uint32_t)(wn->w & 0xffff));
+            send(c, wn->hwnd, WM_SETFOCUS, 0, 0); size_message(c, wn);
             c->esp += 0x40; wn->invalid = 1;
             if (w32_host_window_changed) w32_host_window_changed(wn->hwnd, wn->x, wn->y, wn->w, wn->h, 1);
         }
@@ -127,14 +141,32 @@ IMPL(user32, ShowWindow)
 {
     Win *w = W(ARG(0)); uint32_t cmd = ARG(1); if (!w) RET(0, 2);
     int was = w->visible;
-    w->visible = cmd != 0; w->iconic = cmd == 2 || cmd == 6 || cmd == 7;
+    w->visible = cmd != 0;
+    if (w->visible) w->style |= 0x10000000u; else w->style &= ~0x10000000u;
+    if (cmd == 3 || (cmd == 9 && w->iconic && (w->style & 0x01000000u))) {  /* maximize, or restore a minimized maximized window */
+        if (!(w->style & 0x01000000u) && !w->iconic) save_normal_rect(w);
+        int l, t, r, b; nc_size(w->style, w->exstyle, &l, &t, &r, &b);
+        /* Hide the resize frame outside the work area; keep the caption inside. Borderless windows
+         * occupy exactly the desktop. Sims 2 maximizes one after temporarily using decorated bounds. */
+        w->x = -l; w->y = -b; w->w = w32_screen_w + l + r; w->h = w32_screen_h + 2 * b;
+        w->style = (w->style | 0x01000000u) & ~0x20000000u; w->iconic = 0;
+    } else if (cmd == 1 || cmd == 9) {                                    /* SW_SHOWNORMAL / SW_RESTORE */
+        if (((w->style & 0x01000000u) || w->iconic) && w->have_normal) {
+            w->x = w->normal_x; w->y = w->normal_y; w->w = w->normal_w; w->h = w->normal_h;
+        }
+        w->style &= ~(0x01000000u | 0x20000000u); w->iconic = 0;
+    } else if (cmd == 2 || cmd == 6 || cmd == 7) {
+        if (!(w->style & 0x01000000u) && !w->iconic) save_normal_rect(w);
+        w->style |= 0x20000000u; w->iconic = 1;
+    }
     if (w->visible != was) send(c, w->hwnd, WM_SHOWWINDOW, (uint32_t)w->visible, 0);
-    if (w->visible && !w->parent && (cmd == 1 || cmd == 5 || cmd == 3 || cmd == 10)) {
+    if (w->visible && !w->parent && (cmd == 1 || cmd == 5 || cmd == 3 || cmd == 9 || cmd == 10)) {
         active_hwnd = focus_hwnd = w->hwnd;
         send(c, w->hwnd, WM_ACTIVATEAPP, 1, 0); send(c, w->hwnd, WM_ACTIVATE, 1, 0); send(c, w->hwnd, WM_SETFOCUS, 0, 0);
-        send(c, w->hwnd, WM_SIZE, 0, ((uint32_t)w->h << 16) | (uint32_t)(w->w & 0xffff));
+        size_message(c, w);
         w->invalid = 1;
     }
+    if (w->visible && w->iconic) size_message(c, w);
     if (w32_host_window_changed && !w->parent) w32_host_window_changed(w->hwnd, w->x, w->y, w->w, w->h, w->visible);
     RET(was, 2);
 }
@@ -143,7 +175,7 @@ IMPL(user32, InvalidateRect) { Win *w = W(ARG(0)); if (w) w->invalid = 1; RET(1,
 static void move(Ctx *c, Win *w, int x, int y, int cx, int cy, int nomove, int nosize)
 {
     if (!nomove) { w->x = x; w->y = y; }
-    if (!nosize) { w->w = cx; w->h = cy; send(c, w->hwnd, WM_SIZE, 0, ((uint32_t)cy << 16) | (uint32_t)(cx & 0xffff)); }
+    if (!nosize) { w->w = cx; w->h = cy; size_message(c, w); }
     if (w32_host_window_changed && !w->parent) w32_host_window_changed(w->hwnd, w->x, w->y, w->w, w->h, w->visible);
 }
 /* for other modules (DirectDraw's SetDisplayMode resizes the game window, as Wine's emulated mode change does) */
@@ -193,6 +225,19 @@ IMPL(user32, GetClientRect)
     int l, t, rr, b; nc_size(w->style, w->exstyle, &l, &t, &rr, &b);
     uint32_t v[4] = {0, 0, (uint32_t)(w->w - l - rr), (uint32_t)(w->h - t - b)}; memcpy(GP(r), v, 16);
     RET(1, 2);
+}
+IMPL(user32, IsZoomed) { Win *w = W(ARG(0)); RET(w && (w->style & 0x01000000u) ? 1 : 0, 1); }
+IMPL(user32, GetWindowPlacement)
+{
+    Win *w = W(ARG(0)); uint32_t p = ARG(1);
+    if (!w || !p || rt_r32(G_MEM, p) != 44) { w32_set_last_error(c, !w ? 1400 : 87); RET(0, 2); }
+    int saved = w->have_normal && (w->iconic || (w->style & 0x01000000u));
+    int x = saved ? w->normal_x : w->x, y = saved ? w->normal_y : w->y;
+    int width = saved ? w->normal_w : w->w, height = saved ? w->normal_h : w->h;
+    uint32_t v[11] = {44, w->iconic && (w->style & 0x01000000u) ? 2u : 0u,
+                     w->iconic ? 2u : (w->style & 0x01000000u) ? 3u : 1u,
+                     0, 0, 0, 0, (uint32_t)x, (uint32_t)y, (uint32_t)(x + width), (uint32_t)(y + height)};
+    memcpy(GP(p), v, sizeof v); RET(1, 2);
 }
 IMPL(user32, ClientToScreen)
 {

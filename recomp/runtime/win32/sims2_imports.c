@@ -315,7 +315,6 @@ IMPL(user32, OffsetRect)
 IMPL(user32, CharLowerBuffA) { uint8_t *s = GP(ARG(0)); for (uint32_t k = 0; k < ARG(1); k++) s[k] = (uint8_t)tolower(s[k]); RET(ARG(1), 2); }
 IMPL(user32, CharUpperBuffA) { uint8_t *s = GP(ARG(0)); for (uint32_t k = 0; k < ARG(1); k++) s[k] = (uint8_t)toupper(s[k]); RET(ARG(1), 2); }
 IMPL(user32, GetAncestor) { RET(ARG(0), 2); }                                         /* the game's windows are top-level */
-IMPL(user32, IsZoomed) { RET(0, 1); }
 IMPL(user32, ValidateRect) { RET(1, 2); }
 IMPL(user32, WaitMessage) { usleep(1000); RET(1, 0); }
 IMPL(user32, SetCapture) { RET(0, 1); }
@@ -338,13 +337,6 @@ IMPL(user32, GetMonitorInfoA)                          /* (monitor, MONITORINFO(
     int32_t r[4] = {0, 0, w32_screen_w, w32_screen_h};
     memcpy(GP(mi + 4), r, 16); memcpy(GP(mi + 20), r, 16); rt_w32(G_MEM, mi + 36, 1);   /* MONITORINFOF_PRIMARY */
     if (cb >= 72) { memset(GP(mi + 40), 0, 32); strcpy((char *)GP(mi + 40), "\\\\.\\DISPLAY1"); }
-    RET(1, 2);
-}
-IMPL(user32, GetWindowPlacement)                       /* (window, WINDOWPLACEMENT *) */
-{
-    uint32_t p = ARG(1); memset(GP(p), 0, 44);
-    rt_w32(G_MEM, p, 44); rt_w32(G_MEM, p + 8, 1);                                    /* SW_SHOWNORMAL */
-    rt_w32(G_MEM, p + 36, (uint32_t)w32_screen_w); rt_w32(G_MEM, p + 40, (uint32_t)w32_screen_h);
     RET(1, 2);
 }
 /* cursors: the game's animated .cur files are not drawn yet; it gets the arrow (LoadCursorA's handles) */
