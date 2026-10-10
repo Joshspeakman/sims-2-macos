@@ -56,6 +56,52 @@ static uint32_t pixel(void)
     uint32_t p[] = {1,16,16,1,1,7}; cmd(DSR_READBACK, p, sizeof p);
     assert(done == 7); return px;
 }
+static void stage_state(unsigned stage, unsigned key, unsigned value)
+{
+    uint32_t p[] = {stage,key,value}; cmd(DSR_TSS,p,sizeof p);
+}
+static void world_tile(void)
+{
+    struct V { float x,y,z; uint32_t color; float u,v; } verts[] = {
+        {-1,1,.5,0xffffffff,.75,.25}, {1,1,.5,0xffffffff,.75,.25},
+        {-1,-1,.5,0xffffffff,.75,.25}, {1,-1,.5,0xffffffff,.75,.25}};
+    uint32_t data[4+sizeof verts/4] = {5,0x142,4,0}; memcpy(data+4,verts,sizeof verts);
+    cmd(DSR_DRAW,data,sizeof data);
+}
+static void fixed_water_test(void)
+{
+    uint32_t upload[] = {2,0,0,2,2,8,0xffff0000,0xff00ff00,0xffff0000,0xff00ff00};
+    cmd(DSR_SURFACE_UPLOAD,upload,sizeof upload);
+    for (unsigned st=0;st<3;st++) {
+        uint32_t tx[]={st,2}; cmd(DSR_TEXTURE,tx,sizeof tx);
+        stage_state(st,13,3); stage_state(st,14,3); stage_state(st,16,1); stage_state(st,17,1); stage_state(st,18,1);
+    }
+    for (unsigned st=0;st<3;st++) for (unsigned count=2;count<=4;count++) for (int project=0;project<2;project++) {
+        for (unsigned k=0;k<3;k++) {
+            stage_state(k,1,k>st?1:2); stage_state(k,2,k==st?2:1);
+            stage_state(k,4,2); stage_state(k,5,1); stage_state(k,28,1);
+        }
+        float matrix[16]={0}; matrix[12]=1.5; matrix[13]=.25; matrix[14]=1; matrix[15]=1;
+        matrix[12+count-1]=4;
+        uint32_t xf[17]={16+st}; memcpy(xf+1,matrix,sizeof matrix); cmd(DSR_TRANSFORM,xf,sizeof xf);
+        stage_state(st,11,0x20000); stage_state(st,24,count|(project?0x100:0));
+        world_tile(); uint32_t px=pixel();
+        if ((px&0xffffff)!=(project?0xff0000:0x00ff00)) fprintf(stderr,"FF projection stage %u count %u projected %d: %08x\n",st,count,project,px);
+        assert((px&0xffffff)==(project?0xff0000:0x00ff00));
+    }
+    for (unsigned st=0;st<3;st++) { stage_state(st,11,0); stage_state(st,24,0); }
+    for (int i=6;i<10;i++) upload[i]=0x40ff0000; cmd(DSR_SURFACE_UPLOAD,upload,sizeof upload);
+    state(60,0xff0000ff);
+    // Keep the first reflected layer in TEMP, the second in CURRENT, then blend by the ripple alpha.
+    stage_state(0,1,2); stage_state(0,2,2); stage_state(0,28,5);
+    stage_state(1,1,2); stage_state(1,2,3); stage_state(1,28,1);
+    stage_state(2,1,13); stage_state(2,2,5); stage_state(2,3,1); stage_state(2,28,1);
+    world_tile(); uint32_t px=pixel(); assert(((px>>16)&255)==64 && (px&255)==191);
+    // Writing TEMP must leave CURRENT (the incoming diffuse here) intact.
+    stage_state(1,2,1); stage_state(2,1,1); world_tile(); assert(pixel()==0xffffffff);
+    for (unsigned st=0;st<3;st++) { stage_state(st,1,st?1:2); stage_state(st,2,2); stage_state(st,4,st?1:2); stage_state(st,5,2); stage_state(st,28,1); }
+    puts("Metal: fixed-function COUNT2/3/4 projection in all three stages and water TEMP/CURRENT blending passed");
+}
 int main(void)
 {
     @autoreleasepool {
@@ -86,6 +132,7 @@ int main(void)
         tile(1); assert((pixel() & 255) == 128);
         sampler_state(29,1); tile(1); unsigned linear = pixel() & 255; assert(linear >= 54 && linear <= 56);
         sampler_state(29,0);
+        fixed_water_test();
 #if __MAC_OS_X_VERSION_MAX_ALLOWED >= 260000
         if (@available(macOS 26.0, *)) {
             float bias = 2; uint32_t bits; memcpy(&bits,&bias,4); sampler_state(19,bits);

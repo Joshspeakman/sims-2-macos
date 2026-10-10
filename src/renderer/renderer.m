@@ -29,6 +29,7 @@ typedef struct {   // must match shaders.metal Uniforms
     float tex2[16];      // texture-2 transform
     int32_t c2[4], a2[4];   // stage 2: colorop, colorarg1, colorarg2, alphaop / alphaarg1, alphaarg2
     int32_t s2[4];       // stage 2: texcoordindex, texturetransformflags, has a texture, XRGB
+    int32_t result[4];   // stage 0/1/2 result register (CURRENT or TEMP)
 } Uniforms;
 
 struct DSRRenderer {
@@ -544,6 +545,7 @@ static void draw(DSRRenderer *r, const uint32_t *p, uint32_t size)
     e = enc_for(r, r->rt, r->ds);   // ring_alloc may have flushed
     Uniforms u; memset(&u, 0, sizeof u);
     float wv[16]; mat_mul(wv, r->xf[1], r->xf[2]); mat_mul(u.wvp, wv, r->xf[3]); memcpy(u.wv, wv, 64); memcpy(u.tex0, r->xf[16], 64); memcpy(u.tex1, r->xf[17], 64);
+    for (int st = 0; st < 3; st++) u.result[st] = r->tss[st][28];
     u.s1[0] = r->tss[1][11]; u.s1[1] = r->tss[1][24];
     memcpy(u.tex2, r->xf[18], 64);   /* stage 2 (The Sims 2's projected shadows and lights: a third stage, camera-space texgen) */
     u.c2[0] = r->tss[2][1]; u.c2[1] = r->tss[2][2]; u.c2[2] = r->tss[2][3]; u.c2[3] = r->tss[2][4]; u.a2[0] = r->tss[2][5]; u.a2[1] = r->tss[2][6];

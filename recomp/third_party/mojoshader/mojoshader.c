@@ -762,6 +762,32 @@ static int parse_source_token(Context *ctx, SourceArgInfo *info)
         } // if
         else if (info->regtype == REG_TYPE_CONST)
         {
+#if SUPPORT_PROFILE_METAL
+            if (strcmp(ctx->profile->name, MOJOSHADER_PROFILE_METAL) == 0)
+            {
+                // D3D relative addresses refer to the entire register bank,
+                // including signed offsets outside the CTAB/DEF array. Keep
+                // one complete bank so the Metal reader can bounds-check the
+                // absolute register and apply shader-local DEF overrides.
+                determine_constants_arrays(ctx);
+                VariableList *var = ctx->metal_relative_constants;
+                if (var == NULL)
+                {
+                    var = (VariableList *) Malloc(ctx, sizeof (VariableList));
+                    if (var == NULL) return retval;
+                    memset(var, 0, sizeof (*var));
+                    var->type = MOJOSHADER_UNIFORM_FLOAT;
+                    var->count = shader_is_vertex(ctx) ? 256 : 224;
+                    var->emit_position = -1;
+                    var->next = ctx->variables;
+                    ctx->variables = ctx->metal_relative_constants = var;
+                }
+                var->used = 1;
+                info->relative_array = var;
+                set_used_register(ctx, info->relative_regtype, info->relative_regnum, 0);
+            }
+            else
+#endif
             // figure out what array we're in...
             if (!ctx->ignores_ctab)
             {

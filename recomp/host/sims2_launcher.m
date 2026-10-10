@@ -46,6 +46,7 @@ static NSFont *body(CGFloat size, BOOL bold)
 @property NSInteger focus; @property NSInteger hover; @property NSInteger pressed;
 @property NSImage *backdrop, *logo, *shot; @property NSString *note;
 @property (copy) void (^onPlay)(void); @property (copy) void (^onQuit)(void); @property (copy) void (^onChange)(void);
+@property BOOL starting;
 @end
 
 enum { HIT_NONE = -1, HIT_PLAY = 100, HIT_QUIT = 101, HIT_BACK = 102, HIT_SECTION = 200 };   /* rows: 10*row + 0 (left arrow) / 1 (value) / 2 (right arrow) */
@@ -99,10 +100,11 @@ enum { BANNER_H = 252, TOP_Y = 270 };
     for (NSTrackingArea *t in self.trackingAreas) [self removeTrackingArea:t];
     [self addTrackingArea:[[NSTrackingArea alloc] initWithRect:self.bounds options:NSTrackingMouseMoved | NSTrackingActiveAlways | NSTrackingInVisibleRect owner:self userInfo:nil]];
 }
-- (void)mouseMoved:(NSEvent *)e { NSInteger h = [self hit:[self convertPoint:e.locationInWindow fromView:nil]]; if (h != self.hover) { self.hover = h; self.needsDisplay = YES; } }
-- (void)mouseDown:(NSEvent *)e { self.pressed = [self hit:[self convertPoint:e.locationInWindow fromView:nil]]; self.needsDisplay = YES; }
+- (void)mouseMoved:(NSEvent *)e { if (self.starting) return; NSInteger h = [self hit:[self convertPoint:e.locationInWindow fromView:nil]]; if (h != self.hover) { self.hover = h; self.needsDisplay = YES; } }
+- (void)mouseDown:(NSEvent *)e { if (self.starting) return; self.pressed = [self hit:[self convertPoint:e.locationInWindow fromView:nil]]; self.needsDisplay = YES; }
 - (void)mouseUp:(NSEvent *)e
 {
+    if (self.starting) return;
     NSInteger h = [self hit:[self convertPoint:e.locationInWindow fromView:nil]], p = self.pressed; self.pressed = HIT_NONE; self.needsDisplay = YES;
     if (h != p || h == HIT_NONE) return;
     if (h == HIT_PLAY) { if (self.onPlay) self.onPlay(); return; }
@@ -123,6 +125,7 @@ enum { BANNER_H = 252, TOP_Y = 270 };
 }
 - (void)keyDown:(NSEvent *)e
 {
+    if (self.starting) return;
     NSInteger n = [self items], rc = (NSInteger)self.rows.count;
     switch (e.keyCode) {
     case 0x24: case 0x4c:                                                /* Return, Enter */
@@ -262,11 +265,18 @@ static void draw_cover(NSImage *img, NSRect r, CGFloat fraction)
         [self drawRows:sh];
     }
     [self drawButton:self.quitRect title:self.open >= 0 ? @"BACK" : @"QUIT" code:self.open >= 0 ? HIT_BACK : HIT_QUIT primary:NO];
-    [self drawButton:self.playRect title:@"PLAY" code:HIT_PLAY primary:YES];
+    [self drawButton:self.playRect title:self.starting ? @"STARTING…" : @"PLAY" code:HIT_PLAY primary:YES];
 }
 @end
 
 // ---------------------------------------------------------------- choices, settings file, the window
+/* Keep a visible window during startup. Hiding the modal window before the game has a window can hand
+ * activation/Space selection back to the previous app. The host retires it once the game is frontmost. */
+static NSWindow *launch_window;
+void ds_launcher_game_shown(void)
+{
+    [launch_window orderOut:nil]; launch_window = nil;
+}
 static NSInteger index_of(NSArray<NSDictionary *> *c, NSString *v, NSInteger dflt)
 {
     for (NSUInteger k = 0; k < c.count; k++) if ([c[k][@"value"] isEqualToString:v ?: @""]) return (NSInteger)k;
@@ -662,12 +672,15 @@ int ds_launcher_run(const char *game_dir, const char *data_dir)
     __block int result = 0;
     v.onPlay = ^{ result = 1; [NSApp stopModal]; };
     v.onQuit = ^{ result = 0; [NSApp stopModal]; };
-    [[NSNotificationCenter defaultCenter] addObserverForName:NSWindowWillCloseNotification object:w queue:nil usingBlock:^(NSNotification *n) { (void)n; [NSApp stopModal]; }];
+    id closeObserver = [[NSNotificationCenter defaultCenter] addObserverForName:NSWindowWillCloseNotification object:w queue:nil usingBlock:^(NSNotification *n) { (void)n; [NSApp stopModal]; }];
     [NSApp activateIgnoringOtherApps:YES];
     [w makeKeyAndOrderFront:nil];
     [NSApp runModalForWindow:w];
-    [w orderOut:nil];
-    if (!result) return 0;
+    [[NSNotificationCenter defaultCenter] removeObserver:closeObserver];
+    if (!result) { [w orderOut:nil]; return 0; }
+    v.starting = YES; v.open = -1; v.onPlay = nil; v.onQuit = nil; v.onChange = nil;
+    [w standardWindowButton:NSWindowCloseButton].enabled = NO;
+    v.needsDisplay = YES; [w displayIfNeeded]; launch_window = w;
     finish();
     return 1;
 }

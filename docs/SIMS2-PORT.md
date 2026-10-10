@@ -294,6 +294,28 @@ Development overrides: `DSR_CACHE_DIR`, `DSR_TEXTURE_CACHE_DIR`, `DSR_PSOLOG`, `
   portraits in the interface are centred.
 - Roofs are hidden in live mode on the ground floor with walls up, as in the game.
 
+### Launch, coast and Sim geometry follow-up (2026-10-09)
+
+- The Play window stays visible with a starting indicator until the game window is presented. Fullscreen and
+  mouse capture wait for AppKit activation, including the already-active case, and the game joins the active Space.
+- Belladonna Cove's ocean uses the fixed-function three-stage renderer. It now preserves the fourth projected
+  texture coordinate and implements `D3DTSS_RESULTARG` / `D3DTA_TEMP`. Previously COUNT4 projection divided by z
+  and the reflection blend read diffuse instead of TEMP, producing a bright cloudy pattern. Synthetic GPU tests
+  cover COUNT2/3/4 across all three stages and TEMP/CURRENT blending.
+- Metal relative shader constants now use one bounded register bank, preserve signed offsets and local `DEF`
+  values, and return zero outside the D3D register range. Sim meshes use unused bone indices of 255, multiplied
+  by three; unchecked reads previously fetched unrelated uniforms, leaving missing body/hair triangles and
+  incomplete portraits. Synthetic bytecode reproduces the old bad read and checks the correction with and
+  without CTAB. The affected Cleveland scene and Justin's walking frames render complete geometry after the fix.
+- Marissa's newly generated selected portrait has hair and a complete torso. Previously generated bald images
+  can persist as JPEG resources inside the character package; deleting `FamilyThumbnails` alone does not refresh
+  those individual headshots. Normal household saves regenerate them. Do not delete character packages.
+- Original Steam references from the reference host are tracked in [issue #1](https://github.com/Joshspeakman/sims-2-macos/issues/1):
+  the Windows game under Proton/DXVK on RTX 3080 Ti, compared with the native M1 Pro build. Day/night coast,
+  apartment lighting and projected lot shadows were inspected. Cameras, aspect ratios and save times differ;
+  this is a visual comparison, not a pixel-identical conformance claim. Private saves, game shaders and capture
+  bundles remain outside the repository.
+
 ## Tests
 
 ```sh

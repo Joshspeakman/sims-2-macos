@@ -457,6 +457,25 @@ static void capture(int on)
  * notch a full-screen window sits below the camera housing, so the screen size given to the game leaves that band out. */
 static void enter_fullscreen(void) { if (win && !(win.styleMask & NSWindowStyleMaskFullScreen)) [win toggleFullScreen:nil]; }
 static void leave_fullscreen(void) { if (win && (win.styleMask & NSWindowStyleMaskFullScreen)) [win toggleFullScreen:nil]; }
+static int awaiting_game_activation;
+static void finish_game_presentation(void)
+{
+    if (!awaiting_game_activation || !win || !NSApp.active) return;
+    awaiting_game_activation = 0;
+    [win makeKeyAndOrderFront:nil];
+    if (windowed()) ;
+    else if (borderless()) {
+        [NSApp setPresentationOptions:NSApplicationPresentationHideDock | NSApplicationPresentationHideMenuBar];
+        [win setFrame:(win.screen ?: NSScreen.mainScreen).frame display:YES];
+    } else enter_fullscreen();
+    capture(1);
+#ifdef SIMS2_EDITION
+    void ds_launcher_game_shown(void); ds_launcher_game_shown();
+#endif
+    if (getenv("DS_WINLOG")) fprintf(stderr, "win: presented active=%d key=%d visible=%d space=%d frame %s, screen %s\n",
+        NSApp.active, win.keyWindow, win.visible, win.onActiveSpace, NSStringFromRect(win.frame).UTF8String,
+        NSStringFromRect((win.screen ?: NSScreen.mainScreen).frame).UTF8String);
+}
 static void window_created(uint32_t hwnd, int x, int y, int w, int h, uint32_t style)
 {
     (void)x; (void)y; (void)w; (void)h; (void)style;
@@ -484,6 +503,7 @@ static void window_created(uint32_t hwnd, int x, int y, int w, int h, uint32_t s
         GameView *v = [[GameView alloc] initWithFrame:f]; v.wantsLayer = YES;
         win.contentView = v; [win makeFirstResponder:v];
         win.collectionBehavior = NSWindowCollectionBehaviorFullScreenPrimary;
+        if (!test_mode && !lab_mode) win.collectionBehavior |= NSWindowCollectionBehaviorMoveToActiveSpace;
         if (windowed() && !test_mode) win.contentAspectRatio = NSMakeSize(w32_screen_w, w32_screen_h);
         [win setLevel:NSNormalWindowLevel];
     });
@@ -498,17 +518,15 @@ static void window_changed(uint32_t hwnd, int x, int y, int w, int h, int visibl
             if (test_mode) [win orderBack:nil];
             else if (lab_mode) { [win makeKeyAndOrderFront:nil]; [NSApp activateIgnoringOtherApps:YES]; void lab_window_show(void); lab_window_show(); }
             else {
-                [win makeKeyAndOrderFront:nil]; [NSApp activateIgnoringOtherApps:YES]; capture(1);
-                if (windowed()) ;                                         /* the launcher's Window row */
-                else if (borderless()) {                                  /* a screen-sized window: around the notch, or DS_BORDERLESS */
-                    [NSApp setPresentationOptions:NSApplicationPresentationHideDock | NSApplicationPresentationHideMenuBar];
-                    [win setFrame:(win.screen ?: NSScreen.mainScreen).frame display:YES];
-                }
-                else enter_fullscreen();
-                if (getenv("DS_WINLOG")) fprintf(stderr, "win: frame %s, screen %s\n", NSStringFromRect(win.frame).UTF8String, NSStringFromRect((win.screen ?: NSScreen.mainScreen).frame).UTF8String);
+                awaiting_game_activation = 1;
+                [win makeKeyAndOrderFront:nil];
+                if (@available(macOS 14.0, *)) [NSApp activate]; else [NSApp activateIgnoringOtherApps:YES];
+                /* Activation is asynchronous. Enter fullscreen/capture only after it completes; also
+                 * handle the already-active case, when no activation notification will arrive. */
+                dispatch_async(dispatch_get_main_queue(), ^{ finish_game_presentation(); });
             }
         }
-        else if (!visible && win.visible) { leave_fullscreen(); [win orderOut:nil]; capture(0); }
+        else if (!visible) { awaiting_game_activation = 0; if (win.visible) { leave_fullscreen(); [win orderOut:nil]; capture(0); } }
     });
 }
 
@@ -692,7 +710,7 @@ static void type_text(NSString *text)
 
 @interface AppDelegate : NSObject <NSApplicationDelegate> @end
 @implementation AppDelegate
-- (void)applicationDidBecomeActive:(NSNotification *)n { (void)n; if (win.visible && !lab_mode) capture(1); post(0x1c, 1, 0); }
+- (void)applicationDidBecomeActive:(NSNotification *)n { (void)n; dispatch_async(dispatch_get_main_queue(), ^{ finish_game_presentation(); }); if (win.visible && !lab_mode) capture(1); post(0x1c, 1, 0); }
 - (void)applicationDidResignActive:(NSNotification *)n { (void)n; capture(0); w32_di_release_all(); post(0x1c, 0, 0); }
 - (NSApplicationTerminateReply)applicationShouldTerminate:(NSApplication *)s { (void)s; ds_trace_save(&frame_trace); frame_trace.samples = NULL; return NSTerminateNow; }
 @end
