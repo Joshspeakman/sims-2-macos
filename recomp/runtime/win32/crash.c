@@ -201,6 +201,14 @@ static void sysstr(const char *name, char *out, size_t cap) {
 #endif
 }
 
+/* seh.c: an unhandled access violation's details (the faulting recompiled function, the host registers, what the
+ * address is, the open files), set just before the report is written */
+static char fault_detail[6144]; static uint32_t fault_code_at; static void *fault_host[2];
+void w32_crash_fault_detail(uint32_t code_at, void *host_pc, void *host_lr, const char *detail)
+{
+    fault_code_at = code_at; fault_host[0] = host_pc; fault_host[1] = host_lr; snprintf(fault_detail, sizeof fault_detail, "%s", detail);
+}
+
 /* Writes a report and returns its path. kind: "crash", "hang". */
 const char *w32_crash_report(const char *kind, const char *reason, Ctx *c, uint32_t guest_pc)
 {
@@ -219,7 +227,8 @@ const char *w32_crash_report(const char *kind, const char *reason, Ctx *c, uint3
     int hang = !strcmp(kind, "hang");
     dprintf(fd, DS2_TITLE " Native - %s report\n%s\n\n", hang ? "not responding" : "crash", when);
     dprintf(fd, "WHAT HAPPENED\n  %s\n", reason);
-    if (guest_pc) { char d[160]; describe_guest(d, sizeof d, guest_pc); dprintf(fd, "  where: %s\n", d); }
+    if (fault_code_at) { char d[160]; describe_guest(d, sizeof d, fault_code_at); dprintf(fd, "  where: %s (the address read or written is in the reason)\n", d); }
+    else if (guest_pc) { char d[160]; describe_guest(d, sizeof d, guest_pc); dprintf(fd, "  where: %s\n", d); }
     dprintf(fd, "  %.0f s after launch; %llu frames presented (last %.1f s ago); messages last pumped %.1f s ago\n\n",
             (now - t_start) / 1e9, (unsigned long long)hb_count[0], hb[0] ? (now - hb[0]) / 1e9 : -1.0, hb[1] ? (now - hb[1]) / 1e9 : -1.0);
 
@@ -239,8 +248,10 @@ const char *w32_crash_report(const char *kind, const char *reason, Ctx *c, uint3
     for (char **e = environ; *e; e++) if (!strncmp(*e, "DS_", 3) || !strncmp(*e, "W32_", 4) || !strncmp(*e, "DSR_", 4)) { dprintf(fd, " %s", *e); any = 1; }
     dprintf(fd, "%s\n\n", any ? "" : " (defaults)");
 
+    if (fault_detail[0]) dprintf(fd, "THE FAULT\n%s\n", fault_detail);
     if (c) {
-        dprintf(fd, "GAME REGISTERS (x86, thread that failed)\n  eax %08x ebx %08x ecx %08x edx %08x esi %08x edi %08x ebp %08x esp %08x\n",
+        dprintf(fd, "GAME REGISTERS (x86, thread that failed%s)\n  eax %08x ebx %08x ecx %08x edx %08x esi %08x edi %08x ebp %08x esp %08x\n",
+                fault_detail[0] ? "; as of the faulting function's last call: it keeps them in the host registers above" : "",
                 c->eax, c->ebx, c->ecx, c->edx, c->esi, c->edi, c->ebp, c->esp);
         dprintf(fd, "  stack (code addresses annotated):\n");
         for (int i = 0; i < 24; i++) {
@@ -275,6 +286,7 @@ const char *w32_crash_report(const char *kind, const char *reason, Ctx *c, uint3
     Dl_info executable = {0}; dladdr((void *)w32_crash_report, &executable);
     dprintf(fd, "\nHOST ADDRESSES (ELF load address %p; subtract this base for addr2line)\n", executable.dli_fbase);
 #endif
+    if (fault_host[0]) dprintf(fd, "  faulting instruction (pc, lr): %p %p\n", fault_host[0], fault_host[1]);   /* symbolize-report.py: the x86 instruction */
     for (int k = 0; k < 256; k++) {
         ThreadInfo *t = &threads[k]; if (!t->used || !t->nbt) continue;
         dprintf(fd, "  %s:", t->name); for (int i = 0; i < t->nbt && i < 40; i++) dprintf(fd, " %p", t->bt[i]); dprintf(fd, "\n");

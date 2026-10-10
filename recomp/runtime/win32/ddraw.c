@@ -451,7 +451,7 @@ M(s_BltFast, 6) ME(DSurface, O_SURF)
     RET(DD_OK, 6);
 END
 /* flip / present */
-/* test mode only (DS_TEST=1): DS_CRASHTEST=fault|hang|stall|abort|hostcrash@<seconds> (uihang: host) exercises the crash reports */
+/* test mode only (DS_TEST=1): DS_CRASHTEST=fault|hang|stall|abort|hostcrash|av@<seconds> (uihang: host; av: The Sims 2) exercises the crash reports */
 static void crash_test(Ctx *c)
 {
     static int armed = -1; static double at; static char kind[16]; static uint64_t t0;
@@ -466,6 +466,12 @@ static void crash_test(Ctx *c)
     if (!strcmp(kind, "stall")) { fprintf(stderr, "crash test: game main thread pauses 10 s\n"); uint64_t e = now_us() + 10000000; while (now_us() < e) usleep(100000); }
     if (!strcmp(kind, "abort")) abort();
     if (!strcmp(kind, "hostcrash")) { volatile int *p = (int *)(uintptr_t)8; *p = 1; }
+#ifdef SIMS2_EDITION
+    if (!strcmp(kind, "av")) {      /* an access violation inside recompiled game code: its BC1 block compressor reading a free address */
+        uint32_t a[3] = {(c->esp - 0x800) & ~15u, 0xa4fca024u, 0};
+        fprintf(stderr, "crash test: game code reads a free address\n"); w32_callback(c, 0xa0084dcbu, 3, a);
+    }
+#endif
 }
 void dsr_present(Ctx *c, uint32_t id)           /* a finished frame: pacing, then the present record (also for d3d9.c) */
 {
