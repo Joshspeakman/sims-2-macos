@@ -16,7 +16,7 @@ Vegas); the Direct3D 9 to Metal renderer comes from the Fallout: New Vegas port.
 
 ## Status
 
-**Playable, early (2026-10-10).** `main` and `nightly` are currently the same commit; there is no tagged release yet.
+**Playable, early (2026-10-10).** The code on `main` and `nightly` is currently the same; there is no tagged release yet.
 
 On an M1 Pro: the intro, the neighbourhoods in 3D, families' lots in live mode with their Sims, Create-a-Sim, build
 and buy mode, saving and loading, music and sounds, and every expansion and stuff pack in the collection (they all run
