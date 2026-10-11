@@ -16,7 +16,8 @@ Vegas); the Direct3D 9 to Metal renderer comes from the Fallout: New Vegas port.
 
 ## Status
 
-**Playable, early (2026-10-10).** The code on `main` and `nightly` is currently the same; there is no tagged release yet.
+**Beta 1.** This is an early, playable beta. See the [release notes](https://github.com/Joshspeakman/sims-2-macos/releases/tag/beta-1)
+for installation instructions and known issues.
 
 On an M1 Pro: the intro, the neighbourhoods in 3D, families' lots in live mode with their Sims, Create-a-Sim, build
 and buy mode, saving and loading, music and sounds, and every expansion and stuff pack in the collection (they all run
