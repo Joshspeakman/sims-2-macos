@@ -24,7 +24,7 @@ recomp/tools/build_app.sh recomp/work/sims2                          # Mac: host
 
 | Step | Tool | Notes |
 |---|---|---|
-| Analysis | `tools/analyze.py` | 109,632 functions, 97.3% of `.text`; about 26 GB of RAM at its peak. Kept while the executable and `analyze.py` are unchanged (`SIMS2_REANALYZE=1` redoes it). |
+| Analysis | `tools/analyze.py` | 109,632 functions, 97.3% of `.text`; about 26 GB of RAM at its peak. Reused when `analysis.json` is at least as new as `analyze.py`; the cache does not check the executable. `analysis.log` is also required. Use `SIMS2_REANALYZE=1` after changing inputs. |
 | Lifting | `tools/lift.py --game sims2` | one C function per original function; the game-specific overrides and hooks are in `lift.py` and `runtime/win32/hooks.c` |
 | `ijl15.dll` | the same tools | the Intel JPEG Library, lifted into the same image set at its own base |
 | Compiling | `tools/cc1.sh` | only files whose C changed are recompiled (`SIMS2_BUILD_JOBS=n` sets the parallel jobs) |

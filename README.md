@@ -3,7 +3,7 @@
 The Sims 2 Legacy Collection (Steam), statically recompiled from your own copy into native arm64 code and run on
 Metal. No Wine, no Rosetta, no emulator.
 
-Nothing from the game is in this repository. `install.sh` reads your Steam copy, recompiles its executable on your
+The game installation is not supplied. `install.sh` reads your Steam copy, recompiles its executable on your
 Mac, and builds an app that reads the game's data from your folder. The game folder is only read; nothing is written
 into it.
 
@@ -30,17 +30,16 @@ The work log, what has been checked and how: [docs/SIMS2-PORT.md](docs/SIMS2-POR
 
 - **A Mac with Apple Silicon** (M1 or later). `install.sh` stops on an Intel Mac.
 - **macOS 13 or later** (the app's minimum). Development and testing were done on a recent macOS beta; older
-  versions haven't been tried.
-- **Memory: about 26 GB free for the first build.** The recompiler's analysis of the game's executable (110,000
-  functions) peaks at about 26 GB of RAM. On a 32 GB Mac that is tight; with less, expect heavy swapping or a failed
-  build. See [Building with less memory](#building-with-less-memory).
+  versions haven't been tried. [Game Mode](https://support.apple.com/en-us/105118) needs macOS 14 or later.
+- **Memory:** the [development notes](docs/SIMS2-PORT.md) report an analysis peak of about 26 GB of RAM
+  for the game's roughly 110,000 functions; this is an observation, not a measured minimum for every Mac.
+  On a 32 GB Mac that is tight; with less, expect heavy swapping or a failed build. See [Building with less memory](#building-with-less-memory).
 - **The Xcode command line tools**: `xcode-select --install`. They provide clang, git and python3.
 - **An internet connection while installing**: the build installs two Python packages (Capstone, Unicorn) into
   `recomp/.venv`, and the launch window's artwork is downloaded from the game's Steam store page.
-- **Disk:** about 13 GB for the game folder, plus several GB for the build folder (the generated C alone is about
-  600 MB).
-- **Time:** about fifteen minutes for the first build; later builds reuse the analysis and recompile only what
-  changed.
+- Build time and peak disk use have not been verified for a clean install. Allow room for your game files,
+  generated source and object files, the app, and additional update worktrees; time varies with the Mac. Later builds
+  can reuse the analysis and unchanged compiled files (see below).
 - **Your own copy of The Sims 2 Legacy Collection from Steam**, exactly the build below.
 
 ### The supported game build
@@ -62,17 +61,19 @@ to work: the port patches code at fixed addresses.
 
 ### Getting the Windows game files onto your Mac
 
-The Legacy Collection is Windows-only on Steam, so the Mac Steam client won't download it. Either:
+Use a complete Windows installation of the Legacy Collection. Either:
 
 - **Copy it from a Windows PC:** install the game with Steam on the PC and copy the whole folder
-  `steamapps/common/The Sims 2 Legacy Collection` (about 13 GB) to the Mac, for example to
+  `steamapps/common/The Sims 2 Legacy Collection` to the Mac, for example to
   `~/Games/The Sims 2 Legacy Collection`.
 - **Use a CrossOver or Whisky Steam library:** point `--game-dir` at
   `.../drive_c/Program Files (x86)/Steam/steamapps/common/The Sims 2 Legacy Collection` inside the bottle.
 
 `install.sh` for The Sims 2 has no SteamCMD option. Downloading the Windows depot yourself with SteamCMD
 (`+@sSteamCmdForcePlatformType windows ... +app_update 3314070`) is untested. The folder must still contain
-`3314070_install.vdf`, and the macOS SteamCMD may need Rosetta.
+`3314070_install.vdf`. Valve's [macOS SteamCMD download](https://steamcdn-a.akamaihd.net/client/installer/steamcmd_osx.tar.gz),
+inspected on 2026-10-10, contains an Intel (`x86_64`) executable and needs
+[Rosetta](https://support.apple.com/en-us/102527) on Apple Silicon. The recompiled game runs natively.
 
 ### About the Steam wrapper
 
@@ -82,6 +83,8 @@ the result against a second known hash. Your game folder is not modified. This i
 bought. The installed app contains that unwrapped copy, so it is for your own Mac: don't share it.
 
 ## Install
+
+Keep the clone in a path without spaces: the current compile scripts split source paths on whitespace.
 
 ```sh
 xcode-select --install                     # once, if you don't have the command line tools
@@ -94,7 +97,7 @@ This recompiles the game and installs **The Sims 2 Native** in `~/Applications` 
 from there or from Launchpad.
 
 **Keep the clone.** The app's Updates button rebuilds from it (see [Updating](#updating)), and the build folder
-inside it holds the analysis, which takes 26 GB of memory to redo.
+inside it holds the cached analysis, whose reported memory cost is described above.
 
 ### install.sh options
 
@@ -110,11 +113,18 @@ Environment variables for the build: `SIMS2_ANY_BUILD=1` (skip the executable ch
 
 ### Building with less memory
 
-The analysis result (`recomp/work/sims2/analysis.json`) depends only on the executable and the recompiler. If you have
-access to another machine with more memory (a Linux PC works: the same scripts build there), run
-`recomp/build_sims2.sh "/path/to/The Sims 2 Legacy Collection"` on it, copy its `recomp/work/sims2/analysis.json`
-into the same place in your Mac clone, `touch` it, and run `install.sh`. The build keeps an analysis newer than
-`recomp/tools/analyze.py`.
+If you have access to another machine with more memory (the same build script also runs on Linux), use the
+**same repository commit and supported executable** there. Run
+`recomp/build_sims2.sh "/path/to/The Sims 2 Legacy Collection"`, then privately copy **both**
+`recomp/work/sims2/analysis.json` and `recomp/work/sims2/analysis.log` into that directory in your Mac clone.
+Do not copy the other machine's compiled objects. Run `touch recomp/work/sims2/analysis.json` on the Mac before
+`install.sh`: the script reuses that file if it is at least as new as `recomp/tools/analyze.py`, and also reads
+`analysis.log` even when analysis is skipped. This transfer procedure has been checked against the script, but has
+not been exercised as a clean install here.
+
+The cache check uses timestamps; it does not compare executable hashes with the cached analysis. Do not reuse
+an analysis from a different executable or recompiler revision. Set `SIMS2_REANALYZE=1` when either changes; lowering
+`SIMS2_BUILD_JOBS` reduces parallel compilation, not the memory needed for analysis.
 
 ## Where things go
 
@@ -124,7 +134,7 @@ into the same place in your Mac clone, `touch` it, and run `install.sh`. The bui
 | Data folder | `~/Games/Sims2Native` (set with `--data-dir`) |
 | Your neighbourhoods, downloads and the game's `Config` | `~/Games/Sims2Native/drive_c/Users/player/Documents/EA Games/The Sims 2 Legacy` |
 | Launch window settings | `~/Games/Sims2Native/launcher.plist` |
-| Logs | `~/Games/Sims2Native/Sims2Native.log` (Nightly: `Sims2Nightly.log`). The log is cut at about 5 MB: the earlier part goes to `.previous` during a session and to `.old.log` at the next launch. |
+| Logs | `~/Games/Sims2Native/Sims2Native.log` (Nightly: `Sims2Nightly.log`). Update output is in `update.log`. The game log is cut at about 5 MB: the earlier part goes to `.previous` during a session and to `.old.log` at the next launch. |
 | Crash reports | `~/Games/Sims2Native/CrashReports` |
 | Shader and texture caches | `~/Library/Caches/io.github.sims-2-macos/` (safe to delete while the game is closed; they are rebuilt) |
 | Game packages the game changes | copied into the data folder the first time the game writes to one; the originals stay untouched |
@@ -141,12 +151,12 @@ The app opens with a launch window. Your choices are kept for the next launch.
 - **Display**
   - **Interface Size**: 100% to 300%. The game is laid out at the resolution divided by this size, while the renderer
     draws at the full resolution, so the interface is larger and the 3D stays sharp. The default is 200% at Retina
-    resolution (the game's layout in points) and 100% otherwise. Sizes that would leave the game under 1024 x 700
+    resolution when it fits (the game's layout in points), and 100% otherwise. Sizes that would leave the game under 1024 x 700
     aren't offered.
-  - **Window**: Full Screen (macOS full screen, with Game Mode) or a Window you can move and resize.
+  - **Window**: Full Screen (macOS full screen, with Game Mode on macOS 14 or later) or a Window you can move and resize.
   - **Notch** (only on displays with one): Below the Notch, or Around the Notch (the whole display in a borderless
     window; no Game Mode).
-  - **Frame Rate**: the display's (up to 120 on ProMotion), 60 or 30 fps.
+  - **Frame Rate**: the display's (up to 120 on ProMotion), 60 (offered separately on displays above 60 Hz) or 30 fps.
   - **Intro Movies**: Skip (the default, about 50 seconds sooner) or Play.
 - **Graphics** and **Detail**: the game's own options: Material Detail, Object Detail, Shadows, Lighting, Effects,
   Reflections, Snow on Ground, Ceilings, Object Hiding and Opaque Interface. Each starts at **Game's Setting**, which
@@ -170,7 +180,8 @@ worktree inside the clone you installed from (`build/stable` or `build/nightly`)
 copy, and reinstalls it. Saves and settings are kept. For this to work, the clone must still be where you installed it
 from, and `git` must be able to fetch from GitHub without asking for a password.
 
-**By hand:** `git pull` in the clone, then `./install.sh` (it reuses the game folder of the installed app).
+**By hand:** `git pull` in the clone, then repeat your install command: `./install.sh` for the stable app or
+`./install.sh --nightly` for Nightly (the game folder is reused). Include your original custom folder options.
 
 If you installed with `--app-dir` or `--data-dir`, update by hand with the same options. The Updates button doesn't
 pass them on, so it fails or installs with the default folders.
@@ -239,7 +250,6 @@ Other files in `docs/` are carried over from the earlier ports this one grew out
 ## Legal
 
 The Sims and The Sims 2 are trademarks of Electronic Arts Inc. This project is not affiliated with or endorsed by
-Electronic Arts or Valve. You need your own copy of the game. Nothing from the game is distributed here, and the build
-reads only your files.
+Electronic Arts or Valve. You need your own complete game installation; the build reads your copy.
 
 The code in this repository is under the MIT license ([LICENSE](LICENSE)).
