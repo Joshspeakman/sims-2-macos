@@ -1,5 +1,5 @@
 #!/bin/bash
-# install.sh --game-dir <The Sims 2 Legacy Collection folder> [--app-dir DIR] [--data-dir DIR]
+# install.sh --game-dir <The Sims 2 Legacy Collection folder> [--app-dir DIR] [--data-dir DIR] [--in-place]
 # install.sh --nightly                 installs "The Sims 2 Nightly.app" next to the stable app: the newest experimental
 #                                      work (the repository's nightly branch, fetched from GitHub and built in
 #                                      build/nightly; this checkout is left as it is). It shares the data folder
@@ -17,7 +17,9 @@ set -euo pipefail
 HERE="$(cd "$(dirname "$0")" && pwd)"
 GAME=""; GOG_EXE=""; APPS="$HOME/Applications"; DATA="$HOME/Games/Sims2Native"
 NIGHTLY=""; AS_NIGHTLY=""; ARGS=()
+IN_PLACE=""
 while [ $# -gt 0 ]; do
+  case "$1" in --in-place) IN_PLACE=1; ARGS+=("$1"); shift; continue;; esac
   case "$1" in --nightly) NIGHTLY=1; shift; continue;; --as-nightly) AS_NIGHTLY=1; shift; continue;; esac
   ARGS+=("$1"); [ $# -gt 1 ] && case "$1" in --*) case "$2" in --*) ;; *) ARGS+=("$2");; esac;; esac
   case "$1" in
@@ -68,6 +70,17 @@ mkdir -p "$APPS"; rm -rf "$A"; mkdir -p "$A/Contents/MacOS" "$A/Contents/Resourc
 cp "$HERE/recomp/work/sims2/app/Sims2Native" "$HERE/recomp/work/sims2/app/shaders.metal" "$HERE/recomp/work/sims2/app/dsr_snapshot.bin" "$A/Contents/MacOS/"
 cp "$HERE/recomp/work/sims2/Sims2EP9.exe" "$A/Contents/Resources/Sims2EP9.exe"   # the unwrapped executable (your copy, this Mac only)
 [ -d "$DATA/art" ] && cp -R "$DATA/art" "$A/Contents/Resources/art"
+# The game is copied into the data folder (game-files) and the app reads it from there, so the folder it was installed
+# from is no longer needed and can be deleted. On a Mac the copy is an APFS clone: it takes no extra space. Updates and
+# reinstalls keep using the copy. --in-place reads the given folder instead (nothing is copied).
+if [ -z "$IN_PLACE" ]; then case "$GAME/" in "$DATA"/*) ;; *)
+  GF="$DATA/game-files"; echo "== copying the game from $GAME into $GF"
+  mkdir -p "$DATA"; rm -rf "$GF.part"
+  if [ "$(uname -s)" = Darwin ]; then cp -cRL "$GAME" "$GF.part" 2>/dev/null || { rm -rf "$GF.part"; cp -RL "$GAME" "$GF.part"; }
+  else cp -RL --reflink=auto "$GAME" "$GF.part"; fi
+  rm -rf "$GF"; mv "$GF.part" "$GF"
+  echo "== the app reads the game from $GF: $GAME is no longer needed (delete it to free the space)"; GAME="$GF";;
+esac; fi
 Q_GAME=$(printf '%q' "$GAME"); Q_DATA=$(printf '%q' "$DATA")      # shell-quoted: any folder name is only data
 # updates from the launcher: the branch this app follows (main, or nightly for Nightly), the commit it was built from and
 # the checkout it was installed from; its updater fetches the branch into a worktree there and rebuilds the app from it
