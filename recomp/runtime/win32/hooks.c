@@ -54,6 +54,17 @@ __attribute__((unused)) static void guest_format(char *out, size_t cap, uint32_t
 int native_hook(Ctx *c, uint32_t addr);   /* native.c */
 void rt_hook(Ctx *c, uint32_t addr)
 {
+#ifdef SIMS2_EDITION
+    if (addr == 0xa05c7f3fu) {   /* issue #3: a map lookup returned no record and the next line reads its field +0x90. The game has
+                                  * a branch for "that field is 0" that uses nothing else of the record; a blank record takes it */
+        if (!c->eax) {
+            static uint32_t blank; if (!blank) blank = vm_alloc(0, 4096, 0x3000, 4);
+            static int once; if (!once++) fprintf(stderr, "sims2: empty lookup at a05c7f3f passed over (issue #3)\n");
+            c->eax = blank;
+        }
+        return;
+    }
+#endif
     if (native_hook(c, addr)) return;
     switch (addr) {
     case DS2_MOOD_READ: mood_read(c); break;
