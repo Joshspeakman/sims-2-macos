@@ -5,6 +5,7 @@
 #include "w32.h"
 #include <pthread.h>
 #include <strings.h>
+#include <errno.h>
 #include <sys/stat.h>
 #ifdef __linux__
 #include <sys/random.h>
@@ -692,3 +693,86 @@ IMPL(d3d9, Direct3DShaderValidatorCreate9)
     }
     RET(obj, 0);
 }
+
+#ifdef SIMS2_EDITION
+/* ---- autosave: S2_AUTOSAVE_MIN minutes (the launcher's Autosave row; 0 or unset = off) ----
+ * The Options panel's Save button (0xa064a0da) posts message 0xacfd5984, and cTSSaveLotController does the rest. This posts
+ * the same message from the game thread's message pump, between frames, and only when the game's own checks allow it:
+ * GetSaveLotEnabled (the button's enabled state, 0xa05677a0) and not already busy (the button's check at 0xa064a053).
+ * and only in Live mode: a save from the neighbourhood chooser crashes, and one from Build mode moves the camera.
+ * If the game says no (Create-a-Sim, loading, a save running) it tries again in 5 s. Before each save the Neighborhoods
+ * folder is cloned to "The Sims 2 Autosave Backups" (APFS clones cost almost no space; the newest three are kept), since a
+ * crash during a save can damage a neighbourhood. */
+#include <time.h>
+#include <dirent.h>
+#ifdef __APPLE__
+#include <sys/clonefile.h>
+#include <removefile.h>
+#endif
+uint32_t ext_thiscall(Ctx *c, uint32_t fn, uint32_t self, int nargs, const uint32_t *args);
+int w32_host_path(const char *win, char *out, size_t cap, int mode);
+static uint32_t vcall(Ctx *c, uint32_t self, uint32_t slot, int n, const uint32_t *a)
+{
+    return ext_thiscall(c, rt_r32(G_MEM, rt_r32(G_MEM, self) + slot), self, n, a);
+}
+static uint32_t gcall(Ctx *c, uint32_t fn, int n, const uint32_t *a) { return w32_callback(c, fn, n, a); }
+#ifdef __APPLE__
+static int cmp_name(const void *a, const void *b) { return strcmp(*(char *const *)a, *(char *const *)b); }
+static void autosave_backup(void)
+{
+    char src[2048], root[2048], dst[2300], stamp[32];
+    if (w32_host_path("C:\\Users\\player\\Documents\\EA Games\\The Sims 2 Legacy\\Neighborhoods", src, sizeof src, 0)) return;
+    if (w32_host_path("C:\\Users\\player\\Documents\\EA Games\\The Sims 2 Autosave Backups\\x", root, sizeof root, 1)) return;
+    char *e = strrchr(root, '/'); if (!e) return; *e = 0;
+    time_t t = time(0); struct tm tm; localtime_r(&t, &tm); strftime(stamp, sizeof stamp, "%Y-%m-%d_%H-%M-%S", &tm);
+    snprintf(dst, sizeof dst, "%s/%s", root, stamp);
+    if (clonefile(src, dst, 0)) { fprintf(stderr, "autosave: no backup (%s)\n", strerror(errno)); return; }
+    DIR *d = opendir(root); if (!d) return;
+    char *names[256]; int n = 0; struct dirent *de;
+    while ((de = readdir(d)) && n < 256) if (de->d_name[0] != '.') names[n++] = strdup(de->d_name);
+    closedir(d); qsort(names, (size_t)n, sizeof *names, cmp_name);
+    for (int k = 0; k < n; k++) {
+        if (k < n - 3) { char old[2600]; snprintf(old, sizeof old, "%s/%s", root, names[k]); removefile_state_t st = removefile_state_alloc(); removefile(old, st, REMOVEFILE_RECURSIVE); removefile_state_free(st); }
+        free(names[k]);
+    }
+}
+#else
+static void autosave_backup(void) {}
+#endif
+static uint64_t mono_ms(void) { struct timespec t; clock_gettime(CLOCK_MONOTONIC, &t); return (uint64_t)t.tv_sec * 1000 + (uint64_t)t.tv_nsec / 1000000; }
+void sims2_autosave_tick(Ctx *c)
+{
+    static int minutes = -1; static uint64_t due; static uint32_t pump_tid; static int busy;
+    if (minutes < 0) { const char *e = getenv("S2_AUTOSAVE_MIN"); minutes = e ? atoi(e) : 0; if (minutes < 0) minutes = 0; }
+    if (!minutes || busy) return;
+    uint32_t tid = w32_tid(c); if (!pump_tid) pump_tid = tid; if (tid != pump_tid) return;     /* the game thread only */
+    uint64_t now = mono_ms(); if (!due) due = now + (uint64_t)minutes * 60000;
+    if (now < due) return;
+    busy = 1; due = now + 5000;                                                                 /* not allowed yet: look again soon */
+    uint32_t game = gcall(c, 0xa020dde0u, 0, 0), ui = gcall(c, 0xa020e087u, 0, 0), world = gcall(c, 0xa020e031u, 0, 0);
+    int enabled = game && (vcall(c, game, 0x64, 0, 0) & 0xff), occupied = !ui || (vcall(c, ui, 0xac, 0, 0) & 0xff);
+    uint32_t place = world ? vcall(c, world, 0x14, 0, 0) : 0, lot = place ? vcall(c, place, 0x50, 0, 0) : 0;   /* no lot loaded: not yet (the button's own test) */
+    uint32_t session = gcall(c, 0xa020ddfbu, 0, 0), open = session ? vcall(c, session, 0x28, 0, 0) : 0;      /* no neighbourhood open: the chooser, where a save crashes */
+    /* the game's own "is live mode" (cTSAudioAmbienceGlobalPrimitiveIsLiveMode, 0xa0235ee4): the session's mode object reads 0 */
+    uint32_t modes = session ? vcall(c, session, 0xc, 0, 0) : 0, mode = modes ? vcall(c, modes, 0x6c, 0, 0) : 0xffffffffu;
+    static uint32_t last_mode = 0xfffffffeu; if (mode != last_mode) { last_mode = mode; fprintf(stderr, "autosave: game mode %u\n", mode); }
+    if (enabled && !occupied && lot && open && mode == 0) {
+        autosave_backup();
+        uint32_t a = 0x2c, msg = gcall(c, 0xa01c03b7u, 1, &a);                                 /* the same steps as the button */
+        if (msg) {
+            ext_thiscall(c, 0xa01c033du, msg, 0, 0);
+            vcall(c, msg, 4, 0, 0);
+            uint32_t sound = gcall(c, 0xa020de51u, 0, 0); if (sound) vcall(c, sound, 0x10, 0, 0);
+            uint32_t id = 0xacfd5984u, zero = 0, post[2] = {msg, 0};
+            vcall(c, msg, 0x14, 1, &id); vcall(c, msg, 0x2c, 1, &zero); vcall(c, msg, 0x40, 1, &zero);
+            uint32_t server = gcall(c, 0xa09c5a89u, 0, 0);
+            if (server) vcall(c, server, 0x10, 2, post);
+            vcall(c, lot, 0x10, 0, 0);
+            vcall(c, msg, 8, 0, 0);
+            fprintf(stderr, "autosave: saving\n");
+            due = now + (uint64_t)minutes * 60000;
+        }
+    }
+    busy = 0;
+}
+#endif

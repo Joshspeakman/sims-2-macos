@@ -394,8 +394,9 @@ static NSArray<NSArray *> *camera_options(void)
     ];
 }
 /* the chosen settings as environment for the game (main.m, the renderer). An environment already set (a terminal) wins. */
-static void apply(NSString *res, NSString *ui, NSString *window, NSString *notch, NSString *fps, NSString *startup, NSString *props, NSString *intro)
+static void apply(NSString *res, NSString *ui, NSString *window, NSString *notch, NSString *fps, NSString *startup, NSString *props, NSString *intro, NSString *autosave)
 {
+    if (!getenv("S2_AUTOSAVE_MIN")) setenv("S2_AUTOSAVE_MIN", autosave.UTF8String, 1);   /* runtime/win32/sims2_imports.c */
     if (!getenv("SIMS2_SKIP_INTRO")) setenv("SIMS2_SKIP_INTRO", [intro isEqualToString:@"skip"] ? "1" : "0", 1);   /* runtime/win32/files.c */
     int W = 0, H = 0, pc = ui.intValue; sscanf(res.UTF8String, "%dx%d", &W, &H);
     if (!getenv("DS_RESOLUTION") && W && H) {
@@ -549,10 +550,15 @@ int ds_launcher_run(const char *game_dir, const char *data_dir)
 {
     NSString *data = @(data_dir), *plistPath = [data stringByAppendingPathComponent:@"launcher.plist"]; (void)game_dir;
     NSDictionary *saved = [NSDictionary dictionaryWithContentsOfFile:plistPath] ?: @{};
-    DSRow *res = [DSRow new], *ui = [DSRow new], *window = [DSRow new], *notch = [DSRow new], *fps = [DSRow new], *intro = [DSRow new];
+    DSRow *res = [DSRow new], *ui = [DSRow new], *window = [DSRow new], *notch = [DSRow new], *fps = [DSRow new], *intro = [DSRow new], *autosave = [DSRow new];
     intro.title = @"Intro Movies"; intro.choices = @[@{@"value": @"skip", @"label": @"Skip", @"note": @"Straight to loading: about 50 seconds sooner"},
                                                      @{@"value": @"play", @"label": @"Play", @"note": @"The EA logo and the intro, as the game starts"}];
     intro.index = index_of(intro.choices, saved[@"intro"], 0);
+    autosave.title = @"Autosave"; autosave.choices = @[@{@"value": @"0", @"label": @"Off", @"note": @"Only your own saves, as the game does"},
+                                                       @{@"value": @"10", @"label": @"10 Minutes", @"note": @"Saves every 10 minutes while you play in Live mode"},
+                                                       @{@"value": @"20", @"label": @"20 Minutes", @"note": @"Saves every 20 minutes while you play in Live mode"},
+                                                       @{@"value": @"30", @"label": @"30 Minutes", @"note": @"Saves every 30 minutes while you play in Live mode"}];
+    autosave.index = index_of(autosave.choices, saved[@"autosave"], 0);
     notch.title = @"Notch"; notch.choices = notch_choices(); notch.index = index_of(notch.choices, saved[@"notch"], 0);
     BOOL (^below)(void) = ^BOOL { return ![notch.choices[notch.index][@"value"] isEqualToString:@"around"]; };
     res.title = @"Resolution"; res.choices = resolution_choices(below()); res.index = index_of(res.choices, saved[@"resolution"], res.choices.count > 1 && NSScreen.mainScreen.backingScaleFactor > 1.01 ? 1 : 0);   /* Retina by default */
@@ -579,13 +585,13 @@ int ds_launcher_run(const char *game_dir, const char *data_dir)
         return [a componentsJoinedByString:@";"];
     };
     void (^finish)(void) = ^{
-        NSMutableDictionary *d = [@{@"resolution": val(res), @"interfaceSize": val(ui), @"window": val(window), @"notch": val(notch), @"frameRate": val(fps), @"intro": val(intro)} mutableCopy];
+        NSMutableDictionary *d = [@{@"resolution": val(res), @"interfaceSize": val(ui), @"window": val(window), @"notch": val(notch), @"frameRate": val(fps), @"intro": val(intro), @"autosave": val(autosave)} mutableCopy];
         for (NSArray *rows in @[gfx, det, cam]) for (DSRow *r in rows) d[r.key] = val(r);
         [d writeToFile:plistPath atomically:YES];
-        apply(val(res), val(ui), val(window), val(notch), val(fps), startup(), props(), val(intro));
+        apply(val(res), val(ui), val(window), val(notch), val(fps), startup(), props(), val(intro), val(autosave));
     };
     const char *shot = getenv("DS_LAUNCHER_SHOT");
-    if (getenv("DS_NO_LAUNCHER") && !shot) { if (saved.count) apply(val(res), val(ui), val(window), val(notch), val(fps), startup(), props(), val(intro)); return 1; }
+    if (getenv("DS_NO_LAUNCHER") && !shot) { if (saved.count) apply(val(res), val(ui), val(window), val(notch), val(fps), startup(), props(), val(intro), val(autosave)); return 1; }
 
     NSString *updater = getenv("DS_UPDATER") ? @(getenv("DS_UPDATER")) : nil, *branch = getenv("DS_UPDATE_BRANCH") ? @(getenv("DS_UPDATE_BRANCH")) : @"main";
     NSString *built = getenv("DS_BUILT_COMMIT") ? @(getenv("DS_BUILT_COMMIT")) : @"";
@@ -595,7 +601,7 @@ int ds_launcher_run(const char *game_dir, const char *data_dir)
     upd.choices = update_choice(ustate, branch, built, nil);
     BOOL shotMode = shot != NULL;
     DSSection *display = [DSSection new], *graphics = [DSSection new], *detail = [DSSection new], *camera = [DSSection new], *saves = [DSSection new], *updSec = [DSSection new];
-    display.title = @"Display"; display.rows = notch_height() > 0 ? @[ui, window, notch, fps, intro] : @[ui, window, fps, intro];
+    display.title = @"Display"; display.rows = notch_height() > 0 ? @[ui, window, notch, fps, intro, autosave] : @[ui, window, fps, intro, autosave];
     graphics.title = @"Graphics"; graphics.rows = gfx; detail.title = @"Detail"; detail.rows = det; camera.title = @"Camera"; camera.rows = cam;
     NSString *(^chosen)(NSArray<DSRow *> *) = ^NSString *(NSArray<DSRow *> *rows) {   /* the rows that override the game's Options */
         NSMutableArray *a = [NSMutableArray array];
