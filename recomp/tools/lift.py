@@ -43,6 +43,10 @@ SIMS2_OVERRIDES = {       # The Sims 2 (runtime/win32/hooks.c rt_override, SIMS2
     0xa09cc611: 'RefPack compression of a resource (runtime/win32/refpack.c natively: up to 3 s as recompiled code)',
 }
 
+SIMS2_HOOKS = {           # The Sims 2 (runtime/win32/hooks.c rt_hook, SIMS2_EDITION)
+    0xa05c7f3f: 'a map lookup that came back empty: read as a record whose field is 0 (issue #3: the game would fault)',
+}
+
 SEGSEL = {'cs': 0x23, 'ds': 0x2b, 'es': 0x2b, 'ss': 0x2b, 'fs': 0x53, 'gs': 0x2b}
 
 RET_FORMS = ('repz ret', 'rep ret', 'bnd ret')
@@ -881,7 +885,7 @@ def main():
         from editions import identify, PROFILES
         edition = a.game if a.game != 'ds2' else identify(a.exe, prepared=True)
         if edition in ('fnv', 'sims2'):                           # Fallout: New Vegas, The Sims 2: none of the DS2 hooks apply
-            L.hooks = {}; L.overrides = dict(SIMS2_OVERRIDES) if edition == 'sims2' else {}
+            L.hooks = dict(SIMS2_HOOKS) if edition == 'sims2' else {}; L.overrides = dict(SIMS2_OVERRIDES) if edition == 'sims2' else {}
         elif edition == 'broken-world':
             L.guest_flow = True
             L.hooks = dict(zip(PROFILES[edition]['hooks'], HOOKS.values()))
