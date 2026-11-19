@@ -1,0 +1,66 @@
+{
+  "name": "The Sims 2",
+  "folder": "The Sims 2",
+  "bundle_id": "io.github.joshspeakman.sims-2",
+  "release_repo": "Joshspeakman/sims-2-macos",
+  "binary": "The Sims 2",
+  "icon_label": "TS2",
+  "version": "Legacy Collection (Steam)",
+  "where": "Your The Sims 2 Legacy Collection folder from Steam's Windows version (app 3314070)",
+  "minutes": 10,
+  "space_gb": 16,
+  "build_gb": 4,
+  "exe": "EP9/TSBin/Sims2EP9.exe",
+  "exe_sha256": {
+    "24041f834e979cc088714713c3207540ff9093f51ff126450a4f7989432156b6": {
+      "version": "Legacy Collection (Steam)",
+      "patch": [["steamstub.py", "{exe}", "{exe}"]]
+    }
+  },
+  "required": [
+    "Base",
+    "EP9/TSBin/ijl15.dll"
+  ],
+  "libs": [
+    {
+      "file": "EP9/TSBin/ijl15.dll"
+    }
+  ],
+  "tag_lowercase": false,
+  "lift_args": [
+    "--game",
+    "sims2"
+  ],
+  "cc_args": [
+    "-fPIC",
+    "-DRT_TSO",
+    "-DRT_HOST_RC_INIT=UINT32_MAX"
+  ],
+  "art": ["sims2_art.py", "{art}"],
+  "log": "Sims2Native",
+  "local_network": "The Sims 2 doesn't use your local network.",
+  "build": "./build_sims2.sh \"$GAME\" && ./tools/build_app.sh \"$PWD/work/sims2\"",
+  "out": "work/sims2",
+  "rt_opt": "-O1 -ffp-contract=off",
+  "rt_cflags": [
+    "-DSIMS2_EDITION",
+    "-DRT_TSO"
+  ],
+  "host_cflags": [
+    "-DSIMS2_EDITION",
+    "-DRT_TSO"
+  ],
+  "frameworks": [
+    "AppKit",
+    "Metal",
+    "QuartzCore",
+    "CoreText",
+    "CoreGraphics",
+    "CoreFoundation",
+    "AudioToolbox",
+    "CoreImage"
+  ],
+  "style": "tactical",
+  "title": "THE SIMS 2",
+  "art_url": "https://shared.akamai.steamstatic.com/store_item_assets/steam/apps/3314070/library_hero.jpg"
+}
