@@ -270,3 +270,9 @@ The Sims and The Sims 2 are trademarks of Electronic Arts Inc. This project is n
 Electronic Arts or Valve. You need your own complete game installation; the build reads your copy.
 
 The code in this repository is under the MIT license ([LICENSE](LICENSE)).
+
+## Support
+
+If you get some use out of this, you can buy me a coffee on Ko-fi.
+
+[![ko-fi](https://ko-fi.com/img/githubbutton_sm.svg)](https://ko-fi.com/speakerjosh)
