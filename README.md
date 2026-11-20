@@ -16,6 +16,11 @@ Vegas); the Direct3D 9 to Metal renderer comes from the Fallout: New Vegas port.
 ![Main menu](docs/screenshots/sims2-main-menu.jpg)
 ![Desiderata Valley](docs/screenshots/sims2-neighborhood.jpg)
 
+| | |
+|---|---|
+| ![The launch window](media/screenshots/screenshot-launcher.png) | ![Belladonna Cove](media/screenshots/screenshot-01-belladonna-cove.jpg) |
+| ![A neighbourhood](media/screenshots/screenshot-02-neighbourhood.jpg) | ![An apartment household](media/screenshots/screenshot-03-apartment.jpg) |
+
 ## Status
 
 **Beta 1.** This is an early, playable beta. See the [release notes](https://github.com/Joshspeakman/sims-2-macos/releases/tag/beta-1)
