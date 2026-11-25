@@ -15,6 +15,6 @@ clang -c -O2 -g -fobjc-arc -Wall -Wno-unused-function -o "$OUT/obj/host/renderer
 clang -c -O2 -fobjc-arc -Wall -Wno-unused-function ${EDITION_FLAGS[@]+"${EDITION_FLAGS[@]}"} -o "$OUT/obj/host/launcher.o" "$LAUNCHER"
 clang -c -O2 -fobjc-arc -Wall -Wno-unused-function -o "$OUT/obj/host/test_lab.o" "$HERE/host/test_lab.m"
 clang -o "$APP/$NAME" "$OUT"/obj/*.o "$OUT"/obj/rt/*.o "$OUT"/obj/rt/mojo/*.o "$OUT"/obj/host/*.o \
-  -framework AppKit -framework Metal -framework QuartzCore -framework CoreText -framework CoreGraphics -framework CoreFoundation -framework AudioToolbox -lz
+  -framework AppKit -framework Metal -framework QuartzCore -framework GameController -framework CoreText -framework CoreGraphics -framework CoreFoundation -framework AudioToolbox -lz
 cp "$ROOT/src/renderer/shaders.metal" "$ROOT/src/dsr/dsr_snapshot.bin" "$APP/"
 echo "$APP/$NAME"

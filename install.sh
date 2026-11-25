@@ -63,7 +63,7 @@ echo "== recompiling $EXE (about fifteen minutes the first time)"
 "$HERE/recomp/build_sims2.sh" "$GAME"
 "$HERE/recomp/tools/build_app.sh" "$HERE/recomp/work/sims2" >/dev/null
 echo "== the launch window's art, from the game's Steam store page"
-python3 "$HERE/recomp/tools/sims2_art.py" "$DATA/art" || echo "   (no art: the launch window writes the title)"
+python3 "$HERE/recomp/tools/sims2_art.py" "$DATA/art" "$GAME" || echo "   (no art: the launch window writes the title)"
 
 A="$APPS/$APP_NAME.app"; echo "== installing $A"
 mkdir -p "$APPS"; rm -rf "$A"; mkdir -p "$A/Contents/MacOS" "$A/Contents/Resources"

@@ -36,7 +36,7 @@
     "-DRT_TSO",
     "-DRT_HOST_RC_INIT=UINT32_MAX"
   ],
-  "art": ["sims2_art.py", "{art}"],
+  "art": ["sims2_art.py", "{art}", "{game}"],
   "log": "Sims2Native",
   "local_network": "The Sims 2 doesn't use your local network.",
   "build": "./build_sims2.sh \"$GAME\" && ./tools/build_app.sh \"$PWD/work/sims2\"",
@@ -54,6 +54,7 @@
     "AppKit",
     "Metal",
     "QuartzCore",
+    "GameController",
     "CoreText",
     "CoreGraphics",
     "CoreFoundation",
